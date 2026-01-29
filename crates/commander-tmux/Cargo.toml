@@ -1,0 +1,15 @@
+[package]
+name = "commander-tmux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Tmux orchestration for Commander"
+
+[dependencies]
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
