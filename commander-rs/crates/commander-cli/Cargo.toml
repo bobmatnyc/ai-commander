@@ -1,0 +1,26 @@
+[package]
+name = "commander-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI and REPL for Commander"
+
+[[bin]]
+name = "commander"
+path = "src/main.rs"
+
+[dependencies]
+commander-models = { path = "../commander-models" }
+commander-persistence = { path = "../commander-persistence" }
+commander-adapters = { path = "../commander-adapters" }
+clap = { workspace = true }
+rustyline = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
