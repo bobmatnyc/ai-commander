@@ -1,0 +1,28 @@
+[package]
+name = "commander-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+commander-models = { path = "../commander-models" }
+commander-persistence = { path = "../commander-persistence" }
+commander-adapters = { path = "../commander-adapters" }
+commander-events = { path = "../commander-events" }
+commander-work = { path = "../commander-work" }
+commander-runtime = { path = "../commander-runtime" }
+
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum-test = "16"
+tempfile.workspace = true
