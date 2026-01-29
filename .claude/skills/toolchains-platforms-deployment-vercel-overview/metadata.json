@@ -1,0 +1,31 @@
+{
+  "name": "vercel-overview",
+  "version": "1.0.0",
+  "category": "toolchain",
+  "toolchain": null,
+  "tags": [
+    "vercel",
+    "overview",
+    "projects",
+    "cli",
+    "git",
+    "environment-variables",
+    "api",
+    "webhooks"
+  ],
+  "entry_point_tokens": 100,
+  "full_tokens": 831,
+  "related_skills": [
+    "vercel-deployments-builds",
+    "vercel-functions-runtime",
+    "vercel-storage-data",
+    "vercel-networking-domains",
+    "vercel-observability",
+    "vercel-security-access",
+    "vercel-teams-billing",
+    "vercel-ai"
+  ],
+  "author": "Claude MPM",
+  "license": "MIT",
+  "platform": "deployment"
+}

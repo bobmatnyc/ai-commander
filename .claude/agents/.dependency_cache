@@ -1,0 +1,18 @@
+{
+  "057c6003d0f7a64748b6301e55ef4bc0": {
+    "timestamp": 1769708312.546117,
+    "results": {
+      "agents": {},
+      "summary": {
+        "total_agents": 8,
+        "agents_with_deps": 0,
+        "missing_python": [],
+        "missing_system": [],
+        "satisfied_python": [],
+        "satisfied_system": []
+      }
+    },
+    "deployment_hash": "1fdcf6fac7383d29ab90c62fc1c4fc02ad5f59b2fdc2093ba2a38d14a14e5a92",
+    "context": {}
+  }
+}
