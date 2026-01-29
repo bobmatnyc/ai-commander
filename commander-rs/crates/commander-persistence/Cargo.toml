@@ -1,0 +1,17 @@
+[package]
+name = "commander-persistence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistence layer for Commander with atomic file operations"
+
+[dependencies]
+commander-models = { path = "../commander-models" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
