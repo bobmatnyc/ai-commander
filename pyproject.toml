@@ -57,6 +57,7 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
     "pre-commit>=3.7.0",
+    "requests>=2.31.0",
 ]
 
 [project.scripts]
@@ -114,6 +115,9 @@ disallow_untyped_defs = false
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-v --cov=commander --cov-report=term-missing"
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+]
 
 [tool.coverage.run]
 source = ["src/commander"]
