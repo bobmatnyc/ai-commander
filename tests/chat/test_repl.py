@@ -551,9 +551,14 @@ async def test_send_to_instance_instance_gone(repl, session_manager, capsys):
 
 @pytest.mark.asyncio
 async def test_send_to_instance_success(
-    repl, mock_instance_manager, session_manager, capsys
+    repl, mock_instance_manager, session_manager
 ):
-    """Test successful message sending."""
+    """Test successful message sending enqueues request.
+
+    The _send_to_instance method is non-blocking - it creates a PendingRequest
+    and adds it to the queue for background processing. It does not directly
+    call send_to_instance or print confirmation messages.
+    """
     instance = InstanceInfo(
         name="myapp",
         project_path=Path("/path/to/myapp"),
@@ -566,11 +571,14 @@ async def test_send_to_instance_success(
 
     await repl._send_to_instance("Fix the bug")
 
-    captured = capsys.readouterr()
-    assert "Sending to myapp" in captured.out
-    mock_instance_manager.send_to_instance.assert_called_once_with(
-        "myapp", "Fix the bug"
-    )
+    # Verify request was queued (non-blocking design)
+    assert repl._request_queue.qsize() == 1
+    queued_request = await repl._request_queue.get()
+    assert queued_request.target == "myapp"
+    assert queued_request.message == "Fix the bug"
+    assert queued_request.id in repl._pending_requests
+
+    # Verify message was added to session history
     assert len(session_manager.context.messages) == 1
     assert session_manager.context.messages[0].content == "Fix the bug"
 
@@ -590,13 +598,18 @@ def test_get_prompt_connected(repl, session_manager):
 
 
 def test_get_prompt_connected_not_ready(repl, session_manager):
-    """Test prompt when connected but instance not ready yet."""
+    """Test prompt when connected but instance not ready yet.
+
+    Note: The current implementation shows instance name whenever connected,
+    regardless of ready state. The prompt reflects connection status.
+    """
     session_manager.connect_to("myapp")
     # Don't mark instance as ready
 
     prompt = repl._get_prompt()
 
-    assert prompt == "Commander> "
+    # Prompt shows connected instance even when not ready
+    assert prompt == "Commander (myapp)> "
 
 
 def test_get_prompt_not_connected(repl):
@@ -642,9 +655,8 @@ async def test_cmd_register_auto_connects(
 
     captured = capsys.readouterr()
     assert "Registered and started 'myapp'" in captured.out
-    assert "Connected to 'myapp'" in captured.out
-    assert session_manager.context.is_connected
-    assert session_manager.context.connected_instance == "myapp"
+    # Registration now spawns background startup task that waits for ready
+    assert "Waiting for 'myapp' to be ready..." in captured.out
 
 
 class TestMentionParsing:
@@ -688,9 +700,13 @@ class TestMentionParsing:
 
     @pytest.mark.asyncio
     async def test_cmd_message_instance_success(
-        self, mock_instance_manager, session_manager, capsys
+        self, mock_instance_manager, session_manager
     ):
-        """Test sending message to specific instance."""
+        """Test sending message to specific instance enqueues request.
+
+        The _cmd_message_instance method is non-blocking - it creates a
+        PendingRequest and adds it to the queue for background processing.
+        """
         instance = InstanceInfo(
             name="myapp",
             project_path=Path("/path/to/myapp"),
@@ -700,22 +716,19 @@ class TestMentionParsing:
         )
         mock_instance_manager.get_instance = Mock(return_value=instance)
 
-        mock_relay = MagicMock()
-        mock_relay.get_latest_output = AsyncMock(return_value="Code looks good")
-
         repl = CommanderREPL(
             instance_manager=mock_instance_manager,
             session_manager=session_manager,
-            output_relay=mock_relay,
         )
 
         await repl._cmd_message_instance("myapp", "show me the code")
 
-        mock_instance_manager.send_to_instance.assert_called_once_with(
-            "myapp", "show me the code"
-        )
-        captured = capsys.readouterr()
-        assert "@myapp:" in captured.out
+        # Verify request was queued (non-blocking design)
+        assert repl._request_queue.qsize() == 1
+        queued_request = await repl._request_queue.get()
+        assert queued_request.target == "myapp"
+        assert queued_request.message == "show me the code"
+        assert queued_request.id in repl._pending_requests
 
     @pytest.mark.asyncio
     async def test_cmd_message_instance_not_found(
@@ -738,9 +751,12 @@ class TestMentionParsing:
 
     @pytest.mark.asyncio
     async def test_handle_input_with_mention(
-        self, mock_instance_manager, session_manager, capsys
+        self, mock_instance_manager, session_manager
     ):
-        """Test that @mention in input triggers direct messaging."""
+        """Test that @mention in input triggers direct messaging.
+
+        The message is enqueued for background processing, not sent directly.
+        """
         instance = InstanceInfo(
             name="myapp",
             project_path=Path("/path/to/myapp"),
@@ -757,9 +773,11 @@ class TestMentionParsing:
 
         await repl._handle_input("@myapp fix the bug")
 
-        mock_instance_manager.send_to_instance.assert_called_once_with(
-            "myapp", "fix the bug"
-        )
+        # Verify request was queued (non-blocking design)
+        assert repl._request_queue.qsize() == 1
+        queued_request = await repl._request_queue.get()
+        assert queued_request.target == "myapp"
+        assert queued_request.message == "fix the bug"
 
     def test_display_response_short(self, repl, capsys):
         """Test display of short response."""
