@@ -1,0 +1,18 @@
+[package]
+name = "commander-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Thread-safe event management with pub/sub for Commander"
+
+[dependencies]
+commander-models = { path = "../commander-models" }
+commander-persistence = { path = "../commander-persistence" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
