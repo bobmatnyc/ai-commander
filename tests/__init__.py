@@ -1,1 +1,1 @@
-"""Commander test suite."""
+"""Tests for commander module."""
