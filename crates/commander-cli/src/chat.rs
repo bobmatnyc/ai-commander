@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4-20250514";
+const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
 
 /// A message in the chat conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
