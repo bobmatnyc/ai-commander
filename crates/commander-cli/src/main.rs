@@ -8,6 +8,9 @@ use commander_cli::commands;
 use commander_cli::repl::Repl;
 
 fn main() {
+    // Load .env.local if it exists (for OPENROUTER_API_KEY etc.)
+    let _ = dotenvy::from_filename(".env.local");
+
     let cli = Cli::parse();
 
     // Initialize tracing
