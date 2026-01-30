@@ -119,8 +119,8 @@ fn cmd_list(store: &StateStore, running_only: bool, format: OutputFormat) -> Res
             }
 
             println!(
-                "{:<36}  {:<20}  {:<10}  {}",
-                "ID", "NAME", "STATE", "PATH"
+                "{:<36}  {:<20}  {:<10}  PATH",
+                "ID", "NAME", "STATE"
             );
             println!("{}", "-".repeat(80));
             for project in &filtered {
