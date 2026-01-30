@@ -87,6 +87,31 @@ impl AdapterRegistry {
     pub fn default_adapter(&self) -> Option<Arc<dyn RuntimeAdapter>> {
         self.get("claude-code")
     }
+
+    /// Resolves a tool alias to its canonical adapter ID.
+    ///
+    /// Supports the following aliases:
+    /// - `cc` -> `claude-code`
+    /// - `mpm` -> `mpm` (already canonical)
+    /// - `claude-code` -> `claude-code` (already canonical)
+    ///
+    /// Returns `None` if the alias is unknown.
+    pub fn resolve(&self, alias: &str) -> Option<&'static str> {
+        match alias {
+            "cc" | "claude-code" => Some("claude-code"),
+            "mpm" => Some("mpm"),
+            _ => {
+                // Check if it's a registered adapter ID
+                if self.adapters.contains_key(alias) {
+                    // For dynamic adapters, we return the static mapping if known
+                    // Since we can't return a reference to the input, we just use known IDs
+                    None
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 impl Default for AdapterRegistry {
@@ -154,5 +179,18 @@ mod tests {
 
         let name = handle.join().unwrap();
         assert_eq!(name, "Claude Code");
+    }
+
+    #[test]
+    fn test_resolve_aliases() {
+        let registry = AdapterRegistry::new();
+
+        // Test known aliases
+        assert_eq!(registry.resolve("cc"), Some("claude-code"));
+        assert_eq!(registry.resolve("claude-code"), Some("claude-code"));
+        assert_eq!(registry.resolve("mpm"), Some("mpm"));
+
+        // Test unknown alias
+        assert_eq!(registry.resolve("unknown"), None);
     }
 }
