@@ -42,6 +42,18 @@ pub struct CommandHelp {
 /// Static help entries for all commands.
 static COMMAND_HELP: &[CommandHelp] = &[
     CommandHelp {
+        name: "start",
+        aliases: &[],
+        brief: "Start a new project and connect to it",
+        description: "Creates a new project with the specified adapter and connects to it immediately.\n\n\
+                      Adapter aliases: cc = claude-code, mpm = mpm",
+        usage: "/start <path> -a <adapter> -n <name>",
+        examples: &[
+            ("/start ~/code/myapp -a cc -n myapp", "Start project with claude-code"),
+            ("/start ~/code/api -a mpm -n api-server", "Start project with mpm adapter"),
+        ],
+    },
+    CommandHelp {
         name: "list",
         aliases: &["ls", "l"],
         brief: "List all projects",
@@ -126,6 +138,8 @@ static COMMAND_HELP: &[CommandHelp] = &[
 /// Slash commands available in the REPL.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplCommand {
+    /// Start a new project and connect to it
+    Start(ConnectArgs),
     /// List all projects
     List,
     /// Show status of current or specified project
@@ -164,6 +178,7 @@ impl ReplCommand {
             let arg = parts.get(1).map(|s| s.trim().to_string());
 
             match cmd.as_str() {
+                "start" => Self::parse_start(arg),
                 "list" | "ls" | "l" => ReplCommand::List,
                 "status" | "s" => ReplCommand::Status(arg),
                 "connect" | "c" => Self::parse_connect(arg),
@@ -186,6 +201,55 @@ impl ReplCommand {
             }
         } else {
             ReplCommand::Text(input.to_string())
+        }
+    }
+
+    /// Parse start command arguments: /start <path> -a <adapter> -n <name>
+    fn parse_start(arg: Option<String>) -> Self {
+        let Some(arg) = arg else {
+            return ReplCommand::Unknown("start requires: /start <path> -a <adapter> -n <name>".to_string());
+        };
+
+        let parts: Vec<&str> = arg.split_whitespace().collect();
+        if parts.len() < 5 {
+            return ReplCommand::Unknown("start requires: /start <path> -a <adapter> -n <name>".to_string());
+        }
+
+        let path = PathBuf::from(shellexpand::tilde(parts[0]).to_string());
+        let mut adapter = None;
+        let mut name = None;
+
+        let mut i = 1;
+        while i < parts.len() {
+            match parts[i] {
+                "-a" => {
+                    if i + 1 < parts.len() {
+                        adapter = Some(parts[i + 1].to_string());
+                        i += 2;
+                    } else {
+                        return ReplCommand::Unknown("-a requires an adapter name".to_string());
+                    }
+                }
+                "-n" => {
+                    if i + 1 < parts.len() {
+                        name = Some(parts[i + 1].to_string());
+                        i += 2;
+                    } else {
+                        return ReplCommand::Unknown("-n requires a project name".to_string());
+                    }
+                }
+                _ => {
+                    return ReplCommand::Unknown(format!("unknown flag: {}", parts[i]));
+                }
+            }
+        }
+
+        match (adapter, name) {
+            (Some(tool), Some(alias)) => {
+                ReplCommand::Start(ConnectArgs { path, tool, alias })
+            }
+            (None, _) => ReplCommand::Unknown("start requires -a <adapter>".to_string()),
+            (_, None) => ReplCommand::Unknown("start requires -n <name>".to_string()),
         }
     }
 
@@ -306,7 +370,7 @@ impl Repl {
     /// Returns the prompt string.
     fn prompt(&self) -> String {
         match &self.connected_project {
-            Some(project) => format!("commander ({})> ", project),
+            Some(project) => format!("commander [{}]> ", project),
             None => "commander> ".to_string(),
         }
     }
@@ -314,6 +378,53 @@ impl Repl {
     /// Handles a REPL command. Returns Ok(true) if should quit.
     fn handle_command(&mut self, cmd: ReplCommand) -> Result<bool, Box<dyn std::error::Error>> {
         match cmd {
+            ReplCommand::Start(args) => {
+                // Resolve tool alias
+                let tool_id = match self.registry.resolve(&args.tool) {
+                    Some(id) => id.to_string(),
+                    None => {
+                        println!("Unknown adapter: {}. Available: cc (claude-code), mpm", args.tool);
+                        return Ok(false);
+                    }
+                };
+
+                // Expand and validate path
+                let path = if args.path.starts_with("~") {
+                    dirs::home_dir()
+                        .map(|h| h.join(args.path.strip_prefix("~").unwrap_or(&args.path)))
+                        .unwrap_or(args.path.clone())
+                } else {
+                    args.path.clone()
+                };
+
+                let path_str = path.to_string_lossy().to_string();
+
+                // Check if project with this alias already exists
+                let projects = self.store.load_all_projects()?;
+                if projects.values().any(|p| p.name == args.alias) {
+                    println!("Project '{}' already exists. Use '/connect {}' to connect.", args.alias, args.alias);
+                    return Ok(false);
+                }
+
+                // Create new project
+                let mut project = Project::new(&path_str, &args.alias);
+                project.config.insert("tool".to_string(), serde_json::json!(tool_id));
+
+                // Save project
+                self.store.save_project(&project)?;
+
+                info!(
+                    project = %args.alias,
+                    path = %path_str,
+                    tool = %tool_id,
+                    "Started and connected to project"
+                );
+
+                self.connected_project = Some(args.alias.clone());
+                println!("Started and connected to '{}'", args.alias);
+                Ok(false)
+            }
+
             ReplCommand::List => {
                 let projects = self.store.load_all_projects()?;
                 if projects.is_empty() {
@@ -588,6 +699,48 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_start() {
+        let cmd = ReplCommand::parse("/start ~/code/myapp -a cc -n myapp");
+        match cmd {
+            ReplCommand::Start(args) => {
+                assert!(args.path.to_string_lossy().contains("code/myapp"));
+                assert_eq!(args.tool, "cc");
+                assert_eq!(args.alias, "myapp");
+            }
+            _ => panic!("Expected Start, got {:?}", cmd),
+        }
+    }
+
+    #[test]
+    fn test_parse_start_mpm() {
+        let cmd = ReplCommand::parse("/start /tmp/api -a mpm -n api-server");
+        match cmd {
+            ReplCommand::Start(args) => {
+                assert_eq!(args.path, PathBuf::from("/tmp/api"));
+                assert_eq!(args.tool, "mpm");
+                assert_eq!(args.alias, "api-server");
+            }
+            _ => panic!("Expected Start, got {:?}", cmd),
+        }
+    }
+
+    #[test]
+    fn test_parse_start_missing_args() {
+        assert!(matches!(
+            ReplCommand::parse("/start ~/code/myapp"),
+            ReplCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            ReplCommand::parse("/start ~/code/myapp -a cc"),
+            ReplCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            ReplCommand::parse("/start ~/code/myapp -n myapp"),
+            ReplCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
     fn test_parse_connect_new() {
         let cmd = ReplCommand::parse("/connect ~/code/myapp cc myapp");
         match cmd {
@@ -654,6 +807,7 @@ mod tests {
 
     #[test]
     fn test_find_command_help() {
+        assert!(find_command_help("start").is_some());
         assert!(find_command_help("connect").is_some());
         assert!(find_command_help("c").is_some());  // alias
         assert!(find_command_help("CONNECT").is_some());  // case insensitive
