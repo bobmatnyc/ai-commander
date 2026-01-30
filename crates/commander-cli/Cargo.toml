@@ -26,5 +26,8 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 shellexpand = { workspace = true }
 
+[build-dependencies]
+chrono = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }

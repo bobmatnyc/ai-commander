@@ -3,10 +3,22 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Build version string with git hash and build date.
+fn version_string() -> &'static str {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    const GIT_HASH: &str = env!("GIT_HASH");
+    const BUILD_DATE: &str = env!("BUILD_DATE");
+
+    // Use a static string that combines all version info
+    // Format: "0.1.0 (abc1234, 2026-01-29)"
+    static VERSION_STRING: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION_STRING.get_or_init(|| format!("{} ({}, {})", VERSION, GIT_HASH, BUILD_DATE))
+}
+
 /// Commander - Multi-project AI orchestration system
 #[derive(Parser, Debug)]
 #[command(name = "commander")]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = version_string(), about, long_about = None)]
 pub struct Cli {
     /// Enable verbose output (-v, -vv, -vvv)
     #[arg(short, long, action = clap::ArgAction::Count)]
