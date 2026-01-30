@@ -1,11 +1,13 @@
 //! Interactive REPL (Read-Eval-Print Loop) for Commander.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use commander_adapters::AdapterRegistry;
 use commander_models::Project;
 use commander_persistence::StateStore;
+use commander_tmux::TmuxOrchestrator;
 use rustyline::error::ReadlineError;
 use rustyline::{DefaultEditor, Result as RlResult};
 use tracing::{debug, info};
@@ -287,6 +289,10 @@ pub struct Repl {
     history_path: Option<std::path::PathBuf>,
     chat_client: ChatClient,
     runtime: tokio::runtime::Runtime,
+    /// Tmux orchestrator for sending messages to project sessions.
+    tmux: Option<TmuxOrchestrator>,
+    /// Map of project name/alias to tmux session name.
+    sessions: HashMap<String, String>,
 }
 
 impl Repl {
@@ -307,6 +313,18 @@ impl Repl {
             let _ = editor.load_history(&history_path);
         }
 
+        // Initialize tmux orchestrator (gracefully handle if unavailable)
+        let tmux = match TmuxOrchestrator::new() {
+            Ok(t) => {
+                debug!("tmux orchestrator initialized");
+                Some(t)
+            }
+            Err(e) => {
+                debug!("tmux not available: {}", e);
+                None
+            }
+        };
+
         Ok(Self {
             editor,
             store,
@@ -315,6 +333,8 @@ impl Repl {
             history_path: Some(history_path),
             chat_client,
             runtime,
+            tmux,
+            sessions: HashMap::new(),
         })
     }
 
@@ -412,6 +432,39 @@ impl Repl {
 
                 // Save project
                 self.store.save_project(&project)?;
+
+                // Create tmux session and launch adapter
+                let session_name = format!("commander-{}", args.alias);
+                if let Some(tmux) = &self.tmux {
+                    // Get adapter and its launch command
+                    if let Some(adapter) = self.registry.get(&tool_id) {
+                        let (cmd, cmd_args) = adapter.launch_command(&path_str);
+                        let full_cmd = if cmd_args.is_empty() {
+                            cmd
+                        } else {
+                            format!("{} {}", cmd, cmd_args.join(" "))
+                        };
+
+                        // Create tmux session
+                        match tmux.create_session(&session_name) {
+                            Ok(_) => {
+                                // Send command to start the AI tool
+                                if let Err(e) = tmux.send_line(&session_name, None, &full_cmd) {
+                                    println!("Warning: Failed to launch adapter: {}", e);
+                                } else {
+                                    // Track the session
+                                    self.sessions.insert(args.alias.clone(), session_name.clone());
+                                    debug!(session = %session_name, "tmux session created");
+                                }
+                            }
+                            Err(e) => {
+                                println!("Warning: Failed to create tmux session: {}", e);
+                            }
+                        }
+                    }
+                } else {
+                    println!("Note: Tmux not available. Project created but not started in tmux.");
+                }
 
                 info!(
                     project = %args.alias,
@@ -545,8 +598,22 @@ impl Repl {
             ReplCommand::Send(message) => {
                 match &self.connected_project {
                     Some(project) => {
-                        println!("[{}] {}", project, message);
-                        println!("(Message sending will be implemented in Phase 7)");
+                        if let Some(tmux) = &self.tmux {
+                            if let Some(session) = self.sessions.get(project) {
+                                match tmux.send_line(session, None, &message) {
+                                    Ok(_) => {
+                                        println!("[{}] > {}", project, message);
+                                    }
+                                    Err(e) => {
+                                        println!("Failed to send message: {}", e);
+                                    }
+                                }
+                            } else {
+                                println!("Project '{}' not running. Use /start first.", project);
+                            }
+                        } else {
+                            println!("Tmux not available. Cannot send messages to projects.");
+                        }
                     }
                     None => {
                         println!("Not connected to any project. Use /connect <project> first.");
