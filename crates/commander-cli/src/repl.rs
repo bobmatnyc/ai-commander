@@ -197,8 +197,62 @@ impl ReplCommand {
                 ReplCommand::Text(input.to_string())
             }
         } else {
-            ReplCommand::Text(input.to_string())
+            // Check for conversational commands
+            Self::parse_conversational(input)
         }
+    }
+
+    /// Parse conversational commands (natural language alternatives to slash commands).
+    fn parse_conversational(input: &str) -> Self {
+        let lower = input.to_lowercase();
+
+        // Connect patterns: "connect to X", "connect X"
+        if let Some(target) = lower.strip_prefix("connect to ") {
+            let target = target.trim();
+            if !target.is_empty() {
+                return Self::parse_connect(Some(target.to_string()));
+            }
+        }
+        if let Some(target) = lower.strip_prefix("connect ") {
+            let target = target.trim();
+            if !target.is_empty() {
+                return Self::parse_connect(Some(target.to_string()));
+            }
+        }
+
+        // List patterns
+        if lower == "list" || lower == "list projects" || lower == "show projects" {
+            return ReplCommand::List;
+        }
+
+        // Status patterns: "status", "show status", "status of X"
+        if lower == "status" || lower == "show status" {
+            return ReplCommand::Status(None);
+        }
+        if let Some(project) = lower.strip_prefix("status of ") {
+            let project = project.trim();
+            if !project.is_empty() {
+                return ReplCommand::Status(Some(project.to_string()));
+            }
+        }
+
+        // Disconnect patterns
+        if lower == "disconnect" || lower == "disconnect from project" {
+            return ReplCommand::Disconnect;
+        }
+
+        // Help patterns
+        if lower == "help" || lower == "show help" || lower == "?" {
+            return ReplCommand::Help(None);
+        }
+
+        // Quit patterns
+        if lower == "quit" || lower == "exit" || lower == "bye" {
+            return ReplCommand::Quit;
+        }
+
+        // Default: treat as text
+        ReplCommand::Text(input.to_string())
     }
 
     /// Parse connect command arguments.
@@ -782,24 +836,45 @@ fn print_help(topic: Option<&str>) {
             }
         }
         None => {
-            // Show overview of all commands
-            println!("Commander REPL Commands:");
+            // Show comprehensive help with both slash and conversational forms
+            println!("Commander REPL - AI Project Orchestrator");
             println!();
-            for help in COMMAND_HELP {
-                let aliases = if help.aliases.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", help.aliases.join(", "))
-                };
-                println!("  /{}{:<12} {}", help.name, aliases, help.brief);
-            }
+            println!("COMMANDS:");
+            println!();
+            println!("  Connection:");
+            println!("    /connect <path> -a <adapter> -n <name>   Start new project");
+            println!("    /connect <name>                          Connect to existing project");
+            println!("    /disconnect                              Disconnect from current project");
+            println!("    connect to <name>                        (conversational)");
+            println!("    connect <name>                           (conversational)");
+            println!("    disconnect                               (conversational)");
+            println!();
+            println!("  Project Management:");
+            println!("    /list                                    List all projects");
+            println!("    /status [project]                        Show project status");
+            println!("    list, list projects, show projects       (conversational)");
+            println!("    status, show status, status of <name>    (conversational)");
+            println!();
+            println!("  Communication:");
+            println!("    <message>                                Send message to connected project");
+            println!("    [disconnected] <message>                 Chat with AI (OpenRouter)");
+            println!();
+            println!("  Other:");
+            println!("    /help [command], help, ?                 Show this help");
+            println!("    /quit, quit, exit, bye                   Exit REPL");
+            println!();
+            println!("ADAPTERS:");
+            println!("    cc, claude-code                          Claude Code CLI");
+            println!("    mpm                                      Claude MPM");
+            println!();
+            println!("EXAMPLES:");
+            println!("    /connect ~/code/myapp -a cc -n myapp");
+            println!("    connect to myapp");
+            println!("    list projects");
+            println!("    how many files are in src/?");
+            println!("    disconnect");
             println!();
             println!("Type /help <command> for detailed help on a specific command.");
-            println!();
-            println!("When connected, type messages directly to send to the project.");
-            if std::env::var("OPENROUTER_API_KEY").is_ok() {
-                println!("When disconnected, messages are sent to chat (OpenRouter).");
-            }
         }
     }
 }
@@ -930,5 +1005,90 @@ mod tests {
             alias: "test".to_string(),
         };
         assert_eq!(args1, args2);
+    }
+
+    // Conversational command tests
+
+    #[test]
+    fn test_conversational_connect_to() {
+        assert_eq!(
+            ReplCommand::parse("connect to duetto"),
+            ReplCommand::Connect(ConnectTarget::Existing("duetto".to_string()))
+        );
+        assert_eq!(
+            ReplCommand::parse("Connect To MyProject"),
+            ReplCommand::Connect(ConnectTarget::Existing("myproject".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_conversational_connect() {
+        assert_eq!(
+            ReplCommand::parse("connect duetto"),
+            ReplCommand::Connect(ConnectTarget::Existing("duetto".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_conversational_list() {
+        assert_eq!(ReplCommand::parse("list"), ReplCommand::List);
+        assert_eq!(ReplCommand::parse("list projects"), ReplCommand::List);
+        assert_eq!(ReplCommand::parse("show projects"), ReplCommand::List);
+        assert_eq!(ReplCommand::parse("List Projects"), ReplCommand::List);
+    }
+
+    #[test]
+    fn test_conversational_status() {
+        assert_eq!(ReplCommand::parse("status"), ReplCommand::Status(None));
+        assert_eq!(ReplCommand::parse("show status"), ReplCommand::Status(None));
+        assert_eq!(
+            ReplCommand::parse("status of myapp"),
+            ReplCommand::Status(Some("myapp".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_conversational_disconnect() {
+        assert_eq!(ReplCommand::parse("disconnect"), ReplCommand::Disconnect);
+        assert_eq!(
+            ReplCommand::parse("disconnect from project"),
+            ReplCommand::Disconnect
+        );
+    }
+
+    #[test]
+    fn test_conversational_help() {
+        assert_eq!(ReplCommand::parse("help"), ReplCommand::Help(None));
+        assert_eq!(ReplCommand::parse("show help"), ReplCommand::Help(None));
+        assert_eq!(ReplCommand::parse("?"), ReplCommand::Help(None));
+    }
+
+    #[test]
+    fn test_conversational_quit() {
+        assert_eq!(ReplCommand::parse("quit"), ReplCommand::Quit);
+        assert_eq!(ReplCommand::parse("exit"), ReplCommand::Quit);
+        assert_eq!(ReplCommand::parse("bye"), ReplCommand::Quit);
+    }
+
+    #[test]
+    fn test_conversational_case_insensitive() {
+        assert_eq!(ReplCommand::parse("LIST"), ReplCommand::List);
+        assert_eq!(ReplCommand::parse("DISCONNECT"), ReplCommand::Disconnect);
+        assert_eq!(ReplCommand::parse("Help"), ReplCommand::Help(None));
+        assert_eq!(ReplCommand::parse("QUIT"), ReplCommand::Quit);
+    }
+
+    #[test]
+    fn test_conversational_not_matching_partial() {
+        // "listing" should not match "list"
+        assert_eq!(
+            ReplCommand::parse("listing"),
+            ReplCommand::Text("listing".to_string())
+        );
+        // "helper" should not match "help"
+        assert_eq!(
+            ReplCommand::parse("helper"),
+            ReplCommand::Text("helper".to_string())
+        );
     }
 }
