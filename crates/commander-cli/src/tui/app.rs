@@ -1,0 +1,474 @@
+//! TUI application state and logic.
+
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
+use commander_adapters::AdapterRegistry;
+use commander_persistence::StateStore;
+use commander_tmux::TmuxOrchestrator;
+
+/// Direction of a message in the output area.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageDirection {
+    /// User input sent to project
+    Sent,
+    /// Response received from AI
+    Received,
+    /// System/status messages
+    System,
+}
+
+/// A message displayed in the output area.
+#[derive(Debug, Clone)]
+pub struct Message {
+    /// When the message was created
+    pub timestamp: DateTime<Utc>,
+    /// Direction (sent, received, system)
+    pub direction: MessageDirection,
+    /// Project name (or "system" for system messages)
+    pub project: String,
+    /// Message content
+    pub content: String,
+}
+
+impl Message {
+    /// Create a new message.
+    pub fn new(direction: MessageDirection, project: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            direction,
+            project: project.into(),
+            content: content.into(),
+        }
+    }
+
+    /// Create a system message.
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new(MessageDirection::System, "system", content)
+    }
+
+    /// Create a sent message.
+    pub fn sent(project: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new(MessageDirection::Sent, project, content)
+    }
+
+    /// Create a received message.
+    pub fn received(project: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new(MessageDirection::Received, project, content)
+    }
+}
+
+/// Input mode for the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    /// Normal mode - typing input
+    #[default]
+    Normal,
+    /// Scrolling through output
+    Scrolling,
+}
+
+/// TUI application state.
+pub struct App {
+    // Connection state
+    /// Currently connected project name
+    pub project: Option<String>,
+    /// Tmux orchestrator for session management
+    pub tmux: Option<TmuxOrchestrator>,
+    /// Adapter registry
+    pub registry: AdapterRegistry,
+    /// State store for projects
+    pub store: StateStore,
+    /// Map of project name to tmux session name
+    pub sessions: HashMap<String, String>,
+
+    // UI State
+    /// Current input text
+    pub input: String,
+    /// Cursor position in input
+    pub cursor_pos: usize,
+    /// Messages in the output area
+    pub messages: Vec<Message>,
+    /// Scroll offset for output area (0 = bottom)
+    pub scroll_offset: usize,
+    /// Whether AI is currently working
+    pub is_working: bool,
+    /// Progress indicator (0.0 - 1.0)
+    pub progress: f64,
+    /// Current input mode
+    pub input_mode: InputMode,
+
+    // Runtime
+    /// Whether the app should quit
+    pub should_quit: bool,
+    /// Last captured output for comparison
+    pub last_output: String,
+}
+
+impl App {
+    /// Create a new App instance.
+    pub fn new(state_dir: &std::path::Path) -> Self {
+        let store = StateStore::new(state_dir);
+        let registry = AdapterRegistry::new();
+        let tmux = TmuxOrchestrator::new().ok();
+
+        let mut app = Self {
+            project: None,
+            tmux,
+            registry,
+            store,
+            sessions: HashMap::new(),
+
+            input: String::new(),
+            cursor_pos: 0,
+            messages: Vec::new(),
+            scroll_offset: 0,
+            is_working: false,
+            progress: 0.0,
+            input_mode: InputMode::Normal,
+
+            should_quit: false,
+            last_output: String::new(),
+        };
+
+        // Add welcome message
+        app.messages.push(Message::system("Welcome to Commander TUI"));
+        app.messages.push(Message::system("Type /help for commands, Ctrl+C to quit"));
+
+        if app.tmux.is_none() {
+            app.messages.push(Message::system("Warning: tmux not available"));
+        }
+
+        app
+    }
+
+    /// Connect to a project by name.
+    pub fn connect(&mut self, name: &str) -> Result<(), String> {
+        // Load all projects
+        let projects = self.store.load_all_projects()
+            .map_err(|e| format!("Failed to load projects: {}", e))?;
+
+        // Find project by name
+        let project = projects.values()
+            .find(|p| p.name == name || p.id.as_str() == name)
+            .ok_or_else(|| format!("Project not found: {}", name))?;
+
+        let session_name = format!("commander-{}", project.name);
+
+        // Check if tmux session exists
+        if let Some(ref tmux) = self.tmux {
+            if tmux.session_exists(&session_name) {
+                self.sessions.insert(project.name.clone(), session_name);
+                self.project = Some(project.name.clone());
+                self.messages.push(Message::system(format!("Connected to '{}'", project.name)));
+                return Ok(());
+            }
+
+            // Try to start the project
+            let tool_id = project.config.get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or("claude-code");
+
+            if let Some(adapter) = self.registry.get(tool_id) {
+                let (cmd, cmd_args) = adapter.launch_command(&project.path);
+                let full_cmd = if cmd_args.is_empty() {
+                    cmd
+                } else {
+                    format!("{} {}", cmd, cmd_args.join(" "))
+                };
+
+                // Create tmux session
+                if let Err(e) = tmux.create_session(&session_name) {
+                    return Err(format!("Failed to create tmux session: {}", e));
+                }
+
+                // Send launch command
+                if let Err(e) = tmux.send_line(&session_name, None, &full_cmd) {
+                    return Err(format!("Failed to start adapter: {}", e));
+                }
+
+                self.sessions.insert(project.name.clone(), session_name);
+                self.project = Some(project.name.clone());
+                self.messages.push(Message::system(format!("Started and connected to '{}'", project.name)));
+                return Ok(());
+            }
+        }
+
+        Err("Tmux not available".to_string())
+    }
+
+    /// Disconnect from current project.
+    pub fn disconnect(&mut self) {
+        if let Some(project) = self.project.take() {
+            self.messages.push(Message::system(format!("Disconnected from '{}'", project)));
+        }
+    }
+
+    /// Send a message to the connected project.
+    pub fn send_message(&mut self, message: &str) -> Result<(), String> {
+        let project = self.project.as_ref()
+            .ok_or_else(|| "Not connected to any project".to_string())?;
+
+        let session = self.sessions.get(project)
+            .ok_or_else(|| "Session not found".to_string())?;
+
+        let tmux = self.tmux.as_ref()
+            .ok_or_else(|| "Tmux not available".to_string())?;
+
+        // Capture initial output for comparison
+        self.last_output = tmux.capture_output(session, None, Some(200))
+            .unwrap_or_default();
+
+        // Send the message
+        tmux.send_line(session, None, message)
+            .map_err(|e| format!("Failed to send: {}", e))?;
+
+        // Add sent message to output
+        self.messages.push(Message::sent(project.clone(), message));
+        self.is_working = true;
+        self.progress = 0.0;
+        self.scroll_to_bottom();
+
+        Ok(())
+    }
+
+    /// Poll for new output from tmux.
+    pub fn poll_output(&mut self) {
+        if !self.is_working {
+            return;
+        }
+
+        let Some(project) = &self.project else { return };
+        let Some(session) = self.sessions.get(project) else { return };
+        let Some(tmux) = &self.tmux else { return };
+
+        // Capture current output
+        let current_output = match tmux.capture_output(session, None, Some(200)) {
+            Ok(output) => output,
+            Err(_) => return,
+        };
+
+        // Find new lines
+        if current_output != self.last_output {
+            let new_lines = find_new_lines(&self.last_output, &current_output);
+            for line in new_lines {
+                if !line.trim().is_empty() {
+                    self.messages.push(Message::received(project.clone(), line));
+                }
+            }
+            self.last_output = current_output;
+            self.scroll_to_bottom();
+        }
+
+        // Update progress animation
+        self.progress = (self.progress + 0.05) % 1.0;
+    }
+
+    /// Stop the working indicator.
+    pub fn stop_working(&mut self) {
+        self.is_working = false;
+        self.progress = 0.0;
+    }
+
+    /// Scroll to the bottom of the output.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    /// Scroll up by one line.
+    pub fn scroll_up(&mut self) {
+        if self.scroll_offset < self.messages.len().saturating_sub(1) {
+            self.scroll_offset += 1;
+        }
+    }
+
+    /// Scroll down by one line.
+    pub fn scroll_down(&mut self) {
+        if self.scroll_offset > 0 {
+            self.scroll_offset -= 1;
+        }
+    }
+
+    /// Scroll up by a page.
+    pub fn scroll_page_up(&mut self, page_size: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(page_size)
+            .min(self.messages.len().saturating_sub(1));
+    }
+
+    /// Scroll down by a page.
+    pub fn scroll_page_down(&mut self, page_size: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
+    }
+
+    /// Handle character input.
+    pub fn enter_char(&mut self, c: char) {
+        self.input.insert(self.cursor_pos, c);
+        self.cursor_pos += 1;
+    }
+
+    /// Delete character before cursor.
+    pub fn delete_char(&mut self) {
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+            self.input.remove(self.cursor_pos);
+        }
+    }
+
+    /// Move cursor left.
+    pub fn move_cursor_left(&mut self) {
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+        }
+    }
+
+    /// Move cursor right.
+    pub fn move_cursor_right(&mut self) {
+        if self.cursor_pos < self.input.len() {
+            self.cursor_pos += 1;
+        }
+    }
+
+    /// Clear the input.
+    pub fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor_pos = 0;
+    }
+
+    /// Submit the current input.
+    pub fn submit(&mut self) {
+        let input = std::mem::take(&mut self.input);
+        self.cursor_pos = 0;
+
+        if input.is_empty() {
+            return;
+        }
+
+        // Handle commands
+        if let Some(cmd) = input.strip_prefix('/') {
+            self.handle_command(cmd);
+        } else if self.project.is_some() {
+            // Send to connected project
+            if let Err(e) = self.send_message(&input) {
+                self.messages.push(Message::system(format!("Error: {}", e)));
+            }
+        } else {
+            self.messages.push(Message::system("Not connected. Use /connect <project>"));
+        }
+    }
+
+    /// Handle a slash command.
+    fn handle_command(&mut self, cmd: &str) {
+        let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+        let command = parts[0].to_lowercase();
+        let arg = parts.get(1).map(|s| s.trim());
+
+        match command.as_str() {
+            "help" | "h" | "?" => {
+                self.messages.push(Message::system("Commands:"));
+                self.messages.push(Message::system("  /connect <project>  - Connect to project"));
+                self.messages.push(Message::system("  /disconnect         - Disconnect from project"));
+                self.messages.push(Message::system("  /list               - List projects"));
+                self.messages.push(Message::system("  /clear              - Clear output"));
+                self.messages.push(Message::system("  /quit               - Exit TUI"));
+                self.messages.push(Message::system(""));
+                self.messages.push(Message::system("Keys: Up/Down scroll, Ctrl+C quit"));
+            }
+            "connect" | "c" => {
+                if let Some(project) = arg {
+                    if let Err(e) = self.connect(project) {
+                        self.messages.push(Message::system(format!("Error: {}", e)));
+                    }
+                } else {
+                    self.messages.push(Message::system("Usage: /connect <project>"));
+                }
+            }
+            "disconnect" | "dc" => {
+                self.disconnect();
+            }
+            "list" | "ls" | "l" => {
+                match self.store.load_all_projects() {
+                    Ok(projects) => {
+                        if projects.is_empty() {
+                            self.messages.push(Message::system("No projects found."));
+                        } else {
+                            self.messages.push(Message::system("Projects:"));
+                            for project in projects.values() {
+                                let marker = if Some(&project.name) == self.project.as_ref() {
+                                    "*"
+                                } else {
+                                    " "
+                                };
+                                self.messages.push(Message::system(format!(
+                                    "  {} {} ({:?})",
+                                    marker, project.name, project.state
+                                )));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.messages.push(Message::system(format!("Error: {}", e)));
+                    }
+                }
+            }
+            "clear" => {
+                self.messages.clear();
+                self.messages.push(Message::system("Output cleared"));
+            }
+            "quit" | "q" | "exit" => {
+                self.should_quit = true;
+            }
+            "stop" => {
+                self.stop_working();
+                self.messages.push(Message::system("Stopped polling"));
+            }
+            _ => {
+                self.messages.push(Message::system(format!("Unknown command: /{}", command)));
+            }
+        }
+        self.scroll_to_bottom();
+    }
+
+    /// List available projects.
+    pub fn list_projects(&self) -> Vec<String> {
+        self.store.load_all_projects()
+            .map(|p| p.values().map(|proj| proj.name.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Find new lines in tmux output by comparing previous and current captures.
+fn find_new_lines(prev: &str, current: &str) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let prev_lines: HashSet<&str> = prev.lines().collect();
+    let mut new_lines = Vec::new();
+
+    for line in current.lines() {
+        let trimmed = line.trim();
+        if !prev_lines.contains(line) && !prev_lines.contains(trimmed) && !trimmed.is_empty() {
+            new_lines.push(line.to_string());
+        }
+    }
+
+    new_lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_creation() {
+        let msg = Message::system("test");
+        assert_eq!(msg.direction, MessageDirection::System);
+        assert_eq!(msg.content, "test");
+    }
+
+    #[test]
+    fn test_find_new_lines() {
+        let prev = "line1\nline2\n";
+        let current = "line1\nline2\nline3\n";
+        let new = find_new_lines(prev, current);
+        assert_eq!(new, vec!["line3"]);
+    }
+}
