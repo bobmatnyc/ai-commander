@@ -248,6 +248,95 @@ impl App {
         }
     }
 
+    /// Stop a session: commit git changes and destroy tmux session.
+    pub fn stop_session(&mut self, name: &str) {
+        let session_name = format!("commander-{}", name);
+
+        // Find project path for git operations
+        let project_path = {
+            if let Ok(projects) = self.store.load_all_projects() {
+                projects.values()
+                    .find(|p| p.name == name)
+                    .map(|p| p.path.clone())
+            } else {
+                None
+            }
+        };
+
+        // Step 1: Commit any git changes
+        if let Some(path) = &project_path {
+            self.messages.push(Message::system(format!("Checking for uncommitted changes in {}...", path)));
+
+            match self.git_commit_changes(path, name) {
+                Ok(true) => self.messages.push(Message::system("Changes committed.")),
+                Ok(false) => self.messages.push(Message::system("No changes to commit.")),
+                Err(e) => self.messages.push(Message::system(format!("Git warning: {}", e))),
+            }
+        }
+
+        // Step 2: Destroy tmux session
+        if let Some(tmux) = &self.tmux {
+            match tmux.destroy_session(&session_name) {
+                Ok(_) => {
+                    self.messages.push(Message::system(format!("Session '{}' stopped.", name)));
+
+                    // Remove from tracking
+                    self.sessions.remove(name);
+
+                    // Disconnect if it was current
+                    if self.project.as_deref() == Some(name) {
+                        self.project = None;
+                        self.messages.push(Message::system("Disconnected."));
+                    }
+                }
+                Err(e) => {
+                    self.messages.push(Message::system(format!("Failed to stop session: {}", e)));
+                }
+            }
+        } else {
+            self.messages.push(Message::system("Tmux not available"));
+        }
+    }
+
+    /// Commit any uncommitted git changes in the project directory.
+    fn git_commit_changes(&self, path: &str, project_name: &str) -> Result<bool, String> {
+        use std::process::Command;
+
+        // Check if there are changes
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(path)
+            .output()
+            .map_err(|e| format!("Failed to run git status: {}", e))?;
+
+        let changes = String::from_utf8_lossy(&status.stdout);
+        if changes.trim().is_empty() {
+            return Ok(false); // No changes
+        }
+
+        // Stage all changes
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(path)
+            .output()
+            .map_err(|e| format!("Failed to stage changes: {}", e))?;
+
+        // Commit with message
+        let message = format!("WIP: Auto-commit from Commander session '{}'", project_name);
+        let commit = Command::new("git")
+            .args(["commit", "-m", &message])
+            .current_dir(path)
+            .output()
+            .map_err(|e| format!("Failed to commit: {}", e))?;
+
+        if commit.status.success() {
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            Err(format!("Commit failed: {}", stderr))
+        }
+    }
+
     /// Send a message to the connected project.
     pub fn send_message(&mut self, message: &str) -> Result<(), String> {
         let project = self.project.as_ref()
@@ -554,6 +643,7 @@ impl App {
                 self.messages.push(Message::system("  /list               - List projects"));
                 self.messages.push(Message::system("  /sessions           - Session picker (F3)"));
                 self.messages.push(Message::system("  /inspect            - Toggle inspect mode (F2)"));
+                self.messages.push(Message::system("  /stop [session]     - Stop session (commits changes, ends tmux)"));
                 self.messages.push(Message::system("  /clear              - Clear output"));
                 self.messages.push(Message::system("  /quit               - Exit TUI"));
                 self.messages.push(Message::system(""));
@@ -604,8 +694,15 @@ impl App {
                 self.should_quit = true;
             }
             "stop" => {
-                self.stop_working();
-                self.messages.push(Message::system("Stopped polling"));
+                // Stop a session (commit git changes and destroy tmux)
+                let target = arg.map(|s| s.to_string())
+                    .or_else(|| self.project.clone());
+
+                if let Some(name) = target {
+                    self.stop_session(&name);
+                } else {
+                    self.messages.push(Message::system("Usage: /stop [session] or connect to a session first"));
+                }
             }
             "inspect" => {
                 self.toggle_inspect_mode();
