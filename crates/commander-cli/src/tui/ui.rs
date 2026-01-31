@@ -4,14 +4,22 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
-use super::app::{App, InputMode, MessageDirection};
+use super::app::{App, InputMode, MessageDirection, ViewMode};
 
 /// Draw the TUI.
 pub fn draw(frame: &mut Frame, app: &App) {
+    match app.view_mode {
+        ViewMode::Normal => draw_normal(frame, app),
+        ViewMode::Inspect => draw_inspect(frame, app),
+    }
+}
+
+/// Draw normal chat mode.
+fn draw_normal(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -28,6 +36,63 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_status(frame, app, chunks[2]);
     draw_input(frame, app, chunks[3]);
     draw_footer(frame, app, chunks[4]);
+}
+
+/// Draw inspect mode (live tmux view).
+fn draw_inspect(frame: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),  // Header
+            Constraint::Min(10),    // Tmux content
+            Constraint::Length(1),  // Footer
+        ])
+        .split(frame.area());
+
+    // Header with magenta background to indicate inspect mode
+    let project_name = app.project.as_deref().unwrap_or("none");
+    let header_text = format!(" Commander - [{}] INSPECT MODE                    F2 to exit ", project_name);
+    let header = Paragraph::new(header_text)
+        .style(Style::default().bg(Color::Magenta).fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, chunks[0]);
+
+    // Tmux content area
+    let session_name = app.project.as_ref()
+        .map(|p| format!("commander-{}", p))
+        .unwrap_or_else(|| "none".to_string());
+
+    let inner_height = chunks[1].height.saturating_sub(2) as usize;
+    let lines: Vec<&str> = app.inspect_content.lines().collect();
+    let total_lines = lines.len();
+
+    // Calculate visible range based on scroll (scroll_offset is from bottom)
+    let end_idx = total_lines.saturating_sub(app.inspect_scroll);
+    let start_idx = end_idx.saturating_sub(inner_height);
+
+    let visible_content: String = lines.get(start_idx..end_idx)
+        .map(|slice| slice.join("\n"))
+        .unwrap_or_default();
+
+    let title = if app.inspect_scroll > 0 {
+        format!(" tmux: {} [scroll: {}] ", session_name, app.inspect_scroll)
+    } else {
+        format!(" tmux: {} ", session_name)
+    };
+
+    let tmux_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(title);
+
+    let content = Paragraph::new(visible_content)
+        .block(tmux_block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(content, chunks[1]);
+
+    // Footer
+    let footer = Paragraph::new(" Live tmux view | Auto-refresh 100ms | Up/Down scroll | F2/Esc/q return to chat ")
+        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    frame.render_widget(footer, chunks[2]);
 }
 
 /// Draw the header bar.

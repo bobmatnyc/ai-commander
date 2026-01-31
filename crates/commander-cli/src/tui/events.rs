@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use super::app::App;
+use super::app::{App, ViewMode};
 use super::ui;
 
 /// Result type for TUI operations.
@@ -82,31 +82,53 @@ fn run_loop(
                     app.should_quit = true;
                 }
 
-                // Handle other keys
-                match key.code {
-                    KeyCode::Enter => app.submit(),
-                    KeyCode::Char(c) => app.enter_char(c),
-                    KeyCode::Backspace => app.delete_char(),
-                    KeyCode::Left => app.move_cursor_left(),
-                    KeyCode::Right => app.move_cursor_right(),
-                    KeyCode::Up => app.scroll_up(),
-                    KeyCode::Down => app.scroll_down(),
-                    KeyCode::PageUp => app.scroll_page_up(10),
-                    KeyCode::PageDown => app.scroll_page_down(10),
-                    KeyCode::Esc => {
-                        if app.is_working {
-                            app.stop_working();
-                        } else {
-                            app.should_quit = true;
+                // Handle F2 to toggle inspect mode
+                if key.code == KeyCode::F(2) {
+                    app.toggle_inspect_mode();
+                    continue;
+                }
+
+                // Handle keys based on view mode
+                match app.view_mode {
+                    ViewMode::Inspect => {
+                        // In inspect mode, handle scroll and exit
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => app.inspect_scroll_up(),
+                            KeyCode::Down | KeyCode::Char('j') => app.inspect_scroll_down(),
+                            KeyCode::PageUp => app.inspect_scroll_page_up(10),
+                            KeyCode::PageDown => app.inspect_scroll_page_down(10),
+                            KeyCode::Esc | KeyCode::Char('q') => app.toggle_inspect_mode(),
+                            _ => {}
                         }
                     }
-                    KeyCode::Home => {
-                        app.cursor_pos = 0;
+                    ViewMode::Normal => {
+                        // Normal mode key handling
+                        match key.code {
+                            KeyCode::Enter => app.submit(),
+                            KeyCode::Char(c) => app.enter_char(c),
+                            KeyCode::Backspace => app.delete_char(),
+                            KeyCode::Left => app.move_cursor_left(),
+                            KeyCode::Right => app.move_cursor_right(),
+                            KeyCode::Up => app.scroll_up(),
+                            KeyCode::Down => app.scroll_down(),
+                            KeyCode::PageUp => app.scroll_page_up(10),
+                            KeyCode::PageDown => app.scroll_page_down(10),
+                            KeyCode::Esc => {
+                                if app.is_working {
+                                    app.stop_working();
+                                } else {
+                                    app.should_quit = true;
+                                }
+                            }
+                            KeyCode::Home => {
+                                app.cursor_pos = 0;
+                            }
+                            KeyCode::End => {
+                                app.cursor_pos = app.input.len();
+                            }
+                            _ => {}
+                        }
                     }
-                    KeyCode::End => {
-                        app.cursor_pos = app.input.len();
-                    }
-                    _ => {}
                 }
 
                 // Handle Ctrl+L to clear
@@ -120,6 +142,11 @@ fn run_loop(
         // Poll for tmux output if working
         if app.is_working {
             app.poll_output();
+        }
+
+        // Auto-refresh inspect content
+        if app.view_mode == ViewMode::Inspect {
+            app.refresh_inspect_content();
         }
 
         // Check if should quit
