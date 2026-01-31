@@ -99,6 +99,13 @@ pub enum Commands {
         project: Option<String>,
     },
 
+    /// Launch interactive TUI mode
+    Tui {
+        /// Project to connect to on start
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+
     /// Show available runtime adapters
     Adapters,
 }

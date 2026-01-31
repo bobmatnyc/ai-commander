@@ -6,6 +6,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 use commander_cli::cli::{Cli, Commands};
 use commander_cli::commands;
 use commander_cli::repl::Repl;
+use commander_cli::tui;
 
 fn main() {
     // Load .env.local if it exists (for OPENROUTER_API_KEY etc.)
@@ -25,6 +26,7 @@ fn main() {
     // Handle command or enter REPL
     let result = match cli.command {
         Some(Commands::Repl { project }) => run_repl(&state_dir, project),
+        Some(Commands::Tui { project }) => run_tui(&state_dir, project),
         Some(cmd) => commands::execute(cmd, &state_dir),
         None => {
             // No command = enter REPL
@@ -48,5 +50,10 @@ fn run_repl(state_dir: &std::path::Path, connect_to: Option<String>) -> commands
     }
 
     repl.run()?;
+    Ok(())
+}
+
+fn run_tui(state_dir: &std::path::Path, connect_to: Option<String>) -> commands::Result<()> {
+    tui::run(state_dir, connect_to)?;
     Ok(())
 }

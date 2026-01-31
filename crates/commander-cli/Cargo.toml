@@ -27,6 +27,8 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 shellexpand = { workspace = true }
 dotenvy = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }

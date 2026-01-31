@@ -7,3 +7,4 @@ pub mod chat;
 pub mod cli;
 pub mod commands;
 pub mod repl;
+pub mod tui;

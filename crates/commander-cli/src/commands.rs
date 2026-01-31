@@ -17,15 +17,21 @@ pub fn execute(command: Commands, state_dir: &Path) -> Result<()> {
     let store = StateStore::new(state_dir);
 
     match command {
-        Commands::Start { path, adapter, name } => {
-            cmd_start(&store, &path, &adapter, name.as_deref())
-        }
+        Commands::Start {
+            path,
+            adapter,
+            name,
+        } => cmd_start(&store, &path, &adapter, name.as_deref()),
         Commands::Stop { project, force } => cmd_stop(&store, &project, force),
         Commands::List { running, format } => cmd_list(&store, running, format),
         Commands::Status { project, detailed } => cmd_status(&store, project.as_deref(), detailed),
         Commands::Send { project, message } => cmd_send(&store, &project, &message),
         Commands::Repl { project: _ } => {
             // REPL is handled separately in main
+            Ok(())
+        }
+        Commands::Tui { project: _ } => {
+            // TUI is handled separately in main
             Ok(())
         }
         Commands::Adapters => cmd_adapters(),
@@ -65,11 +71,7 @@ fn cmd_start(store: &StateStore, path: &Path, adapter: &str, name: Option<&str>)
 
     println!("Started project '{}' ({})", project_name, project.id);
     println!("  Path: {}", path.display());
-    println!(
-        "  Adapter: {} ({})",
-        adapter_info.info().name,
-        adapter
-    );
+    println!("  Adapter: {} ({})", adapter_info.info().name, adapter);
     println!("\nNote: Actual runtime spawning will be implemented in Phase 7");
 
     Ok(())
@@ -118,10 +120,7 @@ fn cmd_list(store: &StateStore, running_only: bool, format: OutputFormat) -> Res
                 return Ok(());
             }
 
-            println!(
-                "{:<36}  {:<20}  {:<10}  PATH",
-                "ID", "NAME", "STATE"
-            );
+            println!("{:<36}  {:<20}  {:<10}  PATH", "ID", "NAME", "STATE");
             println!("{}", "-".repeat(80));
             for project in &filtered {
                 println!(
