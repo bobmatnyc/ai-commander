@@ -628,9 +628,17 @@ impl Repl {
                     .values()
                     .find(|p| p.name == name || p.id.as_str() == name)
                 {
-                    // Check if session is running
-                    if !self.sessions.contains_key(&project.name) {
-                        // Try to start the project
+                    // Check if session is already tracked locally
+                    let session_name = format!("commander-{}", project.name);
+                    let already_tracked = self.sessions.contains_key(&project.name);
+
+                    // Check if tmux session actually exists
+                    let session_exists = self.tmux.as_ref()
+                        .map(|t| t.session_exists(&session_name))
+                        .unwrap_or(false);
+
+                    if !already_tracked && !session_exists {
+                        // Need to start the project
                         let tool_id = project
                             .config
                             .get("tool")
@@ -639,6 +647,9 @@ impl Repl {
 
                         println!("Starting '{}'...", project.name);
                         self.start_project_session(&project.name, &project.path, tool_id)?;
+                    } else if !already_tracked && session_exists {
+                        // Session exists but not tracked - just register it
+                        self.sessions.insert(project.name.clone(), session_name);
                     }
 
                     info!(project = %project.name, "Connected to project");
@@ -656,6 +667,7 @@ impl Repl {
     }
 
     /// Start a tmux session for a project and launch its adapter.
+    /// If session already exists, just register it without recreating.
     fn start_project_session(
         &mut self,
         name: &str,
@@ -665,6 +677,14 @@ impl Repl {
         let session_name = format!("commander-{}", name);
 
         if let Some(tmux) = &self.tmux {
+            // Check if session already exists
+            if tmux.session_exists(&session_name) {
+                // Session exists - just register it and return
+                self.sessions.insert(name.to_string(), session_name.clone());
+                debug!(session = %session_name, "Reconnected to existing tmux session");
+                return Ok(());
+            }
+
             // Get adapter and its launch command
             if let Some(adapter) = self.registry.get(tool_id) {
                 let (cmd, cmd_args) = adapter.launch_command(path);
