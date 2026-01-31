@@ -216,7 +216,9 @@ impl ReplCommand {
         if parts.iter().any(|&p| p == "-a" || p == "-n") {
             // New project syntax: /connect <path> -a <adapter> -n <name>
             if parts.is_empty() {
-                return ReplCommand::Unknown("connect requires: /connect <path> -a <adapter> -n <name>".to_string());
+                return ReplCommand::Unknown(
+                    "connect requires: /connect <path> -a <adapter> -n <name>".to_string(),
+                );
             }
 
             let path = PathBuf::from(shellexpand::tilde(parts[0]).to_string());
@@ -260,7 +262,8 @@ impl ReplCommand {
             ReplCommand::Connect(ConnectTarget::Existing(parts[0].to_string()))
         } else {
             ReplCommand::Unknown(
-                "connect: use '/connect <path> -a <adapter> -n <name>' or '/connect <project>'".to_string(),
+                "connect: use '/connect <path> -a <adapter> -n <name>' or '/connect <project>'"
+                    .to_string(),
             )
         }
     }
@@ -290,8 +293,7 @@ impl Repl {
         let chat_client = ChatClient::new();
 
         // Create tokio runtime for async operations
-        let runtime = tokio::runtime::Runtime::new()
-            .expect("Failed to create tokio runtime");
+        let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
         // Set up history file
         let history_path = state_dir.join("repl_history.txt");
@@ -344,8 +346,8 @@ impl Repl {
                     debug!(?cmd, "Parsed command");
 
                     match self.handle_command(cmd) {
-                        Ok(true) => break,  // Quit requested
-                        Ok(false) => {}     // Continue
+                        Ok(true) => break, // Quit requested
+                        Ok(false) => {}    // Continue
                         Err(e) => eprintln!("Error: {}", e),
                     }
                 }
@@ -422,7 +424,9 @@ impl Repl {
                         }
                     }
                     None => {
-                        println!("No project connected. Use /connect <project> or /status <project>")
+                        println!(
+                            "No project connected. Use /connect <project> or /status <project>"
+                        )
                     }
                 }
                 Ok(false)
@@ -447,16 +451,66 @@ impl Repl {
                     Some(project) => {
                         if let Some(tmux) = &self.tmux {
                             if let Some(session) = self.sessions.get(project) {
+                                // Capture initial output to establish baseline
+                                let initial_output = tmux
+                                    .capture_output(session, None, Some(50))
+                                    .unwrap_or_default();
+                                let initial_lines: usize = initial_output.lines().count();
+
                                 match tmux.send_line(session, None, &message) {
                                     Ok(_) => {
                                         println!("[{}] > {}", project, message);
+
+                                        // Poll for new output with timeout
+                                        let poll_interval = std::time::Duration::from_millis(200);
+                                        let max_wait = std::time::Duration::from_secs(30);
+                                        let start = std::time::Instant::now();
+                                        let mut last_output_time = start;
+                                        let mut displayed_lines = initial_lines;
+                                        let idle_timeout = std::time::Duration::from_secs(2);
+
+                                        while start.elapsed() < max_wait {
+                                            std::thread::sleep(poll_interval);
+
+                                            if let Ok(current_output) =
+                                                tmux.capture_output(session, None, Some(100))
+                                            {
+                                                let lines: Vec<&str> =
+                                                    current_output.lines().collect();
+                                                let current_count = lines.len();
+
+                                                // Display any new lines
+                                                if current_count > displayed_lines {
+                                                    for line in lines.iter().skip(displayed_lines) {
+                                                        // Skip empty lines and our own input echo
+                                                        let trimmed = line.trim();
+                                                        if !trimmed.is_empty() && trimmed != message
+                                                        {
+                                                            println!("{}", line);
+                                                        }
+                                                    }
+                                                    displayed_lines = current_count;
+                                                    last_output_time = std::time::Instant::now();
+                                                }
+                                            }
+
+                                            // If no new output for idle_timeout, stop polling
+                                            if last_output_time.elapsed() > idle_timeout
+                                                && displayed_lines > initial_lines
+                                            {
+                                                break;
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         println!("Failed to send message: {}", e);
                                     }
                                 }
                             } else {
-                                println!("Project '{}' not running. Reconnect with path to start it.", project);
+                                println!(
+                                    "Project '{}' not running. Reconnect with path to start it.",
+                                    project
+                                );
                             }
                         } else {
                             println!("Tmux not available. Cannot send messages to projects.");
@@ -509,7 +563,10 @@ impl Repl {
                 let tool_id = match self.registry.resolve(&args.tool) {
                     Some(id) => id.to_string(),
                     None => {
-                        println!("Unknown adapter: {}. Available: cc (claude-code), mpm", args.tool);
+                        println!(
+                            "Unknown adapter: {}. Available: cc (claude-code), mpm",
+                            args.tool
+                        );
                         return Ok(());
                     }
                 };
@@ -543,7 +600,9 @@ impl Repl {
 
                 // Create new project
                 let mut project = Project::new(&path_str, &args.alias);
-                project.config.insert("tool".to_string(), serde_json::json!(tool_id));
+                project
+                    .config
+                    .insert("tool".to_string(), serde_json::json!(tool_id));
 
                 // Save project
                 self.store.save_project(&project)?;
@@ -565,11 +624,16 @@ impl Repl {
 
             ConnectTarget::Existing(name) => {
                 let projects = self.store.load_all_projects()?;
-                if let Some(project) = projects.values().find(|p| p.name == name || p.id.as_str() == name) {
+                if let Some(project) = projects
+                    .values()
+                    .find(|p| p.name == name || p.id.as_str() == name)
+                {
                     // Check if session is running
                     if !self.sessions.contains_key(&project.name) {
                         // Try to start the project
-                        let tool_id = project.config.get("tool")
+                        let tool_id = project
+                            .config
+                            .get("tool")
                             .and_then(|v| v.as_str())
                             .unwrap_or("claude-code");
 
@@ -582,7 +646,9 @@ impl Repl {
                     println!("Connected to '{}'", project.name);
                 } else {
                     println!("Project not found: {}", name);
-                    println!("Use '/connect <path> -a <adapter> -n <name>' to create a new project.");
+                    println!(
+                        "Use '/connect <path> -a <adapter> -n <name>' to create a new project."
+                    );
                 }
             }
         }
@@ -590,7 +656,12 @@ impl Repl {
     }
 
     /// Start a tmux session for a project and launch its adapter.
-    fn start_project_session(&mut self, name: &str, path: &str, tool_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn start_project_session(
+        &mut self,
+        name: &str,
+        path: &str,
+        tool_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let session_name = format!("commander-{}", name);
 
         if let Some(tmux) = &self.tmux {
@@ -654,9 +725,9 @@ impl Repl {
 /// Finds help for a command by name or alias.
 fn find_command_help(name: &str) -> Option<&'static CommandHelp> {
     let name_lower = name.to_lowercase();
-    COMMAND_HELP.iter().find(|h| {
-        h.name == name_lower || h.aliases.contains(&name_lower.as_str())
-    })
+    COMMAND_HELP
+        .iter()
+        .find(|h| h.name == name_lower || h.aliases.contains(&name_lower.as_str()))
 }
 
 /// Prints help information.
@@ -684,7 +755,10 @@ fn print_help(topic: Option<&str>) {
                     }
                 }
             } else {
-                println!("Unknown command: {}. Type /help for available commands.", cmd);
+                println!(
+                    "Unknown command: {}. Type /help for available commands.",
+                    cmd
+                );
             }
         }
         None => {
@@ -818,8 +892,8 @@ mod tests {
     #[test]
     fn test_find_command_help() {
         assert!(find_command_help("connect").is_some());
-        assert!(find_command_help("c").is_some());  // alias
-        assert!(find_command_help("CONNECT").is_some());  // case insensitive
+        assert!(find_command_help("c").is_some()); // alias
+        assert!(find_command_help("CONNECT").is_some()); // case insensitive
         assert!(find_command_help("notacommand").is_none());
     }
 
