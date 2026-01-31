@@ -313,7 +313,10 @@ impl TmuxOrchestrator {
             None => session.to_string(),
         };
 
-        self.run_tmux_checked(&["send-keys", "-t", &target, text, "Enter"])?;
+        // Send text literally (-l flag prevents interpreting as key names)
+        // Then send Enter separately to execute
+        self.run_tmux_checked(&["send-keys", "-t", &target, "-l", text])?;
+        self.run_tmux_checked(&["send-keys", "-t", &target, "Enter"])?;
         Ok(())
     }
 }
