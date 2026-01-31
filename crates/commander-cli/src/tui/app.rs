@@ -76,6 +76,19 @@ pub enum ViewMode {
     Normal,
     /// Live tmux view (inspect mode)
     Inspect,
+    /// Sessions list view
+    Sessions,
+}
+
+/// Information about a tmux session for the sessions list view.
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    /// Session name
+    pub name: String,
+    /// Whether this is a commander-managed session
+    pub is_commander: bool,
+    /// Whether this session is currently connected
+    pub is_connected: bool,
 }
 
 /// TUI application state.
@@ -121,6 +134,12 @@ pub struct App {
     pub inspect_content: String,
     /// Scroll offset for inspect mode (lines from top)
     pub inspect_scroll: usize,
+
+    // Sessions mode
+    /// List of sessions for sessions view
+    pub session_list: Vec<SessionInfo>,
+    /// Currently selected session index
+    pub session_selected: usize,
 }
 
 impl App {
@@ -151,6 +170,9 @@ impl App {
             view_mode: ViewMode::Normal,
             inspect_content: String::new(),
             inspect_scroll: 0,
+
+            session_list: Vec::new(),
+            session_selected: 0,
         };
 
         // Add welcome message
@@ -295,7 +317,7 @@ impl App {
     /// Toggle inspect mode (live tmux view).
     pub fn toggle_inspect_mode(&mut self) {
         match self.view_mode {
-            ViewMode::Normal => {
+            ViewMode::Normal | ViewMode::Sessions => {
                 if self.project.is_some() {
                     self.view_mode = ViewMode::Inspect;
                     self.inspect_scroll = 0;
@@ -348,6 +370,88 @@ impl App {
     /// Scroll down by a page in inspect mode.
     pub fn inspect_scroll_page_down(&mut self, page_size: usize) {
         self.inspect_scroll = self.inspect_scroll.saturating_sub(page_size);
+    }
+
+    // ==================== Sessions Mode ====================
+
+    /// Show the sessions list view.
+    pub fn show_sessions(&mut self) {
+        self.refresh_session_list();
+        self.view_mode = ViewMode::Sessions;
+        self.session_selected = 0;
+    }
+
+    /// Refresh the list of tmux sessions.
+    pub fn refresh_session_list(&mut self) {
+        if let Some(tmux) = &self.tmux {
+            if let Ok(sessions) = tmux.list_sessions() {
+                self.session_list = sessions.iter().map(|s| {
+                    let is_commander = s.name.starts_with("commander-");
+                    let is_connected = self.sessions.values().any(|n| n == &s.name);
+                    SessionInfo {
+                        name: s.name.clone(),
+                        is_commander,
+                        is_connected,
+                    }
+                }).collect();
+            }
+        }
+    }
+
+    /// Move selection up in sessions list.
+    pub fn session_select_up(&mut self) {
+        if self.session_selected > 0 {
+            self.session_selected -= 1;
+        }
+    }
+
+    /// Move selection down in sessions list.
+    pub fn session_select_down(&mut self) {
+        if self.session_selected < self.session_list.len().saturating_sub(1) {
+            self.session_selected += 1;
+        }
+    }
+
+    /// Connect to the currently selected session.
+    pub fn connect_selected_session(&mut self) {
+        if let Some(session) = self.session_list.get(self.session_selected) {
+            if session.is_commander {
+                // Extract project name from "commander-{name}"
+                let project_name = session.name.strip_prefix("commander-")
+                    .unwrap_or(&session.name).to_string();
+
+                self.sessions.insert(project_name.clone(), session.name.clone());
+                self.project = Some(project_name.clone());
+                self.messages.push(Message::system(format!("Connected to '{}'", project_name)));
+                self.view_mode = ViewMode::Normal;
+            } else {
+                self.messages.push(Message::system("Cannot connect to external session"));
+            }
+        }
+    }
+
+    /// Delete the currently selected session.
+    pub fn delete_selected_session(&mut self) {
+        if let Some(session) = self.session_list.get(self.session_selected).cloned() {
+            if let Some(tmux) = &self.tmux {
+                if let Err(e) = tmux.destroy_session(&session.name) {
+                    self.messages.push(Message::system(format!("Failed to delete: {}", e)));
+                } else {
+                    // Remove from tracking if it was ours
+                    if let Some(proj) = session.name.strip_prefix("commander-") {
+                        self.sessions.remove(proj);
+                        if self.project.as_deref() == Some(proj) {
+                            self.project = None;
+                        }
+                    }
+                    self.refresh_session_list();
+                    // Adjust selection if needed
+                    if self.session_selected >= self.session_list.len() && self.session_selected > 0 {
+                        self.session_selected -= 1;
+                    }
+                }
+            }
+        }
     }
 
     /// Scroll to the bottom of the output.
@@ -448,12 +552,12 @@ impl App {
                 self.messages.push(Message::system("  /connect <project>  - Connect to project"));
                 self.messages.push(Message::system("  /disconnect         - Disconnect from project"));
                 self.messages.push(Message::system("  /list               - List projects"));
-                self.messages.push(Message::system("  /sessions           - List tmux sessions"));
+                self.messages.push(Message::system("  /sessions           - Session picker (F3)"));
                 self.messages.push(Message::system("  /inspect            - Toggle inspect mode (F2)"));
                 self.messages.push(Message::system("  /clear              - Clear output"));
                 self.messages.push(Message::system("  /quit               - Exit TUI"));
                 self.messages.push(Message::system(""));
-                self.messages.push(Message::system("Keys: Up/Down scroll, F2 inspect, Ctrl+C quit"));
+                self.messages.push(Message::system("Keys: Up/Down scroll, F2 inspect, F3 sessions, Ctrl+C quit"));
             }
             "connect" | "c" => {
                 if let Some(project) = arg {
@@ -507,39 +611,8 @@ impl App {
                 self.toggle_inspect_mode();
             }
             "sessions" => {
-                if let Some(tmux) = &self.tmux {
-                    match tmux.list_sessions() {
-                        Ok(sessions) => {
-                            if sessions.is_empty() {
-                                self.messages.push(Message::system("No tmux sessions found."));
-                            } else {
-                                self.messages.push(Message::system("Available tmux sessions:"));
-                                for session in sessions {
-                                    let is_commander = session.name.starts_with("commander-");
-                                    let is_connected = self.sessions.values().any(|s| s == &session.name);
-
-                                    let marker = if is_connected { "*" } else { " " };
-                                    let suffix = if is_connected {
-                                        " (connected)"
-                                    } else if !is_commander {
-                                        " (external)"
-                                    } else {
-                                        ""
-                                    };
-
-                                    self.messages.push(Message::system(format!(
-                                        "  {} {}{}",
-                                        marker, session.name, suffix
-                                    )));
-                                }
-                                self.messages.push(Message::system(""));
-                                self.messages.push(Message::system("Use /connect <name> to connect"));
-                            }
-                        }
-                        Err(e) => {
-                            self.messages.push(Message::system(format!("Failed to list sessions: {}", e)));
-                        }
-                    }
+                if self.tmux.is_some() {
+                    self.show_sessions();
                 } else {
                     self.messages.push(Message::system("Tmux not available"));
                 }
@@ -631,5 +704,74 @@ mod tests {
         // Page down
         app.inspect_scroll_page_down(2);
         assert_eq!(app.inspect_scroll, 1);
+    }
+
+    #[test]
+    fn test_session_info() {
+        let session = SessionInfo {
+            name: "commander-test".to_string(),
+            is_commander: true,
+            is_connected: false,
+        };
+        assert!(session.is_commander);
+        assert!(!session.is_connected);
+    }
+
+    #[test]
+    fn test_session_selection() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp_dir.path());
+
+        // Set up some test sessions
+        app.session_list = vec![
+            SessionInfo {
+                name: "commander-proj1".to_string(),
+                is_commander: true,
+                is_connected: false,
+            },
+            SessionInfo {
+                name: "commander-proj2".to_string(),
+                is_commander: true,
+                is_connected: true,
+            },
+            SessionInfo {
+                name: "other-session".to_string(),
+                is_commander: false,
+                is_connected: false,
+            },
+        ];
+        app.view_mode = ViewMode::Sessions;
+        app.session_selected = 0;
+
+        // Initial selection
+        assert_eq!(app.session_selected, 0);
+
+        // Move down
+        app.session_select_down();
+        assert_eq!(app.session_selected, 1);
+
+        app.session_select_down();
+        assert_eq!(app.session_selected, 2);
+
+        // At bottom, should not go further
+        app.session_select_down();
+        assert_eq!(app.session_selected, 2);
+
+        // Move up
+        app.session_select_up();
+        assert_eq!(app.session_selected, 1);
+
+        app.session_select_up();
+        assert_eq!(app.session_selected, 0);
+
+        // At top, should not go further
+        app.session_select_up();
+        assert_eq!(app.session_selected, 0);
+    }
+
+    #[test]
+    fn test_view_mode_sessions() {
+        assert_ne!(ViewMode::Sessions, ViewMode::Normal);
+        assert_ne!(ViewMode::Sessions, ViewMode::Inspect);
     }
 }

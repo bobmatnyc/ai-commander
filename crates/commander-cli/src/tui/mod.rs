@@ -11,5 +11,5 @@ mod app;
 mod events;
 mod ui;
 
-pub use app::{App, Message, MessageDirection, ViewMode};
+pub use app::{App, Message, MessageDirection, SessionInfo, ViewMode};
 pub use events::run;

@@ -88,8 +88,33 @@ fn run_loop(
                     continue;
                 }
 
+                // Handle F3 to show sessions view
+                if key.code == KeyCode::F(3) {
+                    if app.view_mode == ViewMode::Sessions {
+                        app.view_mode = ViewMode::Normal;
+                    } else if app.tmux.is_some() {
+                        app.show_sessions();
+                    } else {
+                        app.messages.push(super::app::Message::system("Tmux not available"));
+                    }
+                    continue;
+                }
+
                 // Handle keys based on view mode
                 match app.view_mode {
+                    ViewMode::Sessions => {
+                        // In sessions mode, handle selection and actions
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => app.session_select_up(),
+                            KeyCode::Down | KeyCode::Char('j') => app.session_select_down(),
+                            KeyCode::Enter => app.connect_selected_session(),
+                            KeyCode::Char('d') => app.delete_selected_session(),
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.view_mode = ViewMode::Normal;
+                            }
+                            _ => {}
+                        }
+                    }
                     ViewMode::Inspect => {
                         // In inspect mode, handle scroll and exit
                         match key.code {
