@@ -448,6 +448,7 @@ impl App {
                 self.messages.push(Message::system("  /connect <project>  - Connect to project"));
                 self.messages.push(Message::system("  /disconnect         - Disconnect from project"));
                 self.messages.push(Message::system("  /list               - List projects"));
+                self.messages.push(Message::system("  /sessions           - List tmux sessions"));
                 self.messages.push(Message::system("  /inspect            - Toggle inspect mode (F2)"));
                 self.messages.push(Message::system("  /clear              - Clear output"));
                 self.messages.push(Message::system("  /quit               - Exit TUI"));
@@ -504,6 +505,44 @@ impl App {
             }
             "inspect" => {
                 self.toggle_inspect_mode();
+            }
+            "sessions" => {
+                if let Some(tmux) = &self.tmux {
+                    match tmux.list_sessions() {
+                        Ok(sessions) => {
+                            if sessions.is_empty() {
+                                self.messages.push(Message::system("No tmux sessions found."));
+                            } else {
+                                self.messages.push(Message::system("Available tmux sessions:"));
+                                for session in sessions {
+                                    let is_commander = session.name.starts_with("commander-");
+                                    let is_connected = self.sessions.values().any(|s| s == &session.name);
+
+                                    let marker = if is_connected { "*" } else { " " };
+                                    let suffix = if is_connected {
+                                        " (connected)"
+                                    } else if !is_commander {
+                                        " (external)"
+                                    } else {
+                                        ""
+                                    };
+
+                                    self.messages.push(Message::system(format!(
+                                        "  {} {}{}",
+                                        marker, session.name, suffix
+                                    )));
+                                }
+                                self.messages.push(Message::system(""));
+                                self.messages.push(Message::system("Use /connect <name> to connect"));
+                            }
+                        }
+                        Err(e) => {
+                            self.messages.push(Message::system(format!("Failed to list sessions: {}", e)));
+                        }
+                    }
+                } else {
+                    self.messages.push(Message::system("Tmux not available"));
+                }
             }
             _ => {
                 self.messages.push(Message::system(format!("Unknown command: /{}", command)));

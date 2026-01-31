@@ -102,6 +102,16 @@ static COMMAND_HELP: &[CommandHelp] = &[
         ],
     },
     CommandHelp {
+        name: "sessions",
+        aliases: &[],
+        brief: "List all tmux sessions",
+        description: "Lists all tmux sessions, showing which are commander sessions vs external, and which are currently connected.",
+        usage: "/sessions",
+        examples: &[
+            ("/sessions", "List all tmux sessions"),
+        ],
+    },
+    CommandHelp {
         name: "help",
         aliases: &["h", "?"],
         brief: "Show help",
@@ -141,6 +151,8 @@ pub enum ReplCommand {
     Disconnect,
     /// Send message to connected project
     Send(String),
+    /// List all tmux sessions
+    Sessions,
     /// Show help (optionally for a specific command)
     Help(Option<String>),
     /// Quit the REPL
@@ -183,6 +195,7 @@ impl ReplCommand {
                 "send" => arg
                     .map(ReplCommand::Send)
                     .unwrap_or(ReplCommand::Unknown("send requires a message".to_string())),
+                "sessions" => ReplCommand::Sessions,
                 "help" | "h" | "?" => ReplCommand::Help(arg),
                 "quit" | "q" | "exit" => ReplCommand::Quit,
                 _ => ReplCommand::Unknown(cmd),
@@ -594,6 +607,43 @@ impl Repl {
                 Ok(false)
             }
 
+            ReplCommand::Sessions => {
+                if let Some(tmux) = &self.tmux {
+                    match tmux.list_sessions() {
+                        Ok(sessions) => {
+                            if sessions.is_empty() {
+                                println!("No tmux sessions found.");
+                            } else {
+                                println!("Available tmux sessions:");
+                                for session in sessions {
+                                    let is_commander = session.name.starts_with("commander-");
+                                    let is_connected = self.sessions.values().any(|s| s == &session.name);
+
+                                    let marker = if is_connected { "*" } else { " " };
+                                    let suffix = if is_connected {
+                                        " (connected)"
+                                    } else if !is_commander {
+                                        " (external)"
+                                    } else {
+                                        ""
+                                    };
+
+                                    println!("  {} {}{}", marker, session.name, suffix);
+                                }
+                                println!();
+                                println!("Use /connect <name> to connect");
+                            }
+                        }
+                        Err(e) => {
+                            println!("Failed to list sessions: {}", e);
+                        }
+                    }
+                } else {
+                    println!("Tmux not available");
+                }
+                Ok(false)
+            }
+
             ReplCommand::Help(topic) => {
                 print_help(topic.as_deref());
                 Ok(false)
@@ -934,6 +984,7 @@ fn print_help(topic: Option<&str>) {
             println!("  Project Management:");
             println!("    /list                                    List all projects");
             println!("    /status [project]                        Show project status");
+            println!("    /sessions                                List tmux sessions");
             println!("    list, list projects, show projects       (conversational)");
             println!("    status, show status, status of <name>    (conversational)");
             println!();
@@ -1032,6 +1083,11 @@ mod tests {
         assert_eq!(ReplCommand::parse("/quit"), ReplCommand::Quit);
         assert_eq!(ReplCommand::parse("/q"), ReplCommand::Quit);
         assert_eq!(ReplCommand::parse("/exit"), ReplCommand::Quit);
+    }
+
+    #[test]
+    fn test_parse_sessions() {
+        assert_eq!(ReplCommand::parse("/sessions"), ReplCommand::Sessions);
     }
 
     #[test]
