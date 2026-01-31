@@ -505,55 +505,72 @@ impl Repl {
                     Some(project) => {
                         if let Some(tmux) = &self.tmux {
                             if let Some(session) = self.sessions.get(project) {
-                                // Capture initial output to establish baseline
+                                // Capture initial output to establish baseline (full content hash)
                                 let initial_output = tmux
-                                    .capture_output(session, None, Some(50))
+                                    .capture_output(session, None, Some(200))
                                     .unwrap_or_default();
-                                let initial_lines: usize = initial_output.lines().count();
 
                                 match tmux.send_line(session, None, &message) {
                                     Ok(_) => {
                                         println!("[{}] > {}", project, message);
+                                        print!("[working");
+                                        io::stdout().flush().ok();
 
-                                        // Poll for new output with timeout
-                                        let poll_interval = std::time::Duration::from_millis(200);
-                                        let max_wait = std::time::Duration::from_secs(30);
+                                        // Poll for new output using content comparison
+                                        let poll_interval = std::time::Duration::from_millis(250);
+                                        let max_wait = std::time::Duration::from_secs(60);
                                         let start = std::time::Instant::now();
-                                        let mut last_output_time = start;
-                                        let mut displayed_lines = initial_lines;
-                                        let idle_timeout = std::time::Duration::from_secs(2);
+                                        let mut last_change_time = start;
+                                        let idle_timeout = std::time::Duration::from_secs(3);
+                                        let mut last_output = initial_output.clone();
+                                        let mut dots_printed = 0;
+                                        let mut got_response = false;
 
                                         while start.elapsed() < max_wait {
                                             std::thread::sleep(poll_interval);
 
-                                            if let Ok(current_output) =
-                                                tmux.capture_output(session, None, Some(100))
-                                            {
-                                                let lines: Vec<&str> =
-                                                    current_output.lines().collect();
-                                                let current_count = lines.len();
+                                            // Show progress dots
+                                            if dots_printed < 20 {
+                                                print!(".");
+                                                io::stdout().flush().ok();
+                                                dots_printed += 1;
+                                            }
 
-                                                // Display any new lines
-                                                if current_count > displayed_lines {
-                                                    for line in lines.iter().skip(displayed_lines) {
-                                                        // Skip empty lines and our own input echo
-                                                        let trimmed = line.trim();
-                                                        if !trimmed.is_empty() && trimmed != message
-                                                        {
-                                                            println!("{}", line);
+                                            if let Ok(current_output) =
+                                                tmux.capture_output(session, None, Some(200))
+                                            {
+                                                // Find new content by comparing outputs
+                                                if current_output != last_output {
+                                                    // Find lines that weren't in the previous capture
+                                                    let new_lines = find_new_lines(&last_output, &current_output, &message);
+
+                                                    if !new_lines.is_empty() {
+                                                        // End the [working...] line on first output
+                                                        if !got_response {
+                                                            println!("]");
+                                                            got_response = true;
                                                         }
+
+                                                        for line in &new_lines {
+                                                            println!("[{}] {}", project, line);
+                                                        }
+                                                        last_change_time = std::time::Instant::now();
                                                     }
-                                                    displayed_lines = current_count;
-                                                    last_output_time = std::time::Instant::now();
+
+                                                    last_output = current_output;
                                                 }
                                             }
 
-                                            // If no new output for idle_timeout, stop polling
-                                            if last_output_time.elapsed() > idle_timeout
-                                                && displayed_lines > initial_lines
-                                            {
+                                            // Stop polling after idle period with some response
+                                            if last_change_time.elapsed() > idle_timeout && got_response {
                                                 break;
                                             }
+                                        }
+
+                                        // End progress indicator if no response received
+                                        if !got_response {
+                                            println!("]");
+                                            println!("(AI is processing - response will appear in tmux session)");
                                         }
                                     }
                                     Err(e) => {
@@ -794,6 +811,71 @@ impl Repl {
 
         Ok(())
     }
+}
+
+/// Find new lines in tmux output by comparing previous and current captures.
+///
+/// Uses a set-based approach to find lines that appear in the current output
+/// but not in the previous output, filtering out echoed input and empty lines.
+fn find_new_lines(prev: &str, current: &str, message: &str) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let prev_lines: HashSet<&str> = prev.lines().collect();
+    let mut new_lines = Vec::new();
+
+    for line in current.lines() {
+        let trimmed = line.trim();
+
+        // Skip if line was in previous output
+        if prev_lines.contains(line) || prev_lines.contains(trimmed) {
+            continue;
+        }
+
+        // Skip empty lines
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Skip echoed input message
+        if trimmed == message || trimmed.ends_with(&format!("> {}", message)) {
+            continue;
+        }
+
+        // Skip prompt-only lines (common patterns)
+        if is_prompt_line(trimmed) {
+            continue;
+        }
+
+        new_lines.push(line.to_string());
+    }
+
+    new_lines
+}
+
+/// Check if a line is just a prompt (not actual output).
+fn is_prompt_line(line: &str) -> bool {
+    let trimmed = line.trim();
+
+    // Common prompt patterns to skip
+    let prompt_patterns = [
+        "commander>",
+        "commander [",
+        ">",  // Single > at end often indicates prompt
+        "$",  // Shell prompt
+        "%",  // zsh prompt
+    ];
+
+    // Check if line is just a prompt
+    for pattern in prompt_patterns {
+        if trimmed == pattern || trimmed.ends_with(pattern) {
+            // But not if it has substantial content before
+            if trimmed.len() <= pattern.len() + 20 {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Finds help for a command by name or alias.
@@ -1090,5 +1172,56 @@ mod tests {
             ReplCommand::parse("helper"),
             ReplCommand::Text("helper".to_string())
         );
+    }
+
+    // Tests for find_new_lines helper
+    #[test]
+    fn test_find_new_lines_basic() {
+        let prev = "line1\nline2\n";
+        let current = "line1\nline2\nline3\n";
+        let message = "test message";
+
+        let new_lines = super::find_new_lines(prev, current, message);
+        assert_eq!(new_lines, vec!["line3"]);
+    }
+
+    #[test]
+    fn test_find_new_lines_filters_message() {
+        let prev = "line1\n";
+        let current = "line1\ntest message\nresponse\n";
+        let message = "test message";
+
+        let new_lines = super::find_new_lines(prev, current, message);
+        assert_eq!(new_lines, vec!["response"]);
+    }
+
+    #[test]
+    fn test_find_new_lines_filters_echoed_input() {
+        let prev = "line1\n";
+        let current = "line1\n[project] > test message\nAI response\n";
+        let message = "test message";
+
+        let new_lines = super::find_new_lines(prev, current, message);
+        assert_eq!(new_lines, vec!["AI response"]);
+    }
+
+    #[test]
+    fn test_find_new_lines_skips_empty() {
+        let prev = "line1\n";
+        let current = "line1\n\n  \nresponse\n";
+        let message = "test";
+
+        let new_lines = super::find_new_lines(prev, current, message);
+        assert_eq!(new_lines, vec!["response"]);
+    }
+
+    #[test]
+    fn test_is_prompt_line() {
+        assert!(super::is_prompt_line("commander>"));
+        assert!(super::is_prompt_line("commander [duetto]>"));
+        assert!(super::is_prompt_line("$"));
+        assert!(super::is_prompt_line("%"));
+        assert!(!super::is_prompt_line("This is actual output from the AI"));
+        assert!(!super::is_prompt_line("The answer is 42"));
     }
 }
