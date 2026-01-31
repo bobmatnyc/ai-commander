@@ -1010,6 +1010,11 @@ fn find_new_lines(prev: &str, current: &str, message: &str) -> Vec<String> {
             continue;
         }
 
+        // Skip Claude Code UI noise (spinners, status bar, thinking indicators)
+        if is_ui_noise(trimmed) {
+            continue;
+        }
+
         new_lines.push(line.to_string());
     }
 
@@ -1037,6 +1042,58 @@ fn is_prompt_line(line: &str) -> bool {
                 return true;
             }
         }
+    }
+
+    false
+}
+
+/// Check if a line is Claude Code UI noise that should be filtered out.
+fn is_ui_noise(line: &str) -> bool {
+    // Spinner characters and thinking indicators
+    let spinners = ['✳', '✶', '✻', '✽', '✢', '⏺', '·', '●', '○', '◐', '◑', '◒', '◓'];
+    if line.chars().next().map(|c| spinners.contains(&c)).unwrap_or(false) {
+        return true;
+    }
+
+    // Status bar box drawing characters
+    if line.starts_with('╰') || line.starts_with('╭') || line.starts_with('│')
+        || line.starts_with('├') || line.starts_with('└') || line.starts_with('┌')
+        || line.starts_with('┐') || line.starts_with('┘') || line.starts_with('┤')
+        || line.starts_with('┬') || line.starts_with('┴') || line.starts_with('┼') {
+        return true;
+    }
+
+    // Claude Code branding and UI
+    if line.contains("▐▛") || line.contains("▜▌") || line.contains("▝▜") || line.contains("▛▘") {
+        return true;
+    }
+
+    // Thinking/processing indicators
+    let lower = line.to_lowercase();
+    if lower.contains("spelunking") || lower.contains("(thinking)")
+        || lower.contains("thinking…") || lower.contains("thinking...") {
+        return true;
+    }
+
+    // Status messages that are UI noise
+    if lower.contains("ctrl+b") || lower.contains("to run in background") {
+        return true;
+    }
+
+    // Claude Code version/branding line
+    if lower.contains("claude code v") || lower.contains("claude max")
+        || lower.contains("opus 4") || lower.contains("sonnet") {
+        return true;
+    }
+
+    // MCP tool invocation noise (keep the result, not the invocation)
+    if line.contains("(MCP)(") && (line.contains("owner:") || line.contains("repo:")) {
+        return true;
+    }
+
+    // Agent/task headers that are noise
+    if line.ends_with("(MCP)") && !line.contains(':') {
+        return true;
     }
 
     false
