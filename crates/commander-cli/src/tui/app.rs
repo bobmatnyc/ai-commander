@@ -68,6 +68,16 @@ pub enum InputMode {
     Scrolling,
 }
 
+/// View mode for the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    /// Normal chat mode
+    #[default]
+    Normal,
+    /// Live tmux view (inspect mode)
+    Inspect,
+}
+
 /// TUI application state.
 pub struct App {
     // Connection state
@@ -103,6 +113,14 @@ pub struct App {
     pub should_quit: bool,
     /// Last captured output for comparison
     pub last_output: String,
+
+    // Inspect mode
+    /// Current view mode (Normal or Inspect)
+    pub view_mode: ViewMode,
+    /// Cached tmux output for inspect mode
+    pub inspect_content: String,
+    /// Scroll offset for inspect mode (lines from top)
+    pub inspect_scroll: usize,
 }
 
 impl App {
@@ -129,6 +147,10 @@ impl App {
 
             should_quit: false,
             last_output: String::new(),
+
+            view_mode: ViewMode::Normal,
+            inspect_content: String::new(),
+            inspect_scroll: 0,
         };
 
         // Add welcome message
@@ -270,6 +292,64 @@ impl App {
         self.progress = 0.0;
     }
 
+    /// Toggle inspect mode (live tmux view).
+    pub fn toggle_inspect_mode(&mut self) {
+        match self.view_mode {
+            ViewMode::Normal => {
+                if self.project.is_some() {
+                    self.view_mode = ViewMode::Inspect;
+                    self.inspect_scroll = 0;
+                    self.refresh_inspect_content();
+                    self.messages.push(Message::system("Entering inspect mode (F2 to exit)"));
+                } else {
+                    self.messages.push(Message::system("Connect to a project first"));
+                }
+            }
+            ViewMode::Inspect => {
+                self.view_mode = ViewMode::Normal;
+                self.messages.push(Message::system("Exited inspect mode"));
+            }
+        }
+    }
+
+    /// Refresh the inspect content from tmux.
+    pub fn refresh_inspect_content(&mut self) {
+        if let (Some(project), Some(tmux)) = (&self.project, &self.tmux) {
+            if let Some(session) = self.sessions.get(project) {
+                // Capture more lines for full view
+                if let Ok(output) = tmux.capture_output(session, None, Some(200)) {
+                    self.inspect_content = output;
+                }
+            }
+        }
+    }
+
+    /// Scroll up in inspect mode.
+    pub fn inspect_scroll_up(&mut self) {
+        let max_scroll = self.inspect_content.lines().count().saturating_sub(1);
+        if self.inspect_scroll < max_scroll {
+            self.inspect_scroll += 1;
+        }
+    }
+
+    /// Scroll down in inspect mode.
+    pub fn inspect_scroll_down(&mut self) {
+        if self.inspect_scroll > 0 {
+            self.inspect_scroll -= 1;
+        }
+    }
+
+    /// Scroll up by a page in inspect mode.
+    pub fn inspect_scroll_page_up(&mut self, page_size: usize) {
+        let max_scroll = self.inspect_content.lines().count().saturating_sub(1);
+        self.inspect_scroll = self.inspect_scroll.saturating_add(page_size).min(max_scroll);
+    }
+
+    /// Scroll down by a page in inspect mode.
+    pub fn inspect_scroll_page_down(&mut self, page_size: usize) {
+        self.inspect_scroll = self.inspect_scroll.saturating_sub(page_size);
+    }
+
     /// Scroll to the bottom of the output.
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
@@ -368,10 +448,11 @@ impl App {
                 self.messages.push(Message::system("  /connect <project>  - Connect to project"));
                 self.messages.push(Message::system("  /disconnect         - Disconnect from project"));
                 self.messages.push(Message::system("  /list               - List projects"));
+                self.messages.push(Message::system("  /inspect            - Toggle inspect mode (F2)"));
                 self.messages.push(Message::system("  /clear              - Clear output"));
                 self.messages.push(Message::system("  /quit               - Exit TUI"));
                 self.messages.push(Message::system(""));
-                self.messages.push(Message::system("Keys: Up/Down scroll, Ctrl+C quit"));
+                self.messages.push(Message::system("Keys: Up/Down scroll, F2 inspect, Ctrl+C quit"));
             }
             "connect" | "c" => {
                 if let Some(project) = arg {
@@ -420,6 +501,9 @@ impl App {
             "stop" => {
                 self.stop_working();
                 self.messages.push(Message::system("Stopped polling"));
+            }
+            "inspect" => {
+                self.toggle_inspect_mode();
             }
             _ => {
                 self.messages.push(Message::system(format!("Unknown command: /{}", command)));
@@ -470,5 +554,43 @@ mod tests {
         let current = "line1\nline2\nline3\n";
         let new = find_new_lines(prev, current);
         assert_eq!(new, vec!["line3"]);
+    }
+
+    #[test]
+    fn test_view_mode_default() {
+        assert_eq!(ViewMode::default(), ViewMode::Normal);
+    }
+
+    #[test]
+    fn test_inspect_scroll() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp_dir.path());
+
+        // Set up some inspect content
+        app.inspect_content = "line1\nline2\nline3\nline4\nline5".to_string();
+        app.view_mode = ViewMode::Inspect;
+
+        // Initial scroll should be 0
+        assert_eq!(app.inspect_scroll, 0);
+
+        // Scroll up
+        app.inspect_scroll_up();
+        assert_eq!(app.inspect_scroll, 1);
+
+        // Scroll down
+        app.inspect_scroll_down();
+        assert_eq!(app.inspect_scroll, 0);
+
+        // Scroll down at 0 should stay at 0
+        app.inspect_scroll_down();
+        assert_eq!(app.inspect_scroll, 0);
+
+        // Page up
+        app.inspect_scroll_page_up(3);
+        assert_eq!(app.inspect_scroll, 3);
+
+        // Page down
+        app.inspect_scroll_page_down(2);
+        assert_eq!(app.inspect_scroll, 1);
     }
 }
