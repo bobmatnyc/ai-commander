@@ -112,6 +112,18 @@ static COMMAND_HELP: &[CommandHelp] = &[
         ],
     },
     CommandHelp {
+        name: "stop",
+        aliases: &[],
+        brief: "Stop session (commits changes, ends tmux)",
+        description: "Stops a session by first committing any uncommitted git changes in the project directory, \
+                      then destroying the tmux session. If stopping the connected session, also disconnects.",
+        usage: "/stop [session]",
+        examples: &[
+            ("/stop", "Stop current connected session"),
+            ("/stop duetto", "Stop the 'duetto' session"),
+        ],
+    },
+    CommandHelp {
         name: "help",
         aliases: &["h", "?"],
         brief: "Show help",
@@ -153,6 +165,8 @@ pub enum ReplCommand {
     Send(String),
     /// List all tmux sessions
     Sessions,
+    /// Stop a session (commits git changes, destroys tmux)
+    Stop(Option<String>),
     /// Show help (optionally for a specific command)
     Help(Option<String>),
     /// Quit the REPL
@@ -196,6 +210,7 @@ impl ReplCommand {
                     .map(ReplCommand::Send)
                     .unwrap_or(ReplCommand::Unknown("send requires a message".to_string())),
                 "sessions" => ReplCommand::Sessions,
+                "stop" => ReplCommand::Stop(arg),
                 "help" | "h" | "?" => ReplCommand::Help(arg),
                 "quit" | "q" | "exit" => ReplCommand::Quit,
                 _ => ReplCommand::Unknown(cmd),
@@ -644,6 +659,17 @@ impl Repl {
                 Ok(false)
             }
 
+            ReplCommand::Stop(target) => {
+                let name = target.or_else(|| self.connected_project.clone());
+
+                if let Some(name) = name {
+                    self.stop_session(&name)?;
+                } else {
+                    println!("Usage: /stop [session] or connect to a session first");
+                }
+                Ok(false)
+            }
+
             ReplCommand::Help(topic) => {
                 print_help(topic.as_deref());
                 Ok(false)
@@ -839,6 +865,94 @@ impl Repl {
         Ok(())
     }
 
+    /// Stop a session: commit git changes and destroy tmux session.
+    fn stop_session(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let session_name = format!("commander-{}", name);
+
+        // Find project path for git operations
+        let project_path = {
+            let projects = self.store.load_all_projects()?;
+            projects.values()
+                .find(|p| p.name == name)
+                .map(|p| p.path.clone())
+        };
+
+        // Step 1: Commit any git changes
+        if let Some(path) = &project_path {
+            println!("Checking for uncommitted changes in {}...", path);
+
+            match Self::git_commit_changes(path, name) {
+                Ok(true) => println!("Changes committed."),
+                Ok(false) => println!("No changes to commit."),
+                Err(e) => println!("Git warning: {}", e),
+            }
+        }
+
+        // Step 2: Destroy tmux session
+        if let Some(tmux) = &self.tmux {
+            match tmux.destroy_session(&session_name) {
+                Ok(_) => {
+                    println!("Session '{}' stopped.", name);
+
+                    // Remove from tracking
+                    self.sessions.remove(name);
+
+                    // Disconnect if it was current
+                    if self.connected_project.as_deref() == Some(name) {
+                        self.connected_project = None;
+                        println!("Disconnected.");
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to stop session: {}", e);
+                }
+            }
+        } else {
+            println!("Tmux not available");
+        }
+
+        Ok(())
+    }
+
+    /// Commit any uncommitted git changes in the project directory.
+    fn git_commit_changes(path: &str, project_name: &str) -> Result<bool, String> {
+        use std::process::Command;
+
+        // Check if there are changes
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(path)
+            .output()
+            .map_err(|e| format!("Failed to run git status: {}", e))?;
+
+        let changes = String::from_utf8_lossy(&status.stdout);
+        if changes.trim().is_empty() {
+            return Ok(false); // No changes
+        }
+
+        // Stage all changes
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(path)
+            .output()
+            .map_err(|e| format!("Failed to stage changes: {}", e))?;
+
+        // Commit with message
+        let message = format!("WIP: Auto-commit from Commander session '{}'", project_name);
+        let commit = Command::new("git")
+            .args(["commit", "-m", &message])
+            .current_dir(path)
+            .output()
+            .map_err(|e| format!("Failed to commit: {}", e))?;
+
+        if commit.status.success() {
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            Err(format!("Commit failed: {}", stderr))
+        }
+    }
+
     /// Handle chat message via OpenRouter.
     fn handle_chat(&mut self, message: &str) -> Result<(), Box<dyn std::error::Error>> {
         print!("Thinking...");
@@ -985,6 +1099,7 @@ fn print_help(topic: Option<&str>) {
             println!("    /list                                    List all projects");
             println!("    /status [project]                        Show project status");
             println!("    /sessions                                List tmux sessions");
+            println!("    /stop [session]                          Stop session (commits changes, ends tmux)");
             println!("    list, list projects, show projects       (conversational)");
             println!("    status, show status, status of <name>    (conversational)");
             println!();
@@ -1088,6 +1203,19 @@ mod tests {
     #[test]
     fn test_parse_sessions() {
         assert_eq!(ReplCommand::parse("/sessions"), ReplCommand::Sessions);
+    }
+
+    #[test]
+    fn test_parse_stop() {
+        assert_eq!(ReplCommand::parse("/stop"), ReplCommand::Stop(None));
+        assert_eq!(
+            ReplCommand::parse("/stop duetto"),
+            ReplCommand::Stop(Some("duetto".to_string()))
+        );
+        assert_eq!(
+            ReplCommand::parse("/stop my-project"),
+            ReplCommand::Stop(Some("my-project".to_string()))
+        );
     }
 
     #[test]
