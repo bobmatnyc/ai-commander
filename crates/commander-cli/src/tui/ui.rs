@@ -237,7 +237,10 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::Scrolling => Style::default().fg(Color::DarkGray),
     };
 
-    let prompt = if app.project.is_some() { "> " } else { "commander> " };
+    let prompt = match &app.project {
+        Some(name) => format!("[{}]> ", name),
+        None => "commander> ".to_string(),
+    };
     let input_text = format!("{}{}", prompt, app.input);
 
     let input = Paragraph::new(input_text)
@@ -246,7 +249,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(input, area);
 
-    // Set cursor position
+    // Set cursor position (prompt is now dynamic length)
     let cursor_x = area.x + prompt.len() as u16 + app.cursor_pos as u16 + 1;
     let cursor_y = area.y + 1;
     frame.set_cursor_position((cursor_x, cursor_y));
