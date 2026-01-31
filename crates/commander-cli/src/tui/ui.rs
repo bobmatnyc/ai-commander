@@ -8,13 +8,14 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, InputMode, MessageDirection, ViewMode};
+use super::app::{App, InputMode, MessageDirection, SessionInfo, ViewMode};
 
 /// Draw the TUI.
 pub fn draw(frame: &mut Frame, app: &App) {
     match app.view_mode {
         ViewMode::Normal => draw_normal(frame, app),
         ViewMode::Inspect => draw_inspect(frame, app),
+        ViewMode::Sessions => draw_sessions(frame, app),
     }
 }
 
@@ -93,6 +94,64 @@ fn draw_inspect(frame: &mut Frame, app: &App) {
     let footer = Paragraph::new(" Live tmux view | Auto-refresh 100ms | Up/Down scroll | F2/Esc/q return to chat ")
         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
     frame.render_widget(footer, chunks[2]);
+}
+
+/// Draw sessions list view.
+fn draw_sessions(frame: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),   // Header
+            Constraint::Min(10),     // Session list
+            Constraint::Length(1),   // Footer
+        ])
+        .split(frame.area());
+
+    // Header with cyan background for sessions mode
+    let header = Paragraph::new(" Commander - Sessions                                     F3 to exit ")
+        .style(Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, chunks[0]);
+
+    // Session list
+    let items: Vec<ListItem> = app.session_list.iter().enumerate().map(|(i, s)| {
+        format_session_item(i, s, app.session_selected)
+    }).collect();
+
+    let list = List::new(items)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Available Sessions "));
+    frame.render_widget(list, chunks[1]);
+
+    // Footer
+    let footer = Paragraph::new(" Up/Down select | Enter connect | d delete | F3/Esc back ")
+        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    frame.render_widget(footer, chunks[2]);
+}
+
+/// Format a session list item.
+fn format_session_item(index: usize, session: &SessionInfo, selected: usize) -> ListItem<'static> {
+    let marker = if index == selected { ">" } else { " " };
+    let status = if session.is_connected {
+        "* connected".to_string()
+    } else if session.is_commander {
+        "o idle".to_string()
+    } else {
+        "(external)".to_string()
+    };
+
+    let style = if index == selected {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if session.is_connected {
+        Style::default().fg(Color::Green)
+    } else if !session.is_commander {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+
+    ListItem::new(format!("  {} {:<30} {}", marker, session.name, status)).style(style)
 }
 
 /// Draw the header bar.
