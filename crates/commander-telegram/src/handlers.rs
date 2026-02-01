@@ -114,36 +114,52 @@ pub async fn handle_pair(
 
     match state.validate_pairing(&code, chat_id).await {
         Ok((project_name, _session_name)) => {
-            // Auto-connect to the session
-            match state.connect_session(msg.chat.id, &project_name).await {
-                Ok(_) => {
-                    bot.send_message(
-                        msg.chat.id,
-                        format!(
-                            "Paired and connected to <b>{}</b>!\n\n\
-                            You can now send messages to this session.",
-                            project_name
-                        ),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .await?;
-                    info!(
-                        chat_id = %chat_id,
-                        project = %project_name,
-                        "User paired and connected via code"
-                    );
-                }
-                Err(e) => {
-                    bot.send_message(
-                        msg.chat.id,
-                        format!(
-                            "Paired successfully but connection failed: {}\n\n\
-                            Use <code>/connect {}</code> to connect manually.",
-                            e, project_name
-                        ),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .await?;
+            // If project_name is empty, just authorize without auto-connect
+            if project_name.is_empty() {
+                bot.send_message(
+                    msg.chat.id,
+                    "Paired successfully!\n\n\
+                    You are now authorized for this Commander instance.\n\
+                    Use <code>/list</code> to see projects or <code>/connect &lt;name&gt;</code> to connect.",
+                )
+                .parse_mode(teloxide::types::ParseMode::Html)
+                .await?;
+                info!(
+                    chat_id = %chat_id,
+                    "User paired (no auto-connect)"
+                );
+            } else {
+                // Auto-connect to the session
+                match state.connect_session(msg.chat.id, &project_name).await {
+                    Ok(_) => {
+                        bot.send_message(
+                            msg.chat.id,
+                            format!(
+                                "Paired and connected to <b>{}</b>!\n\n\
+                                You can now send messages to this session.",
+                                project_name
+                            ),
+                        )
+                        .parse_mode(teloxide::types::ParseMode::Html)
+                        .await?;
+                        info!(
+                            chat_id = %chat_id,
+                            project = %project_name,
+                            "User paired and connected via code"
+                        );
+                    }
+                    Err(e) => {
+                        bot.send_message(
+                            msg.chat.id,
+                            format!(
+                                "Paired successfully but connection failed: {}\n\n\
+                                Use <code>/connect {}</code> to connect manually.",
+                                e, project_name
+                            ),
+                        )
+                        .parse_mode(teloxide::types::ParseMode::Html)
+                        .await?;
+                    }
                 }
             }
         }
@@ -244,6 +260,18 @@ pub async fn handle_connect(
     state: Arc<TelegramState>,
     args: String,
 ) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use /pair <code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     let args = args.trim();
 
     if args.is_empty() {
@@ -563,6 +591,18 @@ pub async fn handle_session(
     state: Arc<TelegramState>,
     session_name: String,
 ) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use /pair <code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     let session_name = session_name.trim();
 
     if session_name.is_empty() {
