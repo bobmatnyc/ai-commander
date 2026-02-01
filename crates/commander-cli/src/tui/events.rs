@@ -130,12 +130,19 @@ fn run_loop(
                         // Normal mode key handling
                         match key.code {
                             KeyCode::Enter => app.submit(),
-                            KeyCode::Char(c) => app.enter_char(c),
-                            KeyCode::Backspace => app.delete_char(),
+                            KeyCode::Tab => app.complete_command(),
+                            KeyCode::Char(c) => {
+                                app.reset_completions();
+                                app.enter_char(c);
+                            }
+                            KeyCode::Backspace => {
+                                app.reset_completions();
+                                app.delete_char();
+                            }
                             KeyCode::Left => app.move_cursor_left(),
                             KeyCode::Right => app.move_cursor_right(),
-                            KeyCode::Up => app.scroll_up(),
-                            KeyCode::Down => app.scroll_down(),
+                            KeyCode::Up => app.history_prev(),
+                            KeyCode::Down => app.history_next(),
                             KeyCode::PageUp => app.scroll_page_up(10),
                             KeyCode::PageDown => app.scroll_page_down(10),
                             KeyCode::Esc => {
