@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::claude_code::ClaudeCodeAdapter;
 use crate::mpm::MpmAdapter;
+use crate::shell::ShellAdapter;
 use crate::traits::RuntimeAdapter;
 
 /// Registry for runtime adapters.
@@ -46,6 +47,9 @@ impl AdapterRegistry {
 
         let mpm = Arc::new(MpmAdapter::new());
         adapters.insert(mpm.info().id.clone(), mpm);
+
+        let shell = Arc::new(ShellAdapter::new());
+        adapters.insert(shell.info().id.clone(), shell);
 
         Self { adapters }
     }
@@ -94,12 +98,14 @@ impl AdapterRegistry {
     /// - `cc` -> `claude-code`
     /// - `mpm` -> `mpm` (already canonical)
     /// - `claude-code` -> `claude-code` (already canonical)
+    /// - `shell`, `sh`, `bash`, `zsh` -> `shell`
     ///
     /// Returns `None` if the alias is unknown.
     pub fn resolve(&self, alias: &str) -> Option<&'static str> {
         match alias {
             "cc" | "claude-code" => Some("claude-code"),
             "mpm" => Some("mpm"),
+            "shell" | "sh" | "bash" | "zsh" => Some("shell"),
             _ => {
                 // Check if it's a registered adapter ID
                 if self.adapters.contains_key(alias) {
@@ -128,7 +134,7 @@ mod tests {
     fn test_registry_new() {
         let registry = AdapterRegistry::new();
         assert!(!registry.is_empty());
-        assert!(registry.len() >= 2); // claude-code and mpm
+        assert!(registry.len() >= 3); // claude-code, mpm, and shell
     }
 
     #[test]
@@ -147,6 +153,7 @@ mod tests {
 
         assert!(list.contains(&"claude-code"));
         assert!(list.contains(&"mpm"));
+        assert!(list.contains(&"shell"));
     }
 
     #[test]
@@ -190,7 +197,22 @@ mod tests {
         assert_eq!(registry.resolve("claude-code"), Some("claude-code"));
         assert_eq!(registry.resolve("mpm"), Some("mpm"));
 
+        // Test shell aliases
+        assert_eq!(registry.resolve("shell"), Some("shell"));
+        assert_eq!(registry.resolve("sh"), Some("shell"));
+        assert_eq!(registry.resolve("bash"), Some("shell"));
+        assert_eq!(registry.resolve("zsh"), Some("shell"));
+
         // Test unknown alias
         assert_eq!(registry.resolve("unknown"), None);
+    }
+
+    #[test]
+    fn test_shell_adapter() {
+        let registry = AdapterRegistry::new();
+
+        let adapter = registry.get("shell");
+        assert!(adapter.is_some());
+        assert_eq!(adapter.unwrap().info().id, "shell");
     }
 }

@@ -34,10 +34,12 @@ pub mod claude_code;
 pub mod mpm;
 pub mod patterns;
 pub mod registry;
+pub mod shell;
 pub mod traits;
 
 pub use claude_code::ClaudeCodeAdapter;
 pub use mpm::MpmAdapter;
 pub use patterns::Pattern;
 pub use registry::AdapterRegistry;
+pub use shell::ShellAdapter;
 pub use traits::{AdapterInfo, OutputAnalysis, RuntimeAdapter, RuntimeState};
