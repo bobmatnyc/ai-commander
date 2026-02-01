@@ -3,8 +3,8 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -156,10 +156,11 @@ fn format_session_item(index: usize, session: &SessionInfo, selected: usize) -> 
 
 /// Draw the header bar.
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let project_name = app.project.as_deref().unwrap_or("none");
-    let status = if app.project.is_some() { "connected" } else { "disconnected" };
-
-    let header_text = format!(" Commander - [{}] {} ", project_name, status);
+    let header_text = match (&app.project, &app.project_path) {
+        (Some(name), Some(path)) => format!(" Commander - [{}] {} ", name, path),
+        (Some(name), None) => format!(" Commander - [{}] connected ", name),
+        (None, _) => " Commander - disconnected ".to_string(),
+    };
 
     let header = Paragraph::new(header_text)
         .style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD));
@@ -169,14 +170,15 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Draw the scrollable output area.
 fn draw_output(frame: &mut Frame, app: &App, area: Rect) {
-    let inner_height = area.height.saturating_sub(2) as usize; // Account for borders
+    let title = if app.scroll_offset > 0 {
+        format!(" Output [scroll: {}] ", app.scroll_offset)
+    } else {
+        " Output ".to_string()
+    };
 
-    // Calculate visible range considering scroll offset
-    let total_messages = app.messages.len();
-    let end_idx = total_messages.saturating_sub(app.scroll_offset);
-    let start_idx = end_idx.saturating_sub(inner_height);
-
-    let items: Vec<ListItem> = app.messages[start_idx..end_idx]
+    // Build lines from messages
+    let lines: Vec<Line> = app
+        .messages
         .iter()
         .map(|msg| {
             let style = match msg.direction {
@@ -192,31 +194,61 @@ fn draw_output(frame: &mut Frame, app: &App, area: Rect) {
             };
 
             let content = format!("{}{}", prefix, msg.content);
-            ListItem::new(Line::from(vec![Span::styled(content, style)]))
+            Line::from(vec![Span::styled(content, style)])
         })
         .collect();
 
-    let title = if app.scroll_offset > 0 {
-        format!(" Output [scroll: {}] ", app.scroll_offset)
+    // Calculate scroll - estimate wrapped line count
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    // Estimate total lines after wrapping
+    let total_wrapped_lines: usize = lines
+        .iter()
+        .map(|line| {
+            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
+            if inner_width > 0 {
+                ((line_len + inner_width - 1) / inner_width).max(1)
+            } else {
+                1
+            }
+        })
+        .sum();
+
+    // Calculate scroll offset to show latest content, adjusted by user scroll
+    let scroll_offset = if total_wrapped_lines > inner_height {
+        (total_wrapped_lines - inner_height).saturating_sub(app.scroll_offset) as u16
     } else {
-        " Output ".to_string()
+        0
     };
 
-    let output = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let text = Text::from(lines);
+
+    let output = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_offset, 0));
 
     frame.render_widget(output, area);
 }
 
 /// Draw the status/progress bar.
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
-    if app.is_working {
-        let label = " [working...] ";
-        let gauge = Gauge::default()
-            .gauge_style(Style::default().fg(Color::Yellow).bg(Color::DarkGray))
-            .ratio(app.progress)
-            .label(label);
-        frame.render_widget(gauge, area);
+    if app.is_summarizing() {
+        // Summarizing phase - show indeterminate spinner style
+        let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let idx = ((app.progress * 10.0) as usize) % spinner.len();
+        let label = format!(" {} Summarizing response... ", spinner[idx]);
+        let status = Paragraph::new(label)
+            .style(Style::default().bg(Color::Magenta).fg(Color::White));
+        frame.render_widget(status, area);
+    } else if app.is_working {
+        // Receiving phase - show line count
+        let line_count = app.response_buffer_len();
+        let label = format!(" Receiving... ({} lines captured) ", line_count);
+        let status = Paragraph::new(label)
+            .style(Style::default().bg(Color::Yellow).fg(Color::Black));
+        frame.render_widget(status, area);
     } else {
         // Show connection status
         let status_text = if let Some(project) = &app.project {
@@ -266,7 +298,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let keys = if app.input_mode == InputMode::Scrolling {
         "j/k scroll | Enter: back to input | q: quit"
     } else {
-        "Up/Down: scroll | Enter: send | /help | Ctrl+C: quit"
+        "↑/↓: history | PgUp/PgDn: scroll | /help | Ctrl+C: quit"
     };
 
     let footer_text = format!(" {} | {} ", project_indicator, keys);
