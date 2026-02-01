@@ -134,7 +134,12 @@ impl TelegramBot {
             )
             .branch(
                 Update::filter_message()
-                    .filter(|msg: Message| msg.text().is_some())
+                    .filter(|msg: Message| {
+                        // Only handle non-command text messages
+                        msg.text()
+                            .map(|t| !t.starts_with('/'))
+                            .unwrap_or(false)
+                    })
                     .endpoint(move |bot: Bot, msg: Message| {
                         let state = Arc::clone(&state_for_messages);
                         async move { handle_message(bot, msg, state).await }
