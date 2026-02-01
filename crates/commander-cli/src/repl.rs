@@ -151,6 +151,17 @@ static COMMAND_HELP: &[CommandHelp] = &[
             ("/q", "Same as /quit"),
         ],
     },
+    CommandHelp {
+        name: "telegram",
+        aliases: &[],
+        brief: "Generate pairing code for Telegram bot",
+        description: "Generates a 6-character pairing code that can be used with the Telegram bot's /pair command.\n\
+                      Codes expire after 5 minutes and can only be used once.",
+        usage: "/telegram",
+        examples: &[
+            ("/telegram", "Generate a pairing code for the current project"),
+        ],
+    },
 ];
 
 /// Tab completion for slash commands.
@@ -160,6 +171,7 @@ impl CommandCompleter {
     const COMMANDS: &'static [&'static str] = &[
         "/clear", "/connect", "/disconnect", "/help", "/inspect",
         "/list", "/quit", "/send", "/sessions", "/status", "/stop",
+        "/telegram",
     ];
 }
 
@@ -219,6 +231,8 @@ pub enum ReplCommand {
     Stop(Option<String>),
     /// Show help (optionally for a specific command)
     Help(Option<String>),
+    /// Generate Telegram pairing code
+    Telegram,
     /// Quit the REPL
     Quit,
     /// Unknown command
@@ -262,6 +276,7 @@ impl ReplCommand {
                 "sessions" => ReplCommand::Sessions,
                 "stop" => ReplCommand::Stop(arg),
                 "help" | "h" | "?" => ReplCommand::Help(arg),
+                "telegram" => ReplCommand::Telegram,
                 "quit" | "q" | "exit" => ReplCommand::Quit,
                 _ => ReplCommand::Unknown(cmd),
             }
@@ -724,6 +739,11 @@ impl Repl {
                 Ok(false)
             }
 
+            ReplCommand::Telegram => {
+                self.generate_telegram_pairing()?;
+                Ok(false)
+            }
+
             ReplCommand::Help(topic) => {
                 print_help(topic.as_deref());
                 Ok(false)
@@ -1045,6 +1065,37 @@ impl Repl {
 
         Ok(())
     }
+
+    /// Generate a pairing code for Telegram bot.
+    fn generate_telegram_pairing(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(project) = self.connected_project.as_ref() else {
+            println!("Not connected to any project. Use /connect first.");
+            return Ok(());
+        };
+
+        let session_name = format!("commander-{}", project);
+
+        // Use the shared pairing module from commander-telegram
+        match commander_telegram::create_pairing(project, &session_name) {
+            Ok(code) => {
+                println!();
+                println!("Telegram Pairing Code");
+                println!("=====================");
+                println!();
+                println!("  Code: {}", code);
+                println!();
+                println!("  In Telegram, send: /pair {}", code);
+                println!();
+                println!("  Expires in 5 minutes");
+                println!();
+            }
+            Err(e) => {
+                println!("Failed to create pairing code: {}", e);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Find new lines in tmux output by comparing previous and current captures.
@@ -1234,6 +1285,9 @@ fn print_help(topic: Option<&str>) {
             println!("    <message>                                Send message to connected project");
             println!("    [disconnected] <message>                 Chat with AI (OpenRouter)");
             println!();
+            println!("  Telegram Integration:");
+            println!("    /telegram                                Generate pairing code for Telegram bot");
+            println!();
             println!("  Other:");
             println!("    /help [command], help, ?                 Show this help");
             println!("    /quit, quit, exit, bye                   Exit REPL");
@@ -1358,6 +1412,11 @@ mod tests {
             ReplCommand::parse("/stop my-project"),
             ReplCommand::Stop(Some("my-project".to_string()))
         );
+    }
+
+    #[test]
+    fn test_parse_telegram() {
+        assert_eq!(ReplCommand::parse("/telegram"), ReplCommand::Telegram);
     }
 
     #[test]

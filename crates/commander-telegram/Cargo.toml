@@ -1,0 +1,54 @@
+[package]
+name = "commander-telegram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Telegram bot interface for Commander"
+
+[[bin]]
+name = "commander-telegram"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+commander-models = { path = "../commander-models" }
+commander-adapters = { path = "../commander-adapters" }
+commander-tmux = { path = "../commander-tmux" }
+commander-persistence = { path = "../commander-persistence" }
+
+# Telegram
+teloxide = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Web server (for webhook)
+axum = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP client (ngrok API, OpenRouter)
+reqwest = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+url = { workspace = true }
+dirs = { workspace = true }
+shellexpand = { workspace = true }
+dotenvy = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
