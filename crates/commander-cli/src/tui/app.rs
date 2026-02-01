@@ -999,9 +999,12 @@ impl App {
                 self.messages.push(Message::system("  /connect <path> -a <adapter> -n <name>  Start new project"));
                 self.messages.push(Message::system("  /disconnect                        Disconnect from project"));
                 self.messages.push(Message::system("  /list                              List projects"));
+                self.messages.push(Message::system("  /status [name]                     Show project status"));
                 self.messages.push(Message::system("  /sessions                          Session picker (F3)"));
                 self.messages.push(Message::system("  /inspect                           Toggle inspect mode (F2)"));
                 self.messages.push(Message::system("  /stop [session]                    Stop session (commits git, ends tmux)"));
+                self.messages.push(Message::system("  /send <msg>                        Send message to connected session"));
+                self.messages.push(Message::system("  /telegram                          Generate Telegram pairing code"));
                 self.messages.push(Message::system("  /clear                             Clear output"));
                 self.messages.push(Message::system("  /quit                              Exit TUI"));
                 self.messages.push(Message::system(""));
@@ -1115,6 +1118,21 @@ impl App {
                     self.messages.push(Message::system("Tmux not available"));
                 }
             }
+            "status" | "s" => {
+                self.show_status(arg);
+            }
+            "telegram" => {
+                self.generate_telegram_pairing();
+            }
+            "send" => {
+                if let Some(message) = arg {
+                    if let Err(e) = self.send_message(message) {
+                        self.messages.push(Message::system(format!("Error: {}", e)));
+                    }
+                } else {
+                    self.messages.push(Message::system("Usage: /send <message>"));
+                }
+            }
             _ => {
                 self.messages.push(Message::system(format!("Unknown command: /{}", command)));
             }
@@ -1129,12 +1147,81 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Show status for a project.
+    fn show_status(&mut self, project_name: Option<&str>) {
+        let name = project_name
+            .map(String::from)
+            .or_else(|| self.project.clone());
+
+        match name {
+            Some(name) => {
+                // Check if session exists
+                let session_name = format!("commander-{}", name);
+                let session_exists = self.tmux.as_ref()
+                    .map(|t| t.session_exists(&session_name))
+                    .unwrap_or(false);
+
+                // Get project info from store
+                let project_info = self.store.load_all_projects().ok()
+                    .and_then(|projects| {
+                        projects.values()
+                            .find(|p| p.name == name)
+                            .cloned()
+                    });
+
+                self.messages.push(Message::system(format!("Status: {}", name)));
+
+                if let Some(info) = project_info {
+                    self.messages.push(Message::system(format!("  Path: {}", info.path)));
+                    let adapter = info.config.get("tool")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    self.messages.push(Message::system(format!("  Adapter: {}", adapter)));
+                }
+
+                let status = if session_exists { "Running" } else { "Stopped" };
+                self.messages.push(Message::system(format!("  Session: {}", status)));
+
+                if self.project.as_ref() == Some(&name) {
+                    self.messages.push(Message::system("  Connected: Yes"));
+                }
+            }
+            None => {
+                self.messages.push(Message::system("No project specified. Use /status <project> or connect first."));
+            }
+        }
+    }
+
+    /// Generate a Telegram pairing code.
+    fn generate_telegram_pairing(&mut self) {
+        let (project_name, session_name) = match &self.project {
+            Some(p) => (p.clone(), format!("commander-{}", p)),
+            None => (String::new(), String::new()),
+        };
+
+        match commander_telegram::create_pairing(&project_name, &session_name) {
+            Ok(code) => {
+                self.messages.push(Message::system("Telegram Pairing Code"));
+                self.messages.push(Message::system(format!("  Code: {}", code)));
+                self.messages.push(Message::system(format!("  In Telegram: /pair {}", code)));
+                self.messages.push(Message::system("  Expires in 5 minutes"));
+                if !project_name.is_empty() {
+                    self.messages.push(Message::system(format!("  Auto-connects to: {}", project_name)));
+                }
+            }
+            Err(e) => {
+                self.messages.push(Message::system(format!("Error generating pairing code: {}", e)));
+            }
+        }
+    }
+
     // ==================== Tab Completion ====================
 
     /// Available slash commands for completion.
     const COMMANDS: &'static [&'static str] = &[
         "/clear", "/connect", "/disconnect", "/help", "/inspect",
         "/list", "/quit", "/send", "/sessions", "/status", "/stop",
+        "/telegram",
     ];
 
     /// Perform tab completion on the current input.
@@ -1661,5 +1748,20 @@ mod tests {
         app.enter_char('x');
         assert!(app.completions.is_empty());
         assert!(app.completion_index.is_none());
+    }
+
+    #[test]
+    fn test_tab_completion_telegram() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp_dir.path());
+
+        // Type /te and press Tab
+        app.input = "/te".to_string();
+        app.cursor_pos = 3;
+        app.complete_command();
+
+        // Should complete to /telegram
+        assert_eq!(app.input, "/telegram");
+        assert_eq!(app.cursor_pos, 9);
     }
 }
