@@ -176,6 +176,12 @@ pub struct App {
     history_index: Option<usize>,
     /// Saved input when browsing history
     saved_input: String,
+
+    // Tab completion
+    /// Cached completions for current input prefix
+    completions: Vec<String>,
+    /// Current completion index (None = not in completion mode)
+    completion_index: Option<usize>,
 }
 
 impl App {
@@ -220,6 +226,9 @@ impl App {
             command_history: Vec::new(),
             history_index: None,
             saved_input: String::new(),
+
+            completions: Vec::new(),
+            completion_index: None,
         };
 
         // Add welcome message
@@ -1119,6 +1128,57 @@ impl App {
             .map(|p| p.values().map(|proj| proj.name.clone()).collect())
             .unwrap_or_default()
     }
+
+    // ==================== Tab Completion ====================
+
+    /// Available slash commands for completion.
+    const COMMANDS: &'static [&'static str] = &[
+        "/clear", "/connect", "/disconnect", "/help", "/inspect",
+        "/list", "/quit", "/send", "/sessions", "/status", "/stop",
+    ];
+
+    /// Perform tab completion on the current input.
+    pub fn complete_command(&mut self) {
+        // Only complete if input starts with /
+        if !self.input.starts_with('/') {
+            self.completions.clear();
+            self.completion_index = None;
+            return;
+        }
+
+        // Build completions if not already built for this prefix
+        if self.completions.is_empty() || self.completion_index.is_none() {
+            self.completions = Self::COMMANDS
+                .iter()
+                .filter(|cmd| cmd.starts_with(self.input.as_str()))
+                .map(|s| s.to_string())
+                .collect();
+            self.completion_index = if self.completions.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+        } else {
+            // Cycle through completions
+            if let Some(idx) = self.completion_index {
+                self.completion_index = Some((idx + 1) % self.completions.len());
+            }
+        }
+
+        // Apply completion
+        if let Some(idx) = self.completion_index {
+            if let Some(completion) = self.completions.get(idx) {
+                self.input = completion.clone();
+                self.cursor_pos = self.input.len();
+            }
+        }
+    }
+
+    /// Reset completion state (called when input changes).
+    pub fn reset_completions(&mut self) {
+        self.completions.clear();
+        self.completion_index = None;
+    }
 }
 
 /// Find new lines in tmux output by comparing previous and current captures.
@@ -1507,5 +1567,99 @@ mod tests {
     fn test_view_mode_sessions() {
         assert_ne!(ViewMode::Sessions, ViewMode::Normal);
         assert_ne!(ViewMode::Sessions, ViewMode::Inspect);
+    }
+
+    #[test]
+    fn test_tab_completion_basic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp_dir.path());
+
+        // Type /con and press Tab
+        app.input = "/con".to_string();
+        app.cursor_pos = 4;
+        app.complete_command();
+
+        // Should complete to /connect
+        assert_eq!(app.input, "/connect");
+        assert_eq!(app.cursor_pos, 8);
+    }
+
+    #[test]
+    fn test_tab_completion_cycles() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp_dir.path());
+
+        // Type /s and press Tab multiple times
+        app.input = "/s".to_string();
+        app.cursor_pos = 2;
+
+        // First Tab: /send
+        app.complete_command();
+        assert_eq!(app.input, "/send");
+
+        // Second Tab: /sessions
+        app.complete_command();
+        assert_eq!(app.input, "/sessions");
+
+        // Third Tab: /status
+        app.complete_command();
+        assert_eq!(app.input, "/status");
+
+        // Fourth Tab: /stop
+        app.complete_command();
+        assert_eq!(app.input, "/stop");
+
+        // Fifth Tab: cycles back to /send
+        app.complete_command();
+        assert_eq!(app.input, "/send");
+    }
+
+    #[test]
+    fn test_tab_completion_no_match() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp_dir.path());
+
+        // Type something that doesn't match any command
+        app.input = "/xyz".to_string();
+        app.cursor_pos = 4;
+        app.complete_command();
+
+        // Should stay unchanged
+        assert_eq!(app.input, "/xyz");
+        assert!(app.completion_index.is_none());
+    }
+
+    #[test]
+    fn test_tab_completion_non_slash_ignored() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp_dir.path());
+
+        // Type something without /
+        app.input = "connect".to_string();
+        app.cursor_pos = 7;
+        app.complete_command();
+
+        // Should stay unchanged
+        assert_eq!(app.input, "connect");
+        assert!(app.completions.is_empty());
+    }
+
+    #[test]
+    fn test_tab_completion_reset_on_char() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(temp_dir.path());
+
+        // Complete /s to /send
+        app.input = "/s".to_string();
+        app.cursor_pos = 2;
+        app.complete_command();
+        assert_eq!(app.input, "/send");
+        assert!(!app.completions.is_empty());
+
+        // Type a character - should reset completions
+        app.reset_completions();
+        app.enter_char('x');
+        assert!(app.completions.is_empty());
+        assert!(app.completion_index.is_none());
     }
 }

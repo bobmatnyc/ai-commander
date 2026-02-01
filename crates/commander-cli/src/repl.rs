@@ -8,8 +8,13 @@ use commander_adapters::AdapterRegistry;
 use commander_models::Project;
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
+use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::{DefaultEditor, Result as RlResult};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::Validator;
+use rustyline::{Context, Editor, Helper, Result as RlResult};
 use tracing::{debug, info};
 
 use crate::chat::ChatClient;
@@ -147,6 +152,51 @@ static COMMAND_HELP: &[CommandHelp] = &[
         ],
     },
 ];
+
+/// Tab completion for slash commands.
+struct CommandCompleter;
+
+impl CommandCompleter {
+    const COMMANDS: &'static [&'static str] = &[
+        "/clear", "/connect", "/disconnect", "/help", "/inspect",
+        "/list", "/quit", "/send", "/sessions", "/status", "/stop",
+    ];
+}
+
+impl Completer for CommandCompleter {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        if !line.starts_with('/') {
+            return Ok((0, vec![]));
+        }
+
+        let prefix = &line[..pos];
+        let matches: Vec<Pair> = Self::COMMANDS
+            .iter()
+            .filter(|cmd| cmd.starts_with(prefix))
+            .map(|cmd| Pair {
+                display: cmd.to_string(),
+                replacement: cmd.to_string(),
+            })
+            .collect();
+
+        Ok((0, matches))
+    }
+}
+
+impl Hinter for CommandCompleter {
+    type Hint = String;
+}
+
+impl Highlighter for CommandCompleter {}
+impl Validator for CommandCompleter {}
+impl Helper for CommandCompleter {}
 
 /// Slash commands available in the REPL.
 #[derive(Debug, Clone, PartialEq)]
@@ -353,7 +403,7 @@ impl ReplCommand {
 
 /// REPL state
 pub struct Repl {
-    editor: DefaultEditor,
+    editor: Editor<CommandCompleter, DefaultHistory>,
     store: StateStore,
     registry: AdapterRegistry,
     connected_project: Option<String>,
@@ -369,7 +419,11 @@ pub struct Repl {
 impl Repl {
     /// Creates a new REPL instance.
     pub fn new(state_dir: &Path) -> RlResult<Self> {
-        let mut editor = DefaultEditor::new()?;
+        let config = rustyline::Config::builder()
+            .completion_type(rustyline::CompletionType::List)
+            .build();
+        let mut editor = Editor::with_config(config)?;
+        editor.set_helper(Some(CommandCompleter));
         let store = StateStore::new(state_dir);
         let registry = AdapterRegistry::new();
         let chat_client = ChatClient::new();
@@ -1495,5 +1549,66 @@ mod tests {
         assert!(super::is_prompt_line("%"));
         assert!(!super::is_prompt_line("This is actual output from the AI"));
         assert!(!super::is_prompt_line("The answer is 42"));
+    }
+
+    // Tests for CommandCompleter
+    #[test]
+    fn test_completer_matches_prefix() {
+        use rustyline::completion::Completer;
+
+        let completer = CommandCompleter;
+        let history = rustyline::history::DefaultHistory::new();
+        let ctx = rustyline::Context::new(&history);
+
+        // /con should match /connect
+        let (pos, matches) = completer.complete("/con", 4, &ctx).unwrap();
+        assert_eq!(pos, 0);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].replacement, "/connect");
+    }
+
+    #[test]
+    fn test_completer_multiple_matches() {
+        use rustyline::completion::Completer;
+
+        let completer = CommandCompleter;
+        let history = rustyline::history::DefaultHistory::new();
+        let ctx = rustyline::Context::new(&history);
+
+        // /s should match /send, /sessions, /status, /stop
+        let (pos, matches) = completer.complete("/s", 2, &ctx).unwrap();
+        assert_eq!(pos, 0);
+        assert_eq!(matches.len(), 4);
+        let replacements: Vec<&str> = matches.iter().map(|m| m.replacement.as_str()).collect();
+        assert!(replacements.contains(&"/send"));
+        assert!(replacements.contains(&"/sessions"));
+        assert!(replacements.contains(&"/status"));
+        assert!(replacements.contains(&"/stop"));
+    }
+
+    #[test]
+    fn test_completer_no_match() {
+        use rustyline::completion::Completer;
+
+        let completer = CommandCompleter;
+        let history = rustyline::history::DefaultHistory::new();
+        let ctx = rustyline::Context::new(&history);
+
+        // /xyz should not match anything
+        let (_, matches) = completer.complete("/xyz", 4, &ctx).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_completer_non_slash_ignored() {
+        use rustyline::completion::Completer;
+
+        let completer = CommandCompleter;
+        let history = rustyline::history::DefaultHistory::new();
+        let ctx = rustyline::Context::new(&history);
+
+        // Non-slash input should not complete
+        let (_, matches) = completer.complete("connect", 7, &ctx).unwrap();
+        assert!(matches.is_empty());
     }
 }
