@@ -156,10 +156,12 @@ static COMMAND_HELP: &[CommandHelp] = &[
         aliases: &[],
         brief: "Generate pairing code for Telegram bot",
         description: "Generates a 6-character pairing code that can be used with the Telegram bot's /pair command.\n\
-                      Codes expire after 5 minutes and can only be used once.",
+                      Codes expire after 5 minutes and can only be used once.\n\
+                      Pairing authorizes the chat for the entire Commander instance.\n\
+                      If connected to a project, pairing will auto-connect to that project.",
         usage: "/telegram",
         examples: &[
-            ("/telegram", "Generate a pairing code for the current project"),
+            ("/telegram", "Generate a pairing code (auto-connects to current project if any)"),
         ],
     },
 ];
@@ -1068,15 +1070,14 @@ impl Repl {
 
     /// Generate a pairing code for Telegram bot.
     fn generate_telegram_pairing(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(project) = self.connected_project.as_ref() else {
-            println!("Not connected to any project. Use /connect first.");
-            return Ok(());
+        // Don't require connected project - pairing authorizes for the whole instance
+        let (project_name, session_name) = match &self.connected_project {
+            Some(p) => (p.clone(), format!("commander-{}", p)),
+            None => (String::new(), String::new()),
         };
 
-        let session_name = format!("commander-{}", project);
-
         // Use the shared pairing module from commander-telegram
-        match commander_telegram::create_pairing(project, &session_name) {
+        match commander_telegram::create_pairing(&project_name, &session_name) {
             Ok(code) => {
                 println!();
                 println!("Telegram Pairing Code");
@@ -1087,6 +1088,9 @@ impl Repl {
                 println!("  In Telegram, send: /pair {}", code);
                 println!();
                 println!("  Expires in 5 minutes");
+                if !project_name.is_empty() {
+                    println!("  Will auto-connect to: {}", project_name);
+                }
                 println!();
             }
             Err(e) => {

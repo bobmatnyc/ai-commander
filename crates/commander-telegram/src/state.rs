@@ -28,8 +28,8 @@ pub struct TelegramState {
     openrouter_key: Option<String>,
     /// Model to use for summarization.
     openrouter_model: String,
-    /// Authorized chats (chat_id -> set of project names).
-    authorized_chats: RwLock<HashMap<i64, HashSet<String>>>,
+    /// Authorized chat IDs for this commander instance.
+    authorized_chats: RwLock<HashSet<i64>>,
 }
 
 impl TelegramState {
@@ -53,7 +53,7 @@ impl TelegramState {
             store,
             openrouter_key,
             openrouter_model,
-            authorized_chats: RwLock::new(HashMap::new()),
+            authorized_chats: RwLock::new(HashSet::new()),
         }
     }
 
@@ -85,7 +85,7 @@ impl TelegramState {
     // --- Pairing methods ---
 
     /// Validate and consume a pairing code, returning (project_name, session_name) on success.
-    /// Also authorizes the chat for the project.
+    /// Authorizes the chat for the entire commander instance.
     pub async fn validate_pairing(
         &self,
         code: &str,
@@ -97,31 +97,20 @@ impl TelegramState {
         let (project_name, session_name) = pairing::consume_pairing(&code)
             .ok_or(TelegramError::InvalidPairingCode)?;
 
-        // Authorize this chat for the project
-        self.authorized_chats
-            .write()
-            .await
-            .entry(chat_id)
-            .or_default()
-            .insert(project_name.clone());
+        // Authorize this chat for the commander instance
+        self.authorized_chats.write().await.insert(chat_id);
 
         info!(
             chat_id = %chat_id,
-            project = %project_name,
-            "Chat authorized via pairing code"
+            "Chat authorized for commander instance"
         );
 
         Ok((project_name, session_name))
     }
 
-    /// Check if a chat is authorized for a project.
-    pub async fn is_authorized(&self, chat_id: i64, project_name: &str) -> bool {
-        self.authorized_chats
-            .read()
-            .await
-            .get(&chat_id)
-            .map(|projects| projects.contains(project_name))
-            .unwrap_or(false)
+    /// Check if a chat is authorized for this commander instance.
+    pub async fn is_authorized(&self, chat_id: i64) -> bool {
+        self.authorized_chats.read().await.contains(&chat_id)
     }
 
     /// Connect a chat to a session after successful pairing.
@@ -131,17 +120,14 @@ impl TelegramState {
         self.connect(chat_id, project_name).await
     }
 
-    /// Revoke authorization for a chat/project pair.
+    /// Revoke authorization for a chat.
     #[allow(dead_code)]
-    pub async fn revoke_authorization(&self, chat_id: i64, project_name: &str) {
-        if let Some(projects) = self.authorized_chats.write().await.get_mut(&chat_id) {
-            projects.remove(project_name);
-            debug!(
-                chat_id = %chat_id,
-                project = %project_name,
-                "Authorization revoked"
-            );
-        }
+    pub async fn revoke_authorization(&self, chat_id: i64) {
+        self.authorized_chats.write().await.remove(&chat_id);
+        debug!(
+            chat_id = %chat_id,
+            "Authorization revoked"
+        );
     }
 
     // --- End pairing methods ---
