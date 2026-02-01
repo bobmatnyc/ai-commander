@@ -133,6 +133,78 @@ pub mod mpm {
     }
 }
 
+/// Common patterns for generic shell output.
+pub mod shell {
+    use super::*;
+
+    /// Returns idle detection patterns for shell sessions.
+    ///
+    /// Matches common shell prompts:
+    /// - `$ ` (bash default)
+    /// - `# ` (root prompt)
+    /// - `% ` (zsh default)
+    /// - `> ` (generic/continuation)
+    /// - `user@host:path$ ` (PS1 style)
+    pub fn idle_patterns() -> &'static [Pattern] {
+        static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
+        PATTERNS.get_or_init(|| {
+            vec![
+                // High confidence: explicit shell prompts at end of line
+                Pattern::new("bash_prompt", r"(?m)[$]\s*$", 0.95),
+                Pattern::new("zsh_prompt", r"(?m)[%]\s*$", 0.95),
+                Pattern::new("root_prompt", r"(?m)[#]\s*$", 0.90),
+                Pattern::new("generic_prompt", r"(?m)>\s*$", 0.85),
+                // PS1 style prompts: user@host:path$
+                Pattern::new("ps1_prompt", r"(?m)\w+[@:~][^$#%>\n]*[$#%>]\s*$", 0.95),
+                // Bash version prompt: bash-X.X$
+                Pattern::new("bash_version", r"(?m)bash-\d+\.\d+[$#]\s*$", 0.90),
+                // Generic idle marker (for consistency)
+                Pattern::new("idle_marker", r"\[IDLE\]", 1.0),
+            ]
+        })
+    }
+
+    /// Returns error detection patterns for shell sessions.
+    pub fn error_patterns() -> &'static [Pattern] {
+        static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
+        PATTERNS.get_or_init(|| {
+            vec![
+                Pattern::new("command_not_found", r"(?i)command not found", 0.95),
+                Pattern::new("no_such_file", r"(?i)no such file or directory", 0.95),
+                Pattern::new("permission_denied", r"(?i)permission denied", 0.95),
+                Pattern::new("syntax_error", r"(?i)syntax error", 0.90),
+                Pattern::new("operation_not_permitted", r"(?i)operation not permitted", 0.90),
+                Pattern::new("bad_substitution", r"(?i)bad substitution", 0.85),
+                Pattern::new("is_a_directory", r"(?i)is a directory", 0.80),
+                Pattern::new("not_a_directory", r"(?i)not a directory", 0.80),
+                Pattern::new("cannot_create", r"(?i)cannot create", 0.85),
+                Pattern::new("cannot_open", r"(?i)cannot open", 0.85),
+            ]
+        })
+    }
+
+    /// Returns patterns indicating shell is processing a command.
+    pub fn working_patterns() -> &'static [Pattern] {
+        static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
+        PATTERNS.get_or_init(|| {
+            vec![
+                // Build/compile indicators
+                Pattern::new("compiling", r"(?i)compiling|building", 0.85),
+                Pattern::new("linking", r"(?i)linking", 0.80),
+                // Download/install indicators
+                Pattern::new("downloading", r"(?i)downloading|fetching", 0.85),
+                Pattern::new("installing", r"(?i)installing", 0.85),
+                // Progress indicators
+                Pattern::new("progress", r"\d+%", 0.75),
+                Pattern::new("loading", r"(?i)loading", 0.70),
+                // Test/run indicators
+                Pattern::new("running", r"(?i)running|executing", 0.80),
+                Pattern::new("testing", r"(?i)testing|test", 0.75),
+            ]
+        })
+    }
+}
+
 /// Analyzes text against a set of patterns, returning the best match.
 pub fn best_match<'a>(text: &str, patterns: &'a [Pattern]) -> Option<&'a Pattern> {
     patterns
@@ -203,5 +275,70 @@ mod tests {
         let patterns = mpm::error_patterns();
         assert!(any_match("Error: agent failed", patterns));
         assert!(any_match("Agent error occurred", patterns));
+    }
+
+    #[test]
+    fn test_shell_idle_patterns_basic_prompts() {
+        let patterns = shell::idle_patterns();
+        // Basic prompts
+        assert!(any_match("$ ", patterns));
+        assert!(any_match("% ", patterns));
+        assert!(any_match("# ", patterns));
+        assert!(any_match("> ", patterns));
+    }
+
+    #[test]
+    fn test_shell_idle_patterns_ps1_prompts() {
+        let patterns = shell::idle_patterns();
+        // PS1 style prompts
+        assert!(any_match("user@hostname:~$ ", patterns));
+        assert!(any_match("root@server:/var/log# ", patterns));
+        assert!(any_match("dev@machine:~/projects$ ", patterns));
+    }
+
+    #[test]
+    fn test_shell_idle_patterns_bash_version() {
+        let patterns = shell::idle_patterns();
+        // Bash version prompts
+        assert!(any_match("bash-5.1$ ", patterns));
+        assert!(any_match("bash-4.4# ", patterns));
+    }
+
+    #[test]
+    fn test_shell_idle_patterns_not_matching() {
+        let patterns = shell::idle_patterns();
+        // Should not match
+        assert!(!any_match("Processing...", patterns));
+        assert!(!any_match("Building project", patterns));
+    }
+
+    #[test]
+    fn test_shell_error_patterns() {
+        let patterns = shell::error_patterns();
+        // Command errors
+        assert!(any_match("bash: foo: command not found", patterns));
+        assert!(any_match("zsh: command not found: bar", patterns));
+        // File errors
+        assert!(any_match("cat: file.txt: No such file or directory", patterns));
+        assert!(any_match("rm: cannot remove 'file': Permission denied", patterns));
+        // Syntax errors
+        assert!(any_match("bash: syntax error near unexpected token", patterns));
+        // Should not match normal output
+        assert!(!any_match("File created successfully", patterns));
+        assert!(!any_match("Build complete", patterns));
+    }
+
+    #[test]
+    fn test_shell_working_patterns() {
+        let patterns = shell::working_patterns();
+        // Build indicators
+        assert!(any_match("Compiling main.rs...", patterns));
+        assert!(any_match("Building project", patterns));
+        // Download indicators
+        assert!(any_match("Downloading dependencies...", patterns));
+        assert!(any_match("Installing packages", patterns));
+        // Progress indicators
+        assert!(any_match("Progress: 50%", patterns));
+        assert!(any_match("[======>     ] 45%", patterns));
     }
 }
