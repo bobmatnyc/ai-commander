@@ -470,7 +470,8 @@ Rules:
         adapter: &str,
         name: &str,
     ) -> Result<String> {
-        let tmux = self.tmux.as_ref().ok_or_else(|| {
+        // Verify tmux is available (value unused; connect() uses it internally)
+        let _tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
 

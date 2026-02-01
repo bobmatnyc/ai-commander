@@ -195,8 +195,6 @@ pub async fn handle_pair(
 enum ConnectArgs {
     /// Connect to existing project by name
     Existing(String),
-    /// Attach to existing tmux session
-    AttachSession(String),
     /// Create and connect to new project
     New { path: String, adapter: String, name: String },
 }
@@ -303,7 +301,6 @@ pub async fn handle_connect(
     if let Some((current_project, _)) = state.get_session_info(msg.chat.id).await {
         let target_name = match &connect_args {
             ConnectArgs::Existing(name) => name.clone(),
-            ConnectArgs::AttachSession(name) => name.clone(),
             ConnectArgs::New { name, .. } => name.clone(),
         };
         if current_project == target_name {
@@ -337,27 +334,6 @@ pub async fn handle_connect(
                     bot.send_message(msg.chat.id, format!("❌ Failed to connect: {}", e))
                         .await?;
                     error!(chat_id = %msg.chat.id, error = %e, "Connection failed");
-                }
-            }
-        }
-        ConnectArgs::AttachSession(session_name) => {
-            bot.send_message(msg.chat.id, format!("Attaching to session {}...", session_name))
-                .await?;
-
-            match state.attach_session(msg.chat.id, &session_name).await {
-                Ok(attached_name) => {
-                    bot.send_message(
-                        msg.chat.id,
-                        format!("✅ Attached to <code>{}</code>\n\nYou can now send messages.", attached_name),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Html)
-                    .await?;
-                    info!(chat_id = %msg.chat.id, session = %attached_name, "User attached to session");
-                }
-                Err(e) => {
-                    bot.send_message(msg.chat.id, format!("❌ Failed to attach: {}", e))
-                        .await?;
-                    error!(chat_id = %msg.chat.id, error = %e, "Session attach failed");
                 }
             }
         }
