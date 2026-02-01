@@ -11,6 +11,7 @@ use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
 
 use crate::filesystem;
+use crate::validate_project_path;
 
 /// Direction of a message in the output area.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,6 +254,9 @@ impl App {
             .find(|p| p.name == name || p.id.as_str() == name)
             .ok_or_else(|| format!("Project not found: {}", name))?;
 
+        // Validate project path still exists and is accessible
+        validate_project_path(&project.path)?;
+
         let session_name = format!("commander-{}", project.name);
 
         // Check if tmux session exists
@@ -357,6 +361,9 @@ impl App {
         let tool_id = self.registry.resolve(adapter)
             .ok_or_else(|| format!("Unknown adapter: {}. Use: cc (claude-code), mpm", adapter))?
             .to_string();
+
+        // Validate project path exists and is accessible
+        validate_project_path(path)?;
 
         // Check if project already exists
         let projects = self.store.load_all_projects()

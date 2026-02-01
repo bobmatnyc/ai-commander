@@ -1,6 +1,7 @@
 //! Shared state for the Telegram bot.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use commander_adapters::AdapterRegistry;
@@ -13,6 +14,32 @@ use tracing::{debug, info, warn};
 use crate::error::{Result, TelegramError};
 use crate::pairing;
 use crate::session::UserSession;
+
+/// Validate that a project path exists, is a directory, and is accessible.
+fn validate_project_path(path: &str) -> std::result::Result<(), String> {
+    let path = Path::new(path);
+
+    if !path.exists() {
+        return Err(format!("Project path does not exist: {}", path.display()));
+    }
+
+    if !path.is_dir() {
+        return Err(format!(
+            "Project path is not a directory: {}",
+            path.display()
+        ));
+    }
+
+    // Check if readable by attempting to read dir
+    if path.read_dir().is_err() {
+        return Err(format!(
+            "Cannot access project path: {} (permission denied)",
+            path.display()
+        ));
+    }
+
+    Ok(())
+}
 
 /// Shared state for the Telegram bot, accessible across all handlers.
 pub struct TelegramState {
@@ -163,6 +190,10 @@ impl TelegramState {
             .values()
             .find(|p| p.name == project_name || p.id.as_str() == project_name)
             .ok_or_else(|| TelegramError::ProjectNotFound(project_name.to_string()))?;
+
+        // Validate project path still exists and is accessible
+        validate_project_path(&project.path)
+            .map_err(TelegramError::SessionError)?;
 
         let session_name = format!("commander-{}", project.name);
 
@@ -481,6 +512,10 @@ Rules:
                 format!("Unknown adapter: {}. Use: cc (claude-code), mpm", adapter)
             ))?
             .to_string();
+
+        // Validate project path exists and is accessible
+        validate_project_path(path)
+            .map_err(TelegramError::SessionError)?;
 
         // Check if project already exists
         let projects = self.store.load_all_projects()
