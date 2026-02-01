@@ -18,6 +18,7 @@ use rustyline::{Context, Editor, Helper, Result as RlResult};
 use tracing::{debug, info};
 
 use crate::chat::ChatClient;
+use crate::validate_project_path;
 
 /// Arguments for the enhanced /connect command.
 #[derive(Debug, Clone, PartialEq)]
@@ -805,6 +806,12 @@ impl Repl {
 
                 let path_str = path.to_string_lossy().to_string();
 
+                // Validate project path exists and is accessible
+                if let Err(e) = validate_project_path(&path_str) {
+                    println!("{}", e);
+                    return Ok(());
+                }
+
                 // Check if project with this alias already exists
                 let projects = self.store.load_all_projects()?;
                 if let Some(existing) = projects.values().find(|p| p.name == args.alias) {
@@ -897,6 +904,11 @@ impl Repl {
         path: &str,
         tool_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Validate project path still exists and is accessible
+        if let Err(e) = validate_project_path(path) {
+            return Err(e.into());
+        }
+
         let session_name = format!("commander-{}", name);
 
         if let Some(tmux) = &self.tmux {
