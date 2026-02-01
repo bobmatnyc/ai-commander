@@ -841,8 +841,8 @@ impl Repl {
                     format!("{} {}", cmd, cmd_args.join(" "))
                 };
 
-                // Create tmux session
-                match tmux.create_session(&session_name) {
+                // Create tmux session in project directory
+                match tmux.create_session_in_dir(&session_name, Some(path)) {
                     Ok(_) => {
                         // Send command to start the AI tool
                         if let Err(e) = tmux.send_line(&session_name, None, &full_cmd) {
@@ -914,9 +914,25 @@ impl Repl {
         Ok(())
     }
 
+    /// Check if path is inside a git worktree.
+    fn is_git_worktree(path: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(path)
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false)
+    }
+
     /// Commit any uncommitted git changes in the project directory.
     fn git_commit_changes(path: &str, project_name: &str) -> Result<bool, String> {
         use std::process::Command;
+
+        // Skip git operations if not in a git worktree
+        if !Self::is_git_worktree(path) {
+            println!("Not a git repository, skipping commit");
+            return Ok(false);
+        }
 
         // Check if there are changes
         let status = Command::new("git")
@@ -1171,6 +1187,21 @@ fn print_help(topic: Option<&str>) {
             println!("ADAPTERS:");
             println!("    cc, claude-code                          Claude Code CLI");
             println!("    mpm                                      Claude MPM");
+            println!();
+            println!("CLI OPTIONS:");
+            println!("    -v, --verbose                            Increase verbosity (-v, -vv, -vvv)");
+            println!("    -s, --state-dir <path>                   Path to state directory");
+            println!();
+            println!("CLI COMMANDS:");
+            println!("    commander                                Launch TUI (default)");
+            println!("    commander repl                           Launch REPL");
+            println!("    commander tui --project <name>           TUI with auto-connect");
+            println!("    commander start <path> -a <adapter>      Start project instance");
+            println!("    commander stop <project> [--force]       Stop project instance");
+            println!("    commander list [--running] [--format]    List projects");
+            println!("    commander status [project] [--detailed]  Show project status");
+            println!("    commander send <project> <message>       Send message to project");
+            println!("    commander adapters                       Show available adapters");
             println!();
             println!("EXAMPLES:");
             println!("    /connect ~/code/myapp -a cc -n myapp");

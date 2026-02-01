@@ -1,11 +1,16 @@
 //! TUI application state and logic.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use commander_adapters::AdapterRegistry;
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
+
+use crate::filesystem;
 
 /// Direction of a message in the output area.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,11 +96,22 @@ pub struct SessionInfo {
     pub is_connected: bool,
 }
 
+/// Parsed connect command arguments.
+#[derive(Debug)]
+enum ConnectArgs {
+    /// Connect to existing project by name
+    Existing(String),
+    /// Create and connect to new project
+    New { path: String, adapter: String, name: String },
+}
+
 /// TUI application state.
 pub struct App {
     // Connection state
     /// Currently connected project name
     pub project: Option<String>,
+    /// Currently connected project path
+    pub project_path: Option<String>,
     /// Tmux orchestrator for session management
     pub tmux: Option<TmuxOrchestrator>,
     /// Adapter registry
@@ -140,6 +156,26 @@ pub struct App {
     pub session_list: Vec<SessionInfo>,
     /// Currently selected session index
     pub session_selected: usize,
+
+    // Response summarization
+    /// Buffer for collecting raw response lines
+    response_buffer: Vec<String>,
+    /// When output last changed (for idle detection)
+    last_activity: Option<Instant>,
+    /// Receiver for async summarization result
+    summarizer_rx: Option<mpsc::Receiver<String>>,
+    /// Whether we're currently summarizing
+    is_summarizing: bool,
+    /// The user's original query (for context in summarization)
+    pending_query: Option<String>,
+
+    // Command history
+    /// Previous commands
+    command_history: Vec<String>,
+    /// Current position in history (None = new input, Some(i) = browsing history)
+    history_index: Option<usize>,
+    /// Saved input when browsing history
+    saved_input: String,
 }
 
 impl App {
@@ -151,6 +187,7 @@ impl App {
 
         let mut app = Self {
             project: None,
+            project_path: None,
             tmux,
             registry,
             store,
@@ -173,6 +210,16 @@ impl App {
 
             session_list: Vec::new(),
             session_selected: 0,
+
+            response_buffer: Vec::new(),
+            last_activity: None,
+            summarizer_rx: None,
+            is_summarizing: false,
+            pending_query: None,
+
+            command_history: Vec::new(),
+            history_index: None,
+            saved_input: String::new(),
         };
 
         // Add welcome message
@@ -204,6 +251,7 @@ impl App {
             if tmux.session_exists(&session_name) {
                 self.sessions.insert(project.name.clone(), session_name);
                 self.project = Some(project.name.clone());
+                self.project_path = Some(project.path.clone());
                 self.messages.push(Message::system(format!("Connected to '{}'", project.name)));
                 return Ok(());
             }
@@ -221,8 +269,8 @@ impl App {
                     format!("{} {}", cmd, cmd_args.join(" "))
                 };
 
-                // Create tmux session
-                if let Err(e) = tmux.create_session(&session_name) {
+                // Create tmux session in project directory
+                if let Err(e) = tmux.create_session_in_dir(&session_name, Some(&project.path)) {
                     return Err(format!("Failed to create tmux session: {}", e));
                 }
 
@@ -233,6 +281,7 @@ impl App {
 
                 self.sessions.insert(project.name.clone(), session_name);
                 self.project = Some(project.name.clone());
+                self.project_path = Some(project.path.clone());
                 self.messages.push(Message::system(format!("Started and connected to '{}'", project.name)));
                 return Ok(());
             }
@@ -241,9 +290,89 @@ impl App {
         Err("Tmux not available".to_string())
     }
 
+    /// Parse connect command arguments.
+    fn parse_connect_args(&self, arg: &str) -> Result<ConnectArgs, String> {
+        let parts: Vec<&str> = arg.split_whitespace().collect();
+
+        if parts.is_empty() {
+            return Err("connect requires arguments".to_string());
+        }
+
+        // Check if this has -a or -n flags (new project syntax)
+        if parts.iter().any(|&p| p == "-a" || p == "-n") {
+            let path = shellexpand::tilde(parts[0]).to_string();
+            let mut adapter = None;
+            let mut name = None;
+
+            let mut i = 1;
+            while i < parts.len() {
+                match parts[i] {
+                    "-a" => {
+                        if i + 1 < parts.len() {
+                            adapter = Some(parts[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            return Err("-a requires an adapter (cc, mpm)".to_string());
+                        }
+                    }
+                    "-n" => {
+                        if i + 1 < parts.len() {
+                            name = Some(parts[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            return Err("-n requires a project name".to_string());
+                        }
+                    }
+                    _ => {
+                        return Err(format!("unknown flag: {}", parts[i]));
+                    }
+                }
+            }
+
+            match (adapter, name) {
+                (Some(a), Some(n)) => Ok(ConnectArgs::New { path, adapter: a, name: n }),
+                (None, _) => Err("missing -a <adapter> (cc, mpm)".to_string()),
+                (_, None) => Err("missing -n <name>".to_string()),
+            }
+        } else if parts.len() == 1 {
+            // Existing project by name
+            Ok(ConnectArgs::Existing(parts[0].to_string()))
+        } else {
+            Err("use '/connect <name>' or '/connect <path> -a <adapter> -n <name>'".to_string())
+        }
+    }
+
+    /// Connect to a new project (create and start).
+    pub fn connect_new(&mut self, path: &str, adapter: &str, name: &str) -> Result<(), String> {
+        // Resolve adapter alias
+        let tool_id = self.registry.resolve(adapter)
+            .ok_or_else(|| format!("Unknown adapter: {}. Use: cc (claude-code), mpm", adapter))?
+            .to_string();
+
+        // Check if project already exists
+        let projects = self.store.load_all_projects()
+            .map_err(|e| format!("Failed to load projects: {}", e))?;
+
+        if projects.values().any(|p| p.name == name) {
+            return Err(format!("Project '{}' already exists. Use /connect {}", name, name));
+        }
+
+        // Create project
+        let mut project = commander_models::Project::new(path, name);
+        project.config.insert("tool".to_string(), serde_json::json!(tool_id));
+
+        // Save project
+        self.store.save_project(&project)
+            .map_err(|e| format!("Failed to save project: {}", e))?;
+
+        // Connect to the new project
+        self.connect(name)
+    }
+
     /// Disconnect from current project.
     pub fn disconnect(&mut self) {
         if let Some(project) = self.project.take() {
+            self.project_path = None;
             self.messages.push(Message::system(format!("Disconnected from '{}'", project)));
         }
     }
@@ -268,8 +397,9 @@ impl App {
             self.messages.push(Message::system(format!("Checking for uncommitted changes in {}...", path)));
 
             match self.git_commit_changes(path, name) {
-                Ok(true) => self.messages.push(Message::system("Changes committed.")),
-                Ok(false) => self.messages.push(Message::system("No changes to commit.")),
+                Ok(Some(true)) => self.messages.push(Message::system("Changes committed.")),
+                Ok(Some(false)) => self.messages.push(Message::system("No changes to commit.")),
+                Ok(None) => self.messages.push(Message::system("Not a git repository, skipping commit.")),
                 Err(e) => self.messages.push(Message::system(format!("Git warning: {}", e))),
             }
         }
@@ -298,9 +428,26 @@ impl App {
         }
     }
 
+    /// Check if path is inside a git worktree.
+    fn is_git_worktree(path: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(path)
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false)
+    }
+
     /// Commit any uncommitted git changes in the project directory.
-    fn git_commit_changes(&self, path: &str, project_name: &str) -> Result<bool, String> {
+    /// Returns Ok(None) if not a git repository, Ok(Some(true)) if committed,
+    /// Ok(Some(false)) if no changes, or Err on failure.
+    fn git_commit_changes(&self, path: &str, project_name: &str) -> Result<Option<bool>, String> {
         use std::process::Command;
+
+        // Skip git operations if not in a git worktree
+        if !Self::is_git_worktree(path) {
+            return Ok(None);
+        }
 
         // Check if there are changes
         let status = Command::new("git")
@@ -311,7 +458,7 @@ impl App {
 
         let changes = String::from_utf8_lossy(&status.stdout);
         if changes.trim().is_empty() {
-            return Ok(false); // No changes
+            return Ok(Some(false)); // No changes
         }
 
         // Stage all changes
@@ -321,7 +468,7 @@ impl App {
             .output()
             .map_err(|e| format!("Failed to stage changes: {}", e))?;
 
-        // Commit with message
+        // Commit with message (may fail if pre-commit hooks modify files)
         let message = format!("WIP: Auto-commit from Commander session '{}'", project_name);
         let commit = Command::new("git")
             .args(["commit", "-m", &message])
@@ -330,7 +477,44 @@ impl App {
             .map_err(|e| format!("Failed to commit: {}", e))?;
 
         if commit.status.success() {
-            Ok(true)
+            return Ok(Some(true));
+        }
+
+        // Pre-commit hooks may have modified files - re-stage and retry
+        let stdout = String::from_utf8_lossy(&commit.stdout);
+        if stdout.contains("Passed") || stdout.contains("Fixed") || stdout.contains("trailing whitespace") {
+            // Hooks ran and fixed things - re-stage and commit again
+            Command::new("git")
+                .args(["add", "-A"])
+                .current_dir(path)
+                .output()
+                .map_err(|e| format!("Failed to re-stage changes: {}", e))?;
+
+            let retry = Command::new("git")
+                .args(["commit", "-m", &message])
+                .current_dir(path)
+                .output()
+                .map_err(|e| format!("Failed to commit after hooks: {}", e))?;
+
+            if retry.status.success() {
+                return Ok(Some(true));
+            }
+
+            // Check if nothing to commit after hooks
+            let status2 = Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(path)
+                .output()
+                .ok();
+
+            if let Some(s) = status2 {
+                if String::from_utf8_lossy(&s.stdout).trim().is_empty() {
+                    return Ok(Some(false)); // Hooks fixed everything, nothing to commit
+                }
+            }
+
+            let stderr = String::from_utf8_lossy(&retry.stderr);
+            Err(format!("Commit failed after hooks: {}", stderr))
         } else {
             let stderr = String::from_utf8_lossy(&commit.stderr);
             Err(format!("Commit failed: {}", stderr))
@@ -356,18 +540,43 @@ impl App {
         tmux.send_line(session, None, message)
             .map_err(|e| format!("Failed to send: {}", e))?;
 
-        // Add sent message to output
+        // Add sent message to output and reset response collection
         self.messages.push(Message::sent(project.clone(), message));
+        self.pending_query = Some(message.to_string());
+        self.response_buffer.clear();
+        self.last_activity = Some(Instant::now());
         self.is_working = true;
+        self.is_summarizing = false;
         self.progress = 0.0;
         self.scroll_to_bottom();
 
         Ok(())
     }
 
-    /// Poll for new output from tmux.
+    /// Poll for new output from tmux and trigger summarization when idle.
     pub fn poll_output(&mut self) {
-        if !self.is_working {
+        // Check for summarization results first
+        if let Some(rx) = &self.summarizer_rx {
+            if let Ok(summary) = rx.try_recv() {
+                // Got summary result
+                if let Some(project) = &self.project {
+                    self.messages.push(Message::received(project.clone(), summary));
+                }
+                self.summarizer_rx = None;
+                self.is_summarizing = false;
+                self.is_working = false;
+                self.response_buffer.clear();
+                self.pending_query = None;
+                self.scroll_to_bottom();
+                return;
+            }
+        }
+
+        if !self.is_working || self.is_summarizing {
+            // Update progress animation if summarizing
+            if self.is_summarizing {
+                self.progress = (self.progress + 0.03) % 1.0;
+            }
             return;
         }
 
@@ -381,26 +590,72 @@ impl App {
             Err(_) => return,
         };
 
-        // Find new lines
+        // Check for new content
         if current_output != self.last_output {
             let new_lines = find_new_lines(&self.last_output, &current_output);
             for line in new_lines {
-                if !line.trim().is_empty() {
-                    self.messages.push(Message::received(project.clone(), line));
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    self.response_buffer.push(trimmed.to_string());
                 }
             }
-            self.last_output = current_output;
-            self.scroll_to_bottom();
+            self.last_output = current_output.clone();
+            self.last_activity = Some(Instant::now());
+        }
+
+        // Check if Claude Code is idle (prompt visible and no activity for 1.5s)
+        let is_idle = self.last_activity
+            .map(|t| t.elapsed().as_millis() > 1500)
+            .unwrap_or(false);
+
+        // Check for various Claude Code idle patterns
+        let has_prompt = is_claude_code_ready(&current_output);
+
+        if is_idle && has_prompt && !self.response_buffer.is_empty() {
+            // Trigger summarization
+            self.trigger_summarization();
         }
 
         // Update progress animation
         self.progress = (self.progress + 0.05) % 1.0;
     }
 
+    /// Trigger async summarization of the response buffer.
+    fn trigger_summarization(&mut self) {
+        let raw_response = self.response_buffer.join("\n");
+        let query = self.pending_query.clone().unwrap_or_default();
+
+        // Set summarizing state (status bar will show it)
+        self.is_summarizing = true;
+
+        // Create channel for result
+        let (tx, rx) = mpsc::channel();
+        self.summarizer_rx = Some(rx);
+
+        // Spawn thread for blocking HTTP call
+        std::thread::spawn(move || {
+            let summary = summarize_response_blocking(&query, &raw_response);
+            let _ = tx.send(summary);
+        });
+    }
+
     /// Stop the working indicator.
     pub fn stop_working(&mut self) {
         self.is_working = false;
+        self.is_summarizing = false;
         self.progress = 0.0;
+        self.response_buffer.clear();
+        self.pending_query = None;
+    }
+
+    /// Check if currently summarizing.
+    pub fn is_summarizing(&self) -> bool {
+        self.is_summarizing
+    }
+
+    /// Get the number of lines in the response buffer.
+    pub fn response_buffer_len(&self) -> usize {
+        self.response_buffer.len()
     }
 
     /// Toggle inspect mode (live tmux view).
@@ -509,12 +764,27 @@ impl App {
                 let project_name = session.name.strip_prefix("commander-")
                     .unwrap_or(&session.name).to_string();
 
+                // Look up project path
+                let path = self.store.load_all_projects().ok()
+                    .and_then(|projects| {
+                        projects.values()
+                            .find(|p| p.name == project_name)
+                            .map(|p| p.path.clone())
+                    });
+
                 self.sessions.insert(project_name.clone(), session.name.clone());
                 self.project = Some(project_name.clone());
+                self.project_path = path;
                 self.messages.push(Message::system(format!("Connected to '{}'", project_name)));
                 self.view_mode = ViewMode::Normal;
             } else {
-                self.messages.push(Message::system("Cannot connect to external session"));
+                // Connect to external session (use session name as project name)
+                let project_name = session.name.clone();
+                self.sessions.insert(project_name.clone(), session.name.clone());
+                self.project = Some(project_name.clone());
+                self.project_path = None;  // No project path for external sessions
+                self.messages.push(Message::system(format!("Connected to external session '{}'", project_name)));
+                self.view_mode = ViewMode::Normal;
             }
         }
     }
@@ -611,21 +881,99 @@ impl App {
     pub fn submit(&mut self) {
         let input = std::mem::take(&mut self.input);
         self.cursor_pos = 0;
+        self.history_index = None;
+        self.saved_input.clear();
 
         if input.is_empty() {
             return;
+        }
+
+        // Add to history (avoid duplicates of last entry)
+        if self.command_history.last() != Some(&input) {
+            self.command_history.push(input.clone());
         }
 
         // Handle commands
         if let Some(cmd) = input.strip_prefix('/') {
             self.handle_command(cmd);
         } else if self.project.is_some() {
-            // Send to connected project
-            if let Err(e) = self.send_message(&input) {
-                self.messages.push(Message::system(format!("Error: {}", e)));
+            // Check for filesystem commands first
+            let working_dir = self.project_path.as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+            if let Some(fs_cmd) = filesystem::parse_command(&input, &working_dir) {
+                // Execute filesystem command locally
+                let result = filesystem::execute(&fs_cmd, &working_dir);
+                let project = self.project.clone().unwrap_or_default();
+
+                self.messages.push(Message::sent(project.clone(), input.clone()));
+
+                if result.success {
+                    self.messages.push(Message::received(project.clone(), result.message));
+                    if let Some(details) = result.details {
+                        for line in details.lines() {
+                            self.messages.push(Message::received(project.clone(), line.to_string()));
+                        }
+                    }
+                } else {
+                    self.messages.push(Message::system(format!("Error: {}", result.message)));
+                }
+                self.scroll_to_bottom();
+            } else {
+                // Send to connected project
+                if let Err(e) = self.send_message(&input) {
+                    self.messages.push(Message::system(format!("Error: {}", e)));
+                }
             }
         } else {
             self.messages.push(Message::system("Not connected. Use /connect <project>"));
+        }
+    }
+
+    /// Navigate to previous command in history (Up arrow).
+    pub fn history_prev(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+
+        match self.history_index {
+            None => {
+                // First time pressing up - save current input and go to last history item
+                self.saved_input = std::mem::take(&mut self.input);
+                self.history_index = Some(self.command_history.len() - 1);
+                self.input = self.command_history.last().cloned().unwrap_or_default();
+            }
+            Some(idx) if idx > 0 => {
+                // Move to earlier history
+                self.history_index = Some(idx - 1);
+                self.input = self.command_history.get(idx - 1).cloned().unwrap_or_default();
+            }
+            _ => {
+                // Already at oldest entry
+            }
+        }
+        self.cursor_pos = self.input.len();
+    }
+
+    /// Navigate to next command in history (Down arrow).
+    pub fn history_next(&mut self) {
+        match self.history_index {
+            Some(idx) => {
+                if idx + 1 < self.command_history.len() {
+                    // Move to more recent history
+                    self.history_index = Some(idx + 1);
+                    self.input = self.command_history.get(idx + 1).cloned().unwrap_or_default();
+                } else {
+                    // Return to saved input
+                    self.history_index = None;
+                    self.input = std::mem::take(&mut self.saved_input);
+                }
+                self.cursor_pos = self.input.len();
+            }
+            None => {
+                // Not in history mode
+            }
         }
     }
 
@@ -637,25 +985,69 @@ impl App {
 
         match command.as_str() {
             "help" | "h" | "?" => {
-                self.messages.push(Message::system("Commands:"));
-                self.messages.push(Message::system("  /connect <project>  - Connect to project"));
-                self.messages.push(Message::system("  /disconnect         - Disconnect from project"));
-                self.messages.push(Message::system("  /list               - List projects"));
-                self.messages.push(Message::system("  /sessions           - Session picker (F3)"));
-                self.messages.push(Message::system("  /inspect            - Toggle inspect mode (F2)"));
-                self.messages.push(Message::system("  /stop [session]     - Stop session (commits changes, ends tmux)"));
-                self.messages.push(Message::system("  /clear              - Clear output"));
-                self.messages.push(Message::system("  /quit               - Exit TUI"));
+                self.messages.push(Message::system("═══ TUI Commands ═══"));
+                self.messages.push(Message::system("  /connect <name>                    Connect to existing project"));
+                self.messages.push(Message::system("  /connect <path> -a <adapter> -n <name>  Start new project"));
+                self.messages.push(Message::system("  /disconnect                        Disconnect from project"));
+                self.messages.push(Message::system("  /list                              List projects"));
+                self.messages.push(Message::system("  /sessions                          Session picker (F3)"));
+                self.messages.push(Message::system("  /inspect                           Toggle inspect mode (F2)"));
+                self.messages.push(Message::system("  /stop [session]                    Stop session (commits git, ends tmux)"));
+                self.messages.push(Message::system("  /clear                             Clear output"));
+                self.messages.push(Message::system("  /quit                              Exit TUI"));
                 self.messages.push(Message::system(""));
-                self.messages.push(Message::system("Keys: Up/Down scroll, F2 inspect, F3 sessions, Ctrl+C quit"));
+                self.messages.push(Message::system("═══ Adapters ═══"));
+                self.messages.push(Message::system("  cc, claude-code    Claude Code CLI"));
+                self.messages.push(Message::system("  mpm                Claude MPM (multi-project manager)"));
+                self.messages.push(Message::system(""));
+                self.messages.push(Message::system("═══ Filesystem (when connected) ═══"));
+                self.messages.push(Message::system("  ls, list [path]    List directory"));
+                self.messages.push(Message::system("  cat, read <file>   Read file contents"));
+                self.messages.push(Message::system("  head/tail <file>   First/last lines"));
+                self.messages.push(Message::system("  find <pattern>     Search for files"));
+                self.messages.push(Message::system("  mkdir [-p] <dir>   Create directory"));
+                self.messages.push(Message::system("  touch <file>       Create empty file"));
+                self.messages.push(Message::system("  mv <src> <dst>     Move/rename"));
+                self.messages.push(Message::system("  cp <src> <dst>     Copy file/dir"));
+                self.messages.push(Message::system("  rm [-f] <path>     Delete file/dir"));
+                self.messages.push(Message::system("  pwd                Show working directory"));
+                self.messages.push(Message::system(""));
+                self.messages.push(Message::system("═══ Keyboard ═══"));
+                self.messages.push(Message::system("  Up/Down     Command history"));
+                self.messages.push(Message::system("  PgUp/PgDn   Scroll output"));
+                self.messages.push(Message::system("  F2          Inspect mode (live tmux)"));
+                self.messages.push(Message::system("  F3          Session picker"));
+                self.messages.push(Message::system("  Ctrl+L      Clear output"));
+                self.messages.push(Message::system("  Ctrl+C      Quit"));
+                self.messages.push(Message::system(""));
+                self.messages.push(Message::system("═══ CLI ═══"));
+                self.messages.push(Message::system("  commander                          Launch TUI (default)"));
+                self.messages.push(Message::system("  commander -v                       Verbose mode (-vv, -vvv)"));
+                self.messages.push(Message::system("  commander tui -p <name>            TUI with auto-connect"));
+                self.messages.push(Message::system("  commander repl                     Launch REPL"));
+                self.messages.push(Message::system("  commander list                     List projects"));
+                self.messages.push(Message::system("  commander adapters                 Show adapters"));
             }
             "connect" | "c" => {
-                if let Some(project) = arg {
-                    if let Err(e) = self.connect(project) {
-                        self.messages.push(Message::system(format!("Error: {}", e)));
+                if let Some(arg_str) = arg {
+                    // Parse connect arguments
+                    match self.parse_connect_args(arg_str) {
+                        Ok(ConnectArgs::Existing(name)) => {
+                            if let Err(e) = self.connect(&name) {
+                                self.messages.push(Message::system(format!("Error: {}", e)));
+                            }
+                        }
+                        Ok(ConnectArgs::New { path, adapter, name }) => {
+                            if let Err(e) = self.connect_new(&path, &adapter, &name) {
+                                self.messages.push(Message::system(format!("Error: {}", e)));
+                            }
+                        }
+                        Err(e) => {
+                            self.messages.push(Message::system(format!("Error: {}", e)));
+                        }
                     }
                 } else {
-                    self.messages.push(Message::system("Usage: /connect <project>"));
+                    self.messages.push(Message::system("Usage: /connect <name> or /connect <path> -a <adapter> -n <name>"));
                 }
             }
             "disconnect" | "dc" => {
@@ -749,8 +1141,91 @@ fn find_new_lines(prev: &str, current: &str) -> Vec<String> {
     new_lines
 }
 
+/// Check if Claude Code is ready for input (idle at prompt).
+fn is_claude_code_ready(output: &str) -> bool {
+    // Get the last few non-empty lines
+    let lines: Vec<&str> = output.lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(10)
+        .collect();
+
+    if lines.is_empty() {
+        return false;
+    }
+
+    // Pattern 1: Line contains just the prompt character ❯
+    // Claude Code shows "❯ " when ready for input
+    for line in &lines[..lines.len().min(3)] {
+        let trimmed = line.trim();
+        if trimmed == "❯" || trimmed == "❯ " {
+            return true;
+        }
+        // Also check for prompt at end of line (after path)
+        if trimmed.ends_with(" ❯") || trimmed.ends_with(" ❯ ") {
+            return true;
+        }
+    }
+
+    // Pattern 2: The input box separator lines
+    // Claude Code shows ──────────── above and below input
+    let has_separator = lines.iter().take(5).any(|l| {
+        let trimmed = l.trim();
+        trimmed.starts_with("───") || trimmed.starts_with("╭─") || trimmed.starts_with("╰─")
+    });
+
+    // Pattern 3: "bypass permissions" hint shown at prompt
+    let has_bypass_hint = lines.iter().take(5).any(|l| {
+        l.contains("bypass permissions")
+    });
+
+    // Pattern 4: Empty prompt box (two separators with nothing between)
+    if has_separator {
+        // Check if we see the prompt structure
+        for (i, line) in lines.iter().enumerate() {
+            if line.contains("❯") && i < 5 {
+                return true;
+            }
+        }
+    }
+
+    // Pattern 5: Check for common ready indicators
+    let has_ready_indicator = lines.iter().take(3).any(|l| {
+        let trimmed = l.trim();
+        // Empty input prompt
+        trimmed == "│ ❯" ||
+        trimmed.starts_with("│ ❯") ||
+        // Just the chevron
+        trimmed == ">" ||
+        trimmed.ends_with("> ") ||
+        // Explicit ready state
+        trimmed.contains("[ready]")
+    });
+
+    has_ready_indicator || has_bypass_hint
+}
+
 /// Check if a line is Claude Code UI noise that should be filtered out.
 fn is_ui_noise(line: &str) -> bool {
+    // Prompt lines - echoed user input from Claude Code
+    // Matches: [project] ❯ text, [project] > text, project> text
+    if line.contains("] ❯ ") || line.contains("] > ") {
+        return true;
+    }
+    // Also matches bare prompt at start: project>
+    if line.chars().take(30).collect::<String>().contains("> ")
+        && !line.contains(':')
+        && !line.contains("http") {
+        // Looks like a prompt echo, not content
+        if let Some(pos) = line.find("> ") {
+            let before = &line[..pos];
+            // If it's just a word before >, it's likely a prompt
+            if !before.contains(' ') || before.starts_with('[') {
+                return true;
+            }
+        }
+    }
+
     // Spinner characters and thinking indicators
     let spinners = ['✳', '✶', '✻', '✽', '✢', '⏺', '·', '●', '○', '◐', '◑', '◒', '◓'];
     if line.chars().next().map(|c| spinners.contains(&c)).unwrap_or(false) {
@@ -801,6 +1276,96 @@ fn is_ui_noise(line: &str) -> bool {
     false
 }
 
+/// Blocking HTTP call to summarize a response via OpenRouter.
+fn summarize_response_blocking(query: &str, raw_response: &str) -> String {
+    use std::env;
+
+    let api_key = match env::var("OPENROUTER_API_KEY") {
+        Ok(key) => key,
+        Err(_) => {
+            // No API key - return cleaned raw response
+            return clean_raw_response(raw_response);
+        }
+    };
+
+    let model = env::var("OPENROUTER_MODEL")
+        .unwrap_or_else(|_| "anthropic/claude-sonnet-4".to_string());
+
+    let system_prompt = r#"You are a response summarizer for Commander, an AI orchestration tool.
+Your job is to take raw output from Claude Code and summarize it conversationally.
+
+Rules:
+- Be concise but informative (2-4 sentences for simple responses, more for complex ones)
+- Focus on what was DONE or LEARNED, not the process
+- Skip UI noise, file listings, and verbose tool output
+- If code was written, summarize what it does
+- If a question was answered, give the key answer
+- Use natural language, not bullet points unless listing multiple items
+- Never say "Claude Code" or mention the underlying tool"#;
+
+    let user_prompt = format!(
+        "User asked: {}\n\nRaw response:\n{}\n\nProvide a conversational summary:",
+        query, raw_response
+    );
+
+    // Build request
+    let request_body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "max_tokens": 500
+    });
+
+    // Make blocking HTTP request
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send();
+
+    match response {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>() {
+                if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
+                    return content.to_string();
+                }
+            }
+            // Fallback to cleaned raw response
+            clean_raw_response(raw_response)
+        }
+        Err(_) => {
+            // Fallback to cleaned raw response
+            clean_raw_response(raw_response)
+        }
+    }
+}
+
+/// Clean raw response when summarization isn't available.
+fn clean_raw_response(raw: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        // Skip obvious noise
+        if trimmed.is_empty()
+            || trimmed.starts_with("⎿")
+            || trimmed.starts_with("⏺")
+            || trimmed.contains("hook")
+            || trimmed.contains("ctrl+o")
+            || trimmed.contains("(MCP)")
+            || trimmed.starts_with("Reading")
+            || trimmed.starts_with("Searched")
+        {
+            continue;
+        }
+        lines.push(trimmed);
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,6 +1383,23 @@ mod tests {
         let current = "line1\nline2\nline3\n";
         let new = find_new_lines(prev, current);
         assert_eq!(new, vec!["line3"]);
+    }
+
+    #[test]
+    fn test_find_new_lines_filters_prompt_echo() {
+        let prev = "";
+        let current = "[duetto] ❯ describe this project\nActual response here\n";
+        let new = find_new_lines(prev, current);
+        assert_eq!(new, vec!["Actual response here"]);
+    }
+
+    #[test]
+    fn test_is_ui_noise_prompt_lines() {
+        assert!(is_ui_noise("[duetto] ❯ some command"));
+        assert!(is_ui_noise("[project] > test input"));
+        assert!(is_ui_noise("duetto> hello"));
+        assert!(!is_ui_noise("This is actual content"));
+        assert!(!is_ui_noise("Response: here is the answer"));
     }
 
     #[test]
