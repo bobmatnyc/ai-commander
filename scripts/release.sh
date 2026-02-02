@@ -137,7 +137,7 @@ update_homebrew() {
   end
 
   test do
-    assert_match \"commander\", shell_output(\"#{bin}/commander --version\")
+    assert_match \"ai-commander\", shell_output(\"#{bin}/ai-commander --version\")
   end
 end"
 

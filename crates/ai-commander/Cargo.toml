@@ -6,7 +6,7 @@ license.workspace = true
 description = "Multi-interface AI session manager - TUI, REPL, and Telegram"
 
 [[bin]]
-name = "commander"
+name = "ai-commander"
 path = "src/main.rs"
 
 [dependencies]

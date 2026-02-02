@@ -15,9 +15,9 @@ fn version_string() -> &'static str {
     VERSION_STRING.get_or_init(|| format!("{} ({}, {})", VERSION, GIT_HASH, BUILD_DATE))
 }
 
-/// Commander - Multi-project AI orchestration system
+/// AI Commander - Multi-interface AI session manager
 #[derive(Parser, Debug)]
-#[command(name = "commander")]
+#[command(name = "ai-commander")]
 #[command(author, version = version_string(), about, long_about = None)]
 pub struct Cli {
     /// Enable verbose output (-v, -vv, -vvv)
