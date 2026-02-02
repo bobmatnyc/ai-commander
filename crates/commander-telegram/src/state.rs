@@ -5,9 +5,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use commander_adapters::AdapterRegistry;
+use commander_core::{
+    clean_screen_preview, find_new_lines, is_claude_ready, summarize_with_fallback,
+};
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
-use teloxide::types::ChatId;
+use teloxide::types::{ChatId, MessageId};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -51,10 +54,6 @@ pub struct TelegramState {
     adapters: AdapterRegistry,
     /// State store for project persistence.
     store: StateStore,
-    /// OpenRouter API key for summarization.
-    openrouter_key: Option<String>,
-    /// Model to use for summarization.
-    openrouter_model: String,
     /// Authorized chat IDs for this commander instance.
     authorized_chats: RwLock<HashSet<i64>>,
 }
@@ -65,9 +64,6 @@ impl TelegramState {
         let tmux = TmuxOrchestrator::new().ok();
         let adapters = AdapterRegistry::new();
         let store = StateStore::new(state_dir);
-        let openrouter_key = std::env::var("OPENROUTER_API_KEY").ok();
-        let openrouter_model = std::env::var("OPENROUTER_MODEL")
-            .unwrap_or_else(|_| "anthropic/claude-sonnet-4".to_string());
 
         if tmux.is_none() {
             warn!("tmux not available - project connections will not work");
@@ -78,8 +74,6 @@ impl TelegramState {
             tmux,
             adapters,
             store,
-            openrouter_key,
-            openrouter_model,
             authorized_chats: RwLock::new(HashSet::new()),
         }
     }
@@ -91,7 +85,7 @@ impl TelegramState {
 
     /// Check if summarization is available.
     pub fn has_summarization(&self) -> bool {
-        self.openrouter_key.is_some()
+        commander_core::is_summarization_available()
     }
 
     /// Get a reference to the tmux orchestrator.
@@ -142,7 +136,8 @@ impl TelegramState {
 
     /// Connect a chat to a session after successful pairing.
     /// This is a convenience method that combines authorization check with connection.
-    pub async fn connect_session(&self, chat_id: ChatId, project_name: &str) -> Result<String> {
+    /// Returns (project_name, tool_id).
+    pub async fn connect_session(&self, chat_id: ChatId, project_name: &str) -> Result<(String, String)> {
         // The chat was just authorized via pairing, proceed with connection
         self.connect(chat_id, project_name).await
     }
@@ -173,8 +168,50 @@ impl TelegramState {
             .map(|s| (s.project_name.clone(), s.project_path.clone()))
     }
 
+    /// Get detailed session status for /status command.
+    /// Returns (project_name, project_path, tool_id, is_waiting, pending_query, screen_preview).
+    pub async fn get_session_status(
+        &self,
+        chat_id: ChatId,
+    ) -> Option<(String, String, String, bool, Option<String>, Option<String>)> {
+        let sessions = self.sessions.read().await;
+        let session = sessions.get(&chat_id.0)?;
+
+        // Get tool_id from project config
+        let tool_id = self
+            .store
+            .load_all_projects()
+            .ok()
+            .and_then(|projects| {
+                projects
+                    .values()
+                    .find(|p| p.name == session.project_name)
+                    .and_then(|p| p.config.get("tool"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "claude-code".to_string());
+
+        // Get screen preview from tmux
+        let screen_preview = self.tmux.as_ref().and_then(|tmux| {
+            tmux.capture_output(&session.tmux_session, None, Some(10))
+                .ok()
+                .map(|output| clean_screen_preview(&output, 5))
+        });
+
+        Some((
+            session.project_name.clone(),
+            session.project_path.clone(),
+            tool_id,
+            session.is_waiting,
+            session.pending_query.clone(),
+            screen_preview,
+        ))
+    }
+
     /// Connect a user to a project.
-    pub async fn connect(&self, chat_id: ChatId, project_name: &str) -> Result<String> {
+    /// Connect to an existing project. Returns (project_name, tool_id).
+    pub async fn connect(&self, chat_id: ChatId, project_name: &str) -> Result<(String, String)> {
         let tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
@@ -197,16 +234,17 @@ impl TelegramState {
 
         let session_name = format!("commander-{}", project.name);
 
+        // Get tool_id from project config
+        let tool_id = project
+            .config
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or("claude-code")
+            .to_string();
+
         // Check if tmux session exists, create if not
         if !tmux.session_exists(&session_name) {
-            // Try to start the project
-            let tool_id = project
-                .config
-                .get("tool")
-                .and_then(|v| v.as_str())
-                .unwrap_or("claude-code");
-
-            if let Some(adapter) = self.adapters.get(tool_id) {
+            if let Some(adapter) = self.adapters.get(&tool_id) {
                 let (cmd, cmd_args) = adapter.launch_command(&project.path);
                 let full_cmd = if cmd_args.is_empty() {
                     cmd
@@ -225,7 +263,7 @@ impl TelegramState {
                 info!(
                     project = %project.name,
                     session = %session_name,
-                    "Started new Claude Code session"
+                    "Started new session"
                 );
             } else {
                 return Err(TelegramError::SessionError(format!(
@@ -247,7 +285,7 @@ impl TelegramState {
         sessions.insert(chat_id.0, session);
 
         debug!(chat_id = %chat_id.0, project = %project.name, "User connected");
-        Ok(project.name.clone())
+        Ok((project.name.clone(), tool_id))
     }
 
     /// Disconnect a user from their current project.
@@ -262,7 +300,7 @@ impl TelegramState {
     }
 
     /// Send a message to the user's connected project.
-    pub async fn send_message(&self, chat_id: ChatId, message: &str) -> Result<()> {
+    pub async fn send_message(&self, chat_id: ChatId, message: &str, message_id: Option<MessageId>) -> Result<()> {
         let tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
@@ -281,8 +319,8 @@ impl TelegramState {
         tmux.send_line(&session.tmux_session, None, message)
             .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
 
-        // Start response collection
-        session.start_response_collection(message, last_output);
+        // Start response collection with message ID for reply threading
+        session.start_response_collection(message, last_output, message_id);
 
         debug!(
             chat_id = %chat_id.0,
@@ -295,8 +333,8 @@ impl TelegramState {
     }
 
     /// Poll for new output from a user's project.
-    /// Returns Some(response) when idle and response is ready, None otherwise.
-    pub async fn poll_output(&self, chat_id: ChatId) -> Result<Option<String>> {
+    /// Returns Some((response, message_id)) when idle and response is ready, None otherwise.
+    pub async fn poll_output(&self, chat_id: ChatId) -> Result<Option<(String, Option<MessageId>)>> {
         let tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
@@ -324,81 +362,21 @@ impl TelegramState {
 
         // Check if Claude Code is idle (prompt visible and no activity for 1.5s)
         let is_idle = session.is_idle(1500);
-        let has_prompt = is_claude_code_ready(&current_output);
+        let has_prompt = is_claude_ready(&current_output);
 
         if is_idle && has_prompt && !session.response_buffer.is_empty() {
             let raw_response = session.get_response();
             let query = session.pending_query.clone().unwrap_or_default();
+            let message_id = session.pending_message_id;
             session.reset_response_state();
 
-            // Summarize or clean the response
-            let response = if self.openrouter_key.is_some() {
-                self.summarize_response(&query, &raw_response).await
-            } else {
-                clean_raw_response(&raw_response)
-            };
+            // Summarize or clean the response using commander-core
+            let response = summarize_with_fallback(&query, &raw_response).await;
 
-            return Ok(Some(response));
+            return Ok(Some((response, message_id)));
         }
 
         Ok(None)
-    }
-
-    /// Summarize a response using OpenRouter.
-    async fn summarize_response(&self, query: &str, raw_response: &str) -> String {
-        let Some(api_key) = &self.openrouter_key else {
-            return clean_raw_response(raw_response);
-        };
-
-        let system_prompt = r#"You are a response summarizer for Commander, an AI orchestration tool.
-Your job is to take raw output from Claude Code and summarize it conversationally.
-
-Rules:
-- Be concise but informative (2-4 sentences for simple responses, more for complex ones)
-- Focus on what was DONE or LEARNED, not the process
-- Skip UI noise, file listings, and verbose tool output
-- If code was written, summarize what it does
-- If a question was answered, give the key answer
-- Use natural language, not bullet points unless listing multiple items
-- Never say "Claude Code" or mention the underlying tool"#;
-
-        let user_prompt = format!(
-            "User asked: {}\n\nRaw response:\n{}\n\nProvide a conversational summary:",
-            query, raw_response
-        );
-
-        let request_body = serde_json::json!({
-            "model": self.openrouter_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "max_tokens": 500
-        });
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) => {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
-                        return content.to_string();
-                    }
-                }
-                clean_raw_response(raw_response)
-            }
-            Err(e) => {
-                warn!(error = %e, "Summarization failed, using raw response");
-                clean_raw_response(raw_response)
-            }
-        }
     }
 
     /// List all available projects.
@@ -500,7 +478,7 @@ Rules:
         path: &str,
         adapter: &str,
         name: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         // Verify tmux is available (value unused; connect() uses it internally)
         let _tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
@@ -542,163 +520,6 @@ Rules:
     }
 }
 
-/// Find new lines in tmux output by comparing previous and current captures.
-fn find_new_lines(prev: &str, current: &str) -> Vec<String> {
-    use std::collections::HashSet;
-
-    let prev_lines: HashSet<&str> = prev.lines().collect();
-    let mut new_lines = Vec::new();
-
-    for line in current.lines() {
-        let trimmed = line.trim();
-        if !prev_lines.contains(line) && !prev_lines.contains(trimmed) && !trimmed.is_empty() {
-            // Filter out Claude Code UI noise
-            if !is_ui_noise(trimmed) {
-                new_lines.push(line.to_string());
-            }
-        }
-    }
-
-    new_lines
-}
-
-/// Check if Claude Code is ready for input (idle at prompt).
-fn is_claude_code_ready(output: &str) -> bool {
-    let lines: Vec<&str> = output
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(10)
-        .collect();
-
-    if lines.is_empty() {
-        return false;
-    }
-
-    // Pattern 1: Line contains just the prompt character
-    for line in &lines[..lines.len().min(3)] {
-        let trimmed = line.trim();
-        if trimmed == "❯" || trimmed == "❯ " {
-            return true;
-        }
-        if trimmed.ends_with(" ❯") || trimmed.ends_with(" ❯ ") {
-            return true;
-        }
-    }
-
-    // Pattern 2: The input box separator lines
-    let has_separator = lines.iter().take(5).any(|l| {
-        let trimmed = l.trim();
-        trimmed.starts_with("───") || trimmed.starts_with("╭─") || trimmed.starts_with("╰─")
-    });
-
-    // Pattern 3: "bypass permissions" hint shown at prompt
-    let has_bypass_hint = lines.iter().take(5).any(|l| l.contains("bypass permissions"));
-
-    // Pattern 4: Empty prompt box
-    if has_separator {
-        for (i, line) in lines.iter().enumerate() {
-            if line.contains("❯") && i < 5 {
-                return true;
-            }
-        }
-    }
-
-    // Pattern 5: Common ready indicators
-    let has_ready_indicator = lines.iter().take(3).any(|l| {
-        let trimmed = l.trim();
-        trimmed == "│ ❯"
-            || trimmed.starts_with("│ ❯")
-            || trimmed == ">"
-            || trimmed.ends_with("> ")
-            || trimmed.contains("[ready]")
-    });
-
-    has_ready_indicator || has_bypass_hint
-}
-
-/// Check if a line is Claude Code UI noise that should be filtered out.
-fn is_ui_noise(line: &str) -> bool {
-    // Prompt lines
-    if line.contains("] ❯ ") || line.contains("] > ") {
-        return true;
-    }
-
-    // Spinner characters
-    let spinners = ['✳', '✶', '✻', '✽', '✢', '⏺', '·', '●', '○', '◐', '◑', '◒', '◓'];
-    if line
-        .chars()
-        .next()
-        .map(|c| spinners.contains(&c))
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    // Status bar box drawing characters
-    if line.starts_with('╰')
-        || line.starts_with('╭')
-        || line.starts_with('│')
-        || line.starts_with('├')
-        || line.starts_with('└')
-        || line.starts_with('┌')
-    {
-        return true;
-    }
-
-    // Claude Code branding
-    if line.contains("▐▛") || line.contains("▜▌") || line.contains("▝▜") {
-        return true;
-    }
-
-    // Thinking indicators
-    let lower = line.to_lowercase();
-    if lower.contains("spelunking")
-        || lower.contains("(thinking)")
-        || lower.contains("thinking…")
-        || lower.contains("thinking...")
-    {
-        return true;
-    }
-
-    // Status messages
-    if lower.contains("ctrl+b") || lower.contains("to run in background") {
-        return true;
-    }
-
-    // Version/branding
-    if lower.contains("claude code v")
-        || lower.contains("claude max")
-        || lower.contains("opus 4")
-        || lower.contains("sonnet")
-    {
-        return true;
-    }
-
-    false
-}
-
-/// Clean raw response when summarization isn't available.
-fn clean_raw_response(raw: &str) -> String {
-    let mut lines: Vec<&str> = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("⎿")
-            || trimmed.starts_with("⏺")
-            || trimmed.contains("hook")
-            || trimmed.contains("ctrl+o")
-            || trimmed.contains("(MCP)")
-            || trimmed.starts_with("Reading")
-            || trimmed.starts_with("Searched")
-        {
-            continue;
-        }
-        lines.push(trimmed);
-    }
-    lines.join("\n")
-}
-
 /// Create a shared state wrapped in Arc for use across handlers.
 pub fn create_shared_state(state_dir: &std::path::Path) -> Arc<TelegramState> {
     Arc::new(TelegramState::new(state_dir))
@@ -707,19 +528,20 @@ pub fn create_shared_state(state_dir: &std::path::Path) -> Arc<TelegramState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commander_core::{clean_response, is_ui_noise};
 
     #[test]
     fn test_is_ui_noise() {
-        assert!(is_ui_noise("[project] ❯ command"));
-        assert!(is_ui_noise("✳ Loading..."));
-        assert!(is_ui_noise("╭─────────"));
+        assert!(is_ui_noise("[project] \u{276F} command"));
+        assert!(is_ui_noise("\u{2733} Loading..."));
+        assert!(is_ui_noise("\u{256D}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
         assert!(!is_ui_noise("This is actual content"));
     }
 
     #[test]
-    fn test_clean_raw_response() {
-        let raw = "⏺ Loading\nActual response\n⎿ Footer";
-        let cleaned = clean_raw_response(raw);
+    fn test_clean_response() {
+        let raw = "\u{23FA} Loading\nActual response\n\u{23BF} Footer";
+        let cleaned = clean_response(raw);
         assert_eq!(cleaned, "Actual response");
     }
 
@@ -729,5 +551,21 @@ mod tests {
         let current = "line1\nline2\nline3";
         let new = find_new_lines(prev, current);
         assert_eq!(new, vec!["line3"]);
+    }
+
+    #[test]
+    fn test_clean_screen_preview() {
+        // Test with UI noise mixed with content
+        let output = "\u{256D}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\nActual content 1\n\u{2502} \u{276F}\nContent 2\nContent 3\n\u{2733} Loading";
+        let cleaned = clean_screen_preview(&output, 5);
+        assert_eq!(cleaned, "Actual content 1\nContent 2\nContent 3");
+    }
+
+    #[test]
+    fn test_clean_screen_preview_limits_lines() {
+        // Test that it only returns last 5 lines
+        let output = "line1\nline2\nline3\nline4\nline5\nline6\nline7";
+        let cleaned = clean_screen_preview(&output, 5);
+        assert_eq!(cleaned, "line3\nline4\nline5\nline6\nline7");
     }
 }

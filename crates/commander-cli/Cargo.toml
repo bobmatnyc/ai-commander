@@ -15,6 +15,7 @@ commander-persistence = { path = "../commander-persistence" }
 commander-adapters = { path = "../commander-adapters" }
 commander-tmux = { path = "../commander-tmux" }
 commander-telegram = { path = "../commander-telegram" }
+commander-core = { path = "../commander-core" }
 serde = { workspace = true }
 clap = { workspace = true }
 rustyline = { workspace = true }
