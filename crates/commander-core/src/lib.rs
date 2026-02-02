@@ -1,6 +1,6 @@
 //! Commander Core - shared business logic for all Commander interfaces.
 //!
-//! This crate provides core functionality used by both the TUI (commander-cli)
+//! This crate provides core functionality used by both the TUI (ai-commander)
 //! and Telegram (commander-telegram) interfaces:
 //!
 //! - **config**: Shared configuration paths and utilities

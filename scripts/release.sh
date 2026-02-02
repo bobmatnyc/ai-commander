@@ -116,7 +116,7 @@ update_homebrew() {
   depends_on \"rust\" => :build
 
   def install
-    system \"cargo\", \"install\", *std_cargo_args(path: \"crates/commander-cli\")
+    system \"cargo\", \"install\", *std_cargo_args(path: \"crates/ai-commander\")
 
     # Also build the telegram bot binary
     system \"cargo\", \"build\", \"--release\", \"-p\", \"commander-telegram\"

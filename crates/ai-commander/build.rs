@@ -1,4 +1,4 @@
-//! Build script for commander-cli.
+//! Build script for ai-commander.
 //!
 //! Sets compile-time environment variables for version and build metadata.
 
