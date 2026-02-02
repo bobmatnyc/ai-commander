@@ -123,6 +123,8 @@ impl TelegramBot {
         let state_for_commands = Arc::clone(&state);
         let state_for_messages = Arc::clone(&state);
 
+        let state_for_unknown = Arc::clone(&state);
+
         let handler = dptree::entry()
             .branch(
                 Update::filter_message()
@@ -130,6 +132,28 @@ impl TelegramBot {
                     .endpoint(move |bot: Bot, msg: Message, cmd: Command| {
                         let state = Arc::clone(&state_for_commands);
                         async move { handle_command(bot, msg, cmd, state).await }
+                    }),
+            )
+            .branch(
+                Update::filter_message()
+                    .filter(|msg: Message| {
+                        // Handle unrecognized commands (start with / but didn't parse)
+                        msg.text()
+                            .map(|t| t.starts_with('/'))
+                            .unwrap_or(false)
+                    })
+                    .endpoint(move |bot: Bot, msg: Message| {
+                        let state = Arc::clone(&state_for_unknown);
+                        async move {
+                            if let Some(text) = msg.text() {
+                                info!(cmd = %text, "Unrecognized command received");
+                                bot.send_message(
+                                    msg.chat.id,
+                                    format!("Unknown command: {}\n\nUse /help to see available commands.", text.split_whitespace().next().unwrap_or(text)),
+                                ).await?;
+                            }
+                            Ok(())
+                        }
                     }),
             )
             .branch(
