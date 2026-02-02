@@ -950,7 +950,14 @@ impl App {
                 }
             }
         } else {
-            self.messages.push(Message::system("Not connected. Use /connect <project>"));
+            // Not connected - treat as Commander instruction
+            // Show available options for ambiguous commands
+            self.messages.push(Message::system(format!("Commander: {}", input)));
+            self.messages.push(Message::system(""));
+            self.messages.push(Message::system("Did you mean to route this to a session?"));
+            self.messages.push(Message::system("  @<session> <message>  - Send to specific session"));
+            self.messages.push(Message::system("  /connect <name>       - Connect to a session first"));
+            self.messages.push(Message::system("  /sessions             - List available sessions"));
         }
     }
 

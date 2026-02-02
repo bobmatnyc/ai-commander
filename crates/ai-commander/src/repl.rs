@@ -914,14 +914,20 @@ impl Repl {
 
             ReplCommand::Text(text) => {
                 if !text.is_empty() {
-                    // If connected, treat as message to send
+                    // If connected, treat as message to send to connected session
                     if self.connected_project.is_some() {
                         self.handle_command(ReplCommand::Send(text))?;
                     } else if self.chat_client.is_available() {
                         // Chat mode - send to OpenRouter
                         self.handle_chat(&text)?;
                     } else {
-                        println!("Not connected. Use /connect <project> or set OPENROUTER_API_KEY for chat.");
+                        // Not connected - treat as Commander instruction, ask for clarification
+                        println!("Commander: {}", text);
+                        println!();
+                        println!("Did you mean to route this to a session?");
+                        println!("  @<session> <message>  - Send to specific session");
+                        println!("  /connect <name>       - Connect to a session first");
+                        println!("  /sessions             - List available sessions");
                     }
                 }
                 Ok(false)
