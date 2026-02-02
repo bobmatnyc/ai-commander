@@ -1084,12 +1084,14 @@ impl Repl {
     fn generate_telegram_pairing(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Ensure telegram bot is running
         match crate::ensure_telegram_running() {
-            Ok(was_running) => {
-                if was_running {
-                    println!("[ok] Telegram bot is running");
-                } else {
-                    println!("[ok] Telegram bot started");
-                }
+            Ok(crate::TelegramStartResult::AlreadyRunning) => {
+                println!("[ok] Telegram bot is running");
+            }
+            Ok(crate::TelegramStartResult::Started) => {
+                println!("[ok] Telegram bot started");
+            }
+            Ok(crate::TelegramStartResult::BuiltAndStarted) => {
+                println!("[ok] Built and started Telegram bot");
             }
             Err(e) => {
                 println!("[warn] Could not start Telegram bot: {}", e);

@@ -1203,12 +1203,14 @@ impl App {
     fn generate_telegram_pairing(&mut self) {
         // Ensure telegram bot is running
         match crate::ensure_telegram_running() {
-            Ok(was_running) => {
-                if was_running {
-                    self.messages.push(Message::system("[ok] Telegram bot is running"));
-                } else {
-                    self.messages.push(Message::system("[ok] Telegram bot started"));
-                }
+            Ok(crate::TelegramStartResult::AlreadyRunning) => {
+                self.messages.push(Message::system("[ok] Telegram bot is running"));
+            }
+            Ok(crate::TelegramStartResult::Started) => {
+                self.messages.push(Message::system("[ok] Telegram bot started"));
+            }
+            Ok(crate::TelegramStartResult::BuiltAndStarted) => {
+                self.messages.push(Message::system("[ok] Built and started Telegram bot"));
             }
             Err(e) => {
                 self.messages.push(Message::system(format!("[warn] Could not start Telegram bot: {}", e)));
