@@ -192,6 +192,12 @@ fn run_loop(
             app.refresh_inspect_content();
         }
 
+        // Check session status for "waiting for input" notifications
+        app.check_session_status();
+
+        // Full scan of all sessions every 5 minutes
+        app.scan_all_sessions();
+
         // Check if should quit
         if app.should_quit {
             break;

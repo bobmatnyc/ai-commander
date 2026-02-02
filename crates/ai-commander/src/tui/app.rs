@@ -184,6 +184,14 @@ pub struct App {
     completions: Vec<String>,
     /// Current completion index (None = not in completion mode)
     completion_index: Option<usize>,
+
+    // Session status monitoring
+    /// Last known ready state for each session (true = waiting for input)
+    session_ready_state: HashMap<String, bool>,
+    /// Last time we checked session status (fast check - 2 sec)
+    last_status_check: Option<Instant>,
+    /// Last time we did a full session scan (slow check - 5 min)
+    last_full_scan: Option<Instant>,
 }
 
 impl App {
@@ -234,6 +242,10 @@ impl App {
 
             completions: Vec::new(),
             completion_index: None,
+
+            session_ready_state: HashMap::new(),
+            last_status_check: None,
+            last_full_scan: None,
         };
 
         // Add welcome message
@@ -707,6 +719,139 @@ impl App {
                     self.inspect_content = output;
                 }
             }
+        }
+    }
+
+    /// Check session status and notify when sessions become ready for input.
+    pub fn check_session_status(&mut self) {
+        // Rate limit checks to every 2 seconds
+        let now = Instant::now();
+        if let Some(last_check) = self.last_status_check {
+            if now.duration_since(last_check).as_secs() < 2 {
+                return;
+            }
+        }
+        self.last_status_check = Some(now);
+
+        // Skip if no tmux or currently working
+        if self.tmux.is_none() || self.is_working {
+            return;
+        }
+
+        // Collect session info and status to avoid borrow issues
+        let sessions_to_check: Vec<_> = self.sessions.iter()
+            .map(|(name, session)| (name.clone(), session.clone()))
+            .collect();
+
+        let connected_project = self.project.clone();
+
+        // Check each session and collect notifications
+        let mut notifications: Vec<(String, bool, String)> = Vec::new();
+        let mut state_updates: Vec<(String, bool)> = Vec::new();
+
+        if let Some(tmux) = &self.tmux {
+            for (name, session) in sessions_to_check {
+                if let Ok(output) = tmux.capture_output(&session, None, Some(50)) {
+                    let is_ready = is_claude_ready(&output);
+                    let was_ready = self.session_ready_state.get(&name).copied().unwrap_or(true);
+
+                    // Notify when transitioning from not-ready to ready
+                    if is_ready && !was_ready {
+                        let preview = extract_ready_preview(&output);
+                        let is_connected = connected_project.as_ref() == Some(&name);
+                        notifications.push((name.clone(), is_connected, preview));
+                    }
+
+                    state_updates.push((name, is_ready));
+                }
+            }
+        }
+
+        // Apply notifications
+        let mut should_scroll = false;
+        for (name, is_connected, preview) in notifications {
+            if is_connected {
+                self.messages.push(Message::system(format!(
+                    "📬 {} is waiting for input{}",
+                    name,
+                    if preview.is_empty() { String::new() } else { format!(": {}", preview) }
+                )));
+            } else {
+                self.messages.push(Message::system(format!(
+                    "📬 @{} is waiting for input{}",
+                    name,
+                    if preview.is_empty() { String::new() } else { format!(": {}", preview) }
+                )));
+            }
+            should_scroll = true;
+        }
+
+        // Apply state updates
+        for (name, is_ready) in state_updates {
+            self.session_ready_state.insert(name, is_ready);
+        }
+
+        if should_scroll {
+            self.scroll_to_bottom();
+        }
+    }
+
+    /// Full scan of ALL tmux sessions every 5 minutes.
+    /// Reports any sessions that are waiting for input.
+    pub fn scan_all_sessions(&mut self) {
+        // Rate limit to every 5 minutes
+        let now = Instant::now();
+        if let Some(last_scan) = self.last_full_scan {
+            if now.duration_since(last_scan).as_secs() < 300 {
+                return;
+            }
+        }
+        self.last_full_scan = Some(now);
+
+        // Skip if no tmux
+        let Some(tmux) = &self.tmux else { return };
+
+        // Get all sessions
+        let Ok(all_sessions) = tmux.list_sessions() else { return };
+
+        // Check each session for ready state
+        let mut waiting_sessions: Vec<(String, String)> = Vec::new();
+
+        for session_info in &all_sessions {
+            if let Ok(output) = tmux.capture_output(&session_info.name, None, Some(50)) {
+                if is_claude_ready(&output) {
+                    let preview = extract_ready_preview(&output);
+                    waiting_sessions.push((session_info.name.clone(), preview));
+                }
+            }
+        }
+
+        // Report if any sessions are waiting (excluding currently connected)
+        let connected = self.project.as_ref().map(|p| format!("commander-{}", p));
+        let other_waiting: Vec<_> = waiting_sessions.iter()
+            .filter(|(name, _)| connected.as_ref() != Some(name))
+            .collect();
+
+        if !other_waiting.is_empty() {
+            self.messages.push(Message::system(format!(
+                "⏰ {} session(s) waiting for input:",
+                other_waiting.len()
+            )));
+            for (name, preview) in other_waiting.iter().take(5) {
+                let display_name = name.strip_prefix("commander-").unwrap_or(name);
+                self.messages.push(Message::system(format!(
+                    "   @{}{}",
+                    display_name,
+                    if preview.is_empty() { String::new() } else { format!(" - {}", preview) }
+                )));
+            }
+            if other_waiting.len() > 5 {
+                self.messages.push(Message::system(format!(
+                    "   ... and {} more",
+                    other_waiting.len() - 5
+                )));
+            }
+            self.scroll_to_bottom();
         }
     }
 
@@ -1410,6 +1555,32 @@ impl App {
         self.completions.clear();
         self.completion_index = None;
     }
+}
+
+/// Extract a preview of the last meaningful line when session is ready.
+fn extract_ready_preview(output: &str) -> String {
+    // Look for the last non-UI-noise line before the prompt
+    let lines: Vec<&str> = output.lines().rev()
+        .filter(|l| {
+            let trimmed = l.trim();
+            !trimmed.is_empty()
+                && !commander_core::output_filter::is_ui_noise(trimmed)
+                && !trimmed.contains('❯')  // Skip prompt lines
+                && !trimmed.starts_with("───")  // Skip separator
+        })
+        .take(1)
+        .collect();
+
+    lines.first()
+        .map(|s| {
+            let trimmed = s.trim();
+            if trimmed.len() > 60 {
+                format!("{}...", &trimmed[..57])
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
