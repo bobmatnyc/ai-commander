@@ -48,6 +48,17 @@ pub fn is_telegram_running() -> bool {
     false
 }
 
+/// Result of starting the Telegram bot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramStartResult {
+    /// Bot was already running
+    AlreadyRunning,
+    /// Bot was started from existing binary
+    Started,
+    /// Binary was built and bot was started
+    BuiltAndStarted,
+}
+
 /// Start the Telegram bot daemon.
 pub fn start_telegram_daemon() -> Result<u32, String> {
     // Load .env.local if it exists
@@ -61,12 +72,17 @@ pub fn start_telegram_daemon() -> Result<u32, String> {
     }
 
     // Find the commander-telegram binary
-    let binary = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("commander-telegram")))
-        .filter(|p| p.exists())
-        .or_else(|| which::which("commander-telegram").ok())
-        .ok_or_else(|| "commander-telegram binary not found".to_string())?;
+    let binary = find_telegram_binary();
+
+    let binary = match binary {
+        Some(b) => b,
+        None => {
+            // Try to build it
+            build_telegram_binary()?;
+            find_telegram_binary()
+                .ok_or_else(|| "Failed to find commander-telegram after building".to_string())?
+        }
+    };
 
     // Start as background process
     let child = Command::new(&binary)
@@ -88,19 +104,56 @@ pub fn start_telegram_daemon() -> Result<u32, String> {
     Ok(pid)
 }
 
-/// Ensure telegram bot is running, starting it if needed.
-/// Returns Ok(true) if already running, Ok(false) if started now.
-pub fn ensure_telegram_running() -> Result<bool, String> {
-    if is_telegram_running() {
-        return Ok(true);
+/// Find the commander-telegram binary.
+fn find_telegram_binary() -> Option<PathBuf> {
+    // Check next to current exe
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let binary = dir.join("commander-telegram");
+            if binary.exists() {
+                return Some(binary);
+            }
+        }
     }
 
+    // Check in PATH
+    which::which("commander-telegram").ok()
+}
+
+/// Build the commander-telegram binary.
+fn build_telegram_binary() -> Result<(), String> {
+    eprintln!("Building commander-telegram...");
+
+    let status = Command::new("cargo")
+        .args(["build", "-p", "commander-telegram", "--release"])
+        .status()
+        .map_err(|e| format!("Failed to run cargo build: {}", e))?;
+
+    if !status.success() {
+        return Err("cargo build failed".to_string());
+    }
+
+    Ok(())
+}
+
+/// Ensure telegram bot is running, starting it if needed.
+/// Returns the result indicating what action was taken.
+pub fn ensure_telegram_running() -> Result<TelegramStartResult, String> {
+    if is_telegram_running() {
+        return Ok(TelegramStartResult::AlreadyRunning);
+    }
+
+    let needed_build = find_telegram_binary().is_none();
     start_telegram_daemon()?;
 
     // Give it a moment to start
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    Ok(false)
+    if needed_build {
+        Ok(TelegramStartResult::BuiltAndStarted)
+    } else {
+        Ok(TelegramStartResult::Started)
+    }
 }
 
 /// Validate that a project path exists, is a directory, and is accessible.
