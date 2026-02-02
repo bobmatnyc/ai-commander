@@ -10,7 +10,7 @@ use crate::error::TelegramError;
 use crate::state::TelegramState;
 
 /// Bot commands that can be invoked with /.
-#[derive(BotCommands, Clone)]
+#[derive(BotCommands, Clone, Debug)]
 #[command(rename_rule = "lowercase", description = "Available commands:")]
 pub enum Command {
     #[command(description = "Start the bot and get help")]

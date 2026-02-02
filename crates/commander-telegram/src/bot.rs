@@ -129,6 +129,7 @@ impl TelegramBot {
                     .filter_command::<Command>()
                     .endpoint(move |bot: Bot, msg: Message, cmd: Command| {
                         let state = Arc::clone(&state_for_commands);
+                        info!(chat_id = %msg.chat.id, "Command matched: {:?}", cmd);
                         async move { handle_command(bot, msg, cmd, state).await }
                     }),
             )
@@ -136,14 +137,18 @@ impl TelegramBot {
                 Update::filter_message()
                     .filter(|msg: Message| {
                         // Handle unrecognized commands (start with / but didn't parse)
-                        msg.text()
+                        let is_cmd = msg.text()
                             .map(|t| t.starts_with('/'))
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                        if is_cmd {
+                            info!(text = ?msg.text(), "Command didn't parse, falling through to unknown handler");
+                        }
+                        is_cmd
                     })
                     .endpoint(move |bot: Bot, msg: Message| {
                         async move {
                             if let Some(text) = msg.text() {
-                                info!(cmd = %text, "Unrecognized command received");
+                                info!(cmd = %text, "Unrecognized command - sending response");
                                 bot.send_message(
                                     msg.chat.id,
                                     format!("Unknown command: {}\n\nUse /help to see available commands.", text.split_whitespace().next().unwrap_or(text)),
@@ -163,6 +168,7 @@ impl TelegramBot {
                     })
                     .endpoint(move |bot: Bot, msg: Message| {
                         let state = Arc::clone(&state_for_messages);
+                        info!(chat_id = %msg.chat.id, text = ?msg.text(), "Regular message received");
                         async move { handle_message(bot, msg, state).await }
                     }),
             );
@@ -170,6 +176,9 @@ impl TelegramBot {
         info!("Bot is running! Send /start to begin.");
 
         Dispatcher::builder(bot, handler)
+            .default_handler(|upd| async move {
+                warn!("Unhandled update: {:?}", upd);
+            })
             .enable_ctrlc_handler()
             .build()
             .dispatch()
