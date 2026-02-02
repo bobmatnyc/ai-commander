@@ -437,6 +437,9 @@ pub struct Repl {
 impl Repl {
     /// Creates a new REPL instance.
     pub fn new(state_dir: &Path) -> RlResult<Self> {
+        // Restart Telegram bot if running to ensure it uses latest code
+        crate::restart_telegram_if_running();
+
         let config = rustyline::Config::builder()
             .completion_type(rustyline::CompletionType::List)
             .build();
