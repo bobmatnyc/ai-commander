@@ -29,17 +29,26 @@ Control AI coding sessions from TUI, REPL, or Telegram with support for multiple
 
 ## Installation
 
+### Homebrew (macOS)
+
 ```bash
-# Clone and build
+brew tap bobmatnyc/tools
+brew install ai-commander
+```
+
+### From Source
+
+```bash
+# Requires Rust toolchain
 git clone https://github.com/bobmatnyc/ai-commander
 cd ai-commander
-cargo build --release
+cargo install --path crates/ai-commander
+```
 
-# Run TUI
-./target/release/ai-commander tui
+### Verify Installation
 
-# Run REPL
-./target/release/ai-commander repl
+```bash
+ai-commander --version
 ```
 
 ## Quick Start
