@@ -1201,6 +1201,21 @@ impl App {
 
     /// Generate a Telegram pairing code.
     fn generate_telegram_pairing(&mut self) {
+        // Ensure telegram bot is running
+        match crate::ensure_telegram_running() {
+            Ok(was_running) => {
+                if was_running {
+                    self.messages.push(Message::system("[ok] Telegram bot is running"));
+                } else {
+                    self.messages.push(Message::system("[ok] Telegram bot started"));
+                }
+            }
+            Err(e) => {
+                self.messages.push(Message::system(format!("[warn] Could not start Telegram bot: {}", e)));
+                self.messages.push(Message::system("  Start manually: cargo run -p commander-telegram"));
+            }
+        }
+
         let (project_name, session_name) = match &self.project {
             Some(p) => (p.clone(), format!("commander-{}", p)),
             None => (String::new(), String::new()),
