@@ -79,7 +79,7 @@ cargo build --release
 ```
 crates/
 ├── commander-core/      # Shared business logic (output filtering, summarization, config)
-├── commander-cli/       # TUI and REPL interfaces
+├── ai-commander/        # TUI and REPL interfaces (main binary)
 ├── commander-telegram/  # Telegram bot
 ├── commander-tmux/      # Tmux orchestration
 ├── commander-adapters/  # Runtime adapters (Claude Code, MPM, Shell, etc.)
@@ -131,7 +131,7 @@ GET    /api/adapters            List adapters
 cargo test
 
 # Run specific crate tests
-cargo test -p commander-cli
+cargo test -p ai-commander
 cargo test -p commander-telegram
 cargo test -p commander-tmux
 

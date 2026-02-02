@@ -3,10 +3,10 @@
 use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use commander_cli::cli::{Cli, Commands};
-use commander_cli::commands;
-use commander_cli::repl::Repl;
-use commander_cli::tui;
+use ai_commander::cli::{Cli, Commands};
+use ai_commander::commands;
+use ai_commander::repl::Repl;
+use ai_commander::tui;
 
 fn main() {
     // Load .env.local if it exists (for OPENROUTER_API_KEY etc.)

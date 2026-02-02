@@ -1,9 +1,9 @@
 [package]
-name = "commander-cli"
+name = "ai-commander"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI and REPL for Commander"
+description = "Multi-interface AI session manager - TUI, REPL, and Telegram"
 
 [[bin]]
 name = "commander"
