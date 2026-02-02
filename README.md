@@ -36,15 +36,15 @@ cd ai-commander
 cargo build --release
 
 # Run TUI
-./target/release/commander tui
+./target/release/ai-commander tui
 
 # Run REPL
-./target/release/commander repl
+./target/release/ai-commander repl
 ```
 
 ## Quick Start
 
-1. Start the TUI: `commander tui`
+1. Start the TUI: `ai-commander tui`
 2. Create a project: `/connect /path/to/project -a claude-code -n myproject`
 3. Send messages to interact with Claude Code
 4. Use `/telegram` to enable mobile access
