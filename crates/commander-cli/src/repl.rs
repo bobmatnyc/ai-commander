@@ -437,6 +437,17 @@ pub struct Repl {
 impl Repl {
     /// Creates a new REPL instance.
     pub fn new(state_dir: &Path) -> RlResult<Self> {
+        // Load config and check for first-run onboarding
+        commander_core::load_config();
+
+        if commander_core::needs_onboarding() {
+            if let Err(e) = commander_core::run_onboarding() {
+                eprintln!("Onboarding failed: {}", e);
+            }
+            // Reload config after onboarding
+            commander_core::load_config();
+        }
+
         // Restart Telegram bot if running to ensure it uses latest code
         crate::restart_telegram_if_running();
 
