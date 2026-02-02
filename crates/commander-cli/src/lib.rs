@@ -156,6 +156,46 @@ pub fn ensure_telegram_running() -> Result<TelegramStartResult, String> {
     }
 }
 
+/// Restart the Telegram bot if it's currently running.
+/// This ensures the bot uses the latest binary and correct state directory.
+/// Called on TUI/REPL startup to ensure the bot is up-to-date.
+pub fn restart_telegram_if_running() {
+    if !is_telegram_running() {
+        return;
+    }
+
+    tracing::info!("Restarting Telegram bot with updated code...");
+
+    // Kill the old process
+    let pid_file = telegram_pid_file();
+    if let Ok(pid_str) = fs::read_to_string(&pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill")
+                    .arg(pid.to_string())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+    }
+    let _ = fs::remove_file(&pid_file);
+
+    // Give it a moment to stop
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Restart it
+    match start_telegram_daemon() {
+        Ok(new_pid) => {
+            tracing::info!(pid = new_pid, "Telegram bot restarted");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to restart Telegram bot");
+        }
+    }
+}
+
 /// Validate that a project path exists, is a directory, and is accessible.
 ///
 /// Returns `Ok(())` if the path is valid, or `Err(message)` describing the issue.

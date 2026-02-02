@@ -189,6 +189,9 @@ pub struct App {
 impl App {
     /// Create a new App instance.
     pub fn new(state_dir: &std::path::Path) -> Self {
+        // Restart Telegram bot if running to ensure it uses latest code
+        crate::restart_telegram_if_running();
+
         let store = StateStore::new(state_dir);
         let registry = AdapterRegistry::new();
         let tmux = TmuxOrchestrator::new().ok();
