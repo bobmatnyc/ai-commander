@@ -587,6 +587,29 @@ impl Repl {
                                 println!("Project: {} ({})", p.name, p.id);
                                 println!("  State: {:?}", p.state);
                                 println!("  Path: {}", p.path);
+
+                                // Show session activity if connected
+                                if let Some(session) = self.sessions.get(&p.name) {
+                                    if let Some(tmux) = &self.tmux {
+                                        println!();
+                                        println!("Session Activity:");
+                                        if let Ok(output) = tmux.capture_output(session, None, Some(100)) {
+                                            let summary = extract_session_summary(&output);
+                                            if !summary.is_empty() {
+                                                for line in summary {
+                                                    println!("  {}", line);
+                                                }
+                                            } else {
+                                                let ready = commander_core::is_claude_ready(&output);
+                                                if ready {
+                                                    println!("  Status: Idle (waiting for input)");
+                                                } else {
+                                                    println!("  Status: Processing...");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             None => println!("Project not found: {}", id),
                         }
@@ -1143,6 +1166,102 @@ impl Repl {
 
         Ok(())
     }
+}
+
+/// Extract a summary of current session activity from tmux output.
+///
+/// Looks for patterns indicating active tasks:
+/// - TodoWrite task status (in_progress, pending)
+/// - Tool invocations (Edit, Read, Bash, etc.)
+/// - Current working activity
+pub fn extract_session_summary(output: &str) -> Vec<String> {
+    let mut summary = Vec::new();
+    let mut current_task: Option<String> = None;
+    let mut pending_tasks: Vec<String> = Vec::new();
+    let mut recent_tools: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        // Look for in_progress task markers
+        if trimmed.contains("in_progress") || trimmed.contains("🔄") || trimmed.contains("⏳") {
+            if let Some(task) = extract_task_description(trimmed) {
+                current_task = Some(task);
+            }
+        }
+
+        // Look for pending task markers
+        if (trimmed.contains("pending") || trimmed.contains("⬜") || trimmed.contains("☐"))
+            && !trimmed.contains("in_progress")
+        {
+            if let Some(task) = extract_task_description(trimmed) {
+                if pending_tasks.len() < 3 {
+                    pending_tasks.push(task);
+                }
+            }
+        }
+
+        // Look for tool invocations
+        if trimmed.contains("Tool:") || trimmed.starts_with("Using ") {
+            if recent_tools.len() < 2 {
+                recent_tools.push(trimmed.to_string());
+            }
+        }
+
+        // Look for explicit "Working on" or "Task:" patterns
+        if trimmed.starts_with("Working on") || trimmed.starts_with("Task:") {
+            current_task = Some(trimmed.to_string());
+        }
+
+        // Look for file operations
+        if trimmed.contains("Editing ") || trimmed.contains("Reading ") || trimmed.contains("Writing ") {
+            if let Some(file_op) = trimmed.split_whitespace().take(3).collect::<Vec<_>>().join(" ").into() {
+                if recent_tools.len() < 2 && !recent_tools.contains(&file_op) {
+                    recent_tools.push(file_op);
+                }
+            }
+        }
+    }
+
+    // Build summary
+    if let Some(task) = current_task {
+        summary.push(format!("Current: {}", task));
+    }
+
+    for tool in recent_tools {
+        summary.push(format!("Recent: {}", tool));
+    }
+
+    if !pending_tasks.is_empty() {
+        summary.push(format!("Pending: {} task(s)", pending_tasks.len()));
+        for task in pending_tasks.iter().take(2) {
+            summary.push(format!("  - {}", task));
+        }
+    }
+
+    summary
+}
+
+/// Extract task description from a status line.
+fn extract_task_description(line: &str) -> Option<String> {
+    // Try to extract text after common markers
+    let markers = ["- ", "• ", "* ", ": ", "| "];
+    for marker in markers {
+        if let Some(pos) = line.find(marker) {
+            let desc = line[pos + marker.len()..].trim();
+            if !desc.is_empty() && desc.len() < 100 {
+                return Some(desc.to_string());
+            }
+        }
+    }
+
+    // If no marker found, return the whole line if it's reasonable
+    let trimmed = line.trim();
+    if !trimmed.is_empty() && trimmed.len() < 100 && !trimmed.contains("───") {
+        return Some(trimmed.to_string());
+    }
+
+    None
 }
 
 /// Find new lines in tmux output by comparing previous and current captures.
