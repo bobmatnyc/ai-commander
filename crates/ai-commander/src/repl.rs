@@ -228,6 +228,13 @@ pub enum ReplCommand {
     Disconnect,
     /// Send message to connected project
     Send(String),
+    /// Route message to specific session(s) via @alias syntax
+    Route {
+        /// Target session aliases (e.g., ["project1", "project2"])
+        targets: Vec<String>,
+        /// The message to send to all targets
+        message: String,
+    },
     /// List all tmux sessions
     Sessions,
     /// Stop a session (commits git changes, destroys tmux)
@@ -240,7 +247,7 @@ pub enum ReplCommand {
     Quit,
     /// Unknown command
     Unknown(String),
-    /// Plain text (not a command)
+    /// Plain text (not a command) - treated as Commander instruction
     Text(String),
 }
 
@@ -283,15 +290,9 @@ impl ReplCommand {
                 "quit" | "q" | "exit" => ReplCommand::Quit,
                 _ => ReplCommand::Unknown(cmd),
             }
-        } else if let Some(stripped) = input.strip_prefix('@') {
-            // @mention syntax - treat as send to project
-            let parts: Vec<&str> = stripped.splitn(2, ' ').collect();
-            if parts.len() == 2 {
-                // For now, just echo - actual implementation in Phase 7
-                ReplCommand::Send(input.to_string())
-            } else {
-                ReplCommand::Text(input.to_string())
-            }
+        } else if input.starts_with('@') {
+            // @alias routing syntax - parse all @mentions and extract message
+            Self::parse_route(input)
         } else {
             // Check for conversational commands
             Self::parse_conversational(input)
@@ -415,6 +416,64 @@ impl ReplCommand {
                 "connect: use '/connect <path> -a <adapter> -n <name>' or '/connect <project>'"
                     .to_string(),
             )
+        }
+    }
+
+    /// Parse @alias routing syntax.
+    /// Supports multiple targets: @alias1 @alias2 message to send
+    fn parse_route(input: &str) -> Self {
+        let mut targets = Vec::new();
+        let mut message_start = 0;
+        let mut chars = input.char_indices().peekable();
+
+        // Parse all @mentions at the start
+        while let Some((i, c)) = chars.next() {
+            if c == '@' {
+                // Start of a mention - collect the alias
+                let alias_start = i + 1;
+                let mut alias_end = alias_start;
+
+                // Collect characters until whitespace or another @
+                while let Some(&(j, ch)) = chars.peek() {
+                    if ch.is_whitespace() || ch == '@' {
+                        alias_end = j;
+                        break;
+                    }
+                    chars.next();
+                    alias_end = j + ch.len_utf8();
+                }
+
+                // Handle end of string
+                if alias_end == alias_start {
+                    alias_end = input.len();
+                }
+
+                let alias = input[alias_start..alias_end].trim();
+                if !alias.is_empty() {
+                    targets.push(alias.to_string());
+                }
+                message_start = alias_end;
+            } else if c.is_whitespace() {
+                // Skip whitespace between @mentions
+                message_start = i + 1;
+            } else {
+                // Non-@ character means message starts here
+                message_start = i;
+                break;
+            }
+        }
+
+        // Extract the message (everything after the @mentions)
+        let message = input[message_start..].trim().to_string();
+
+        if targets.is_empty() {
+            // No valid targets found
+            ReplCommand::Text(input.to_string())
+        } else if message.is_empty() {
+            // Targets but no message - just show status
+            ReplCommand::Status(Some(targets[0].clone()))
+        } else {
+            ReplCommand::Route { targets, message }
         }
     }
 }
@@ -727,6 +786,60 @@ impl Repl {
                     None => {
                         println!("Not connected to any project. Use /connect <project> first.");
                     }
+                }
+                Ok(false)
+            }
+
+            ReplCommand::Route { targets, message } => {
+                if let Some(tmux) = &self.tmux {
+                    let mut sent_count = 0;
+                    let mut failed_targets = Vec::new();
+
+                    for target in &targets {
+                        // Look up session for this target
+                        let session_name = if let Some(session) = self.sessions.get(target) {
+                            Some(session.clone())
+                        } else {
+                            // Try commander- prefix
+                            let prefixed = format!("commander-{}", target);
+                            if tmux.session_exists(&prefixed) {
+                                Some(prefixed)
+                            } else if tmux.session_exists(target) {
+                                Some(target.clone())
+                            } else {
+                                None
+                            }
+                        };
+
+                        match session_name {
+                            Some(session) => {
+                                match tmux.send_line(&session, None, &message) {
+                                    Ok(_) => {
+                                        println!("[@{}] > {}", target, message);
+                                        sent_count += 1;
+                                    }
+                                    Err(e) => {
+                                        println!("[@{}] Failed: {}", target, e);
+                                        failed_targets.push(target.clone());
+                                    }
+                                }
+                            }
+                            None => {
+                                println!("[@{}] Session not found", target);
+                                failed_targets.push(target.clone());
+                            }
+                        }
+                    }
+
+                    if sent_count > 0 {
+                        println!("Sent to {} session(s)", sent_count);
+                    }
+                    if !failed_targets.is_empty() {
+                        println!("Failed: {}", failed_targets.join(", "));
+                        println!("Use /sessions to see available sessions");
+                    }
+                } else {
+                    println!("Tmux not available. Cannot route messages.");
                 }
                 Ok(false)
             }
@@ -1447,9 +1560,11 @@ fn print_help(topic: Option<&str>) {
             println!("    list, list projects, show projects       (conversational)");
             println!("    status, show status, status of <name>    (conversational)");
             println!();
-            println!("  Communication:");
-            println!("    <message>                                Send message to connected project");
-            println!("    [disconnected] <message>                 Chat with AI (OpenRouter)");
+            println!("  Message Routing:");
+            println!("    @alias message                           Send message to specific session");
+            println!("    @alias1 @alias2 message                  Send to multiple sessions");
+            println!("    <message>                                Send to connected project (if any)");
+            println!("    [disconnected] <message>                 Interpreted as Commander instruction");
             println!();
             println!("  Telegram Integration:");
             println!("    /telegram                                Generate pairing code for Telegram bot");
@@ -1479,9 +1594,9 @@ fn print_help(topic: Option<&str>) {
             println!();
             println!("EXAMPLES:");
             println!("    /connect ~/code/myapp -a cc -n myapp");
-            println!("    connect to myapp");
+            println!("    @myapp how many files are in src/?");
+            println!("    @frontend @backend run the tests");
             println!("    list projects");
-            println!("    how many files are in src/?");
             println!("    disconnect");
             println!();
             println!("Type /help <command> for detailed help on a specific command.");
@@ -1722,6 +1837,60 @@ mod tests {
         assert_eq!(
             ReplCommand::parse("helper"),
             ReplCommand::Text("helper".to_string())
+        );
+    }
+
+    // Tests for @ routing syntax
+    #[test]
+    fn test_route_single_target() {
+        assert_eq!(
+            ReplCommand::parse("@myapp how are you?"),
+            ReplCommand::Route {
+                targets: vec!["myapp".to_string()],
+                message: "how are you?".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_route_multiple_targets() {
+        assert_eq!(
+            ReplCommand::parse("@frontend @backend run tests"),
+            ReplCommand::Route {
+                targets: vec!["frontend".to_string(), "backend".to_string()],
+                message: "run tests".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_route_three_targets() {
+        assert_eq!(
+            ReplCommand::parse("@a @b @c do something"),
+            ReplCommand::Route {
+                targets: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                message: "do something".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_route_no_message_shows_status() {
+        // @alias with no message should show status
+        assert_eq!(
+            ReplCommand::parse("@myapp"),
+            ReplCommand::Status(Some("myapp".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_route_preserves_message_case() {
+        assert_eq!(
+            ReplCommand::parse("@proj Hello World!"),
+            ReplCommand::Route {
+                targets: vec!["proj".to_string()],
+                message: "Hello World!".to_string(),
+            }
         );
     }
 

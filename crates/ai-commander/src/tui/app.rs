@@ -916,6 +916,9 @@ impl App {
         // Handle commands
         if let Some(cmd) = input.strip_prefix('/') {
             self.handle_command(cmd);
+        } else if input.starts_with('@') {
+            // @ routing syntax
+            self.handle_route(&input);
         } else if self.project.is_some() {
             // Check for filesystem commands first
             let working_dir = self.project_path.as_ref()
@@ -1017,6 +1020,10 @@ impl App {
                 self.messages.push(Message::system("  /send <msg>                        Send message to connected session"));
                 self.messages.push(Message::system("  /telegram                          Generate Telegram pairing code"));
                 self.messages.push(Message::system("  /clear                             Clear output"));
+                self.messages.push(Message::system(""));
+                self.messages.push(Message::system("═══ Message Routing ═══"));
+                self.messages.push(Message::system("  @alias message                     Send to specific session"));
+                self.messages.push(Message::system("  @alias1 @alias2 message            Send to multiple sessions"));
                 self.messages.push(Message::system("  /quit                              Exit TUI"));
                 self.messages.push(Message::system(""));
                 self.messages.push(Message::system("═══ Adapters ═══"));
@@ -1263,6 +1270,86 @@ impl App {
                 self.messages.push(Message::system(format!("Error generating pairing code: {}", e)));
             }
         }
+    }
+
+    /// Handle @ routing syntax - send message to specific session(s).
+    fn handle_route(&mut self, input: &str) {
+        // Parse targets and message using the REPL parser
+        let cmd = crate::repl::ReplCommand::parse(input);
+
+        match cmd {
+            crate::repl::ReplCommand::Route { targets, message } => {
+                if let Some(tmux) = &self.tmux {
+                    let mut sent_count = 0;
+                    let mut failed_targets = Vec::new();
+
+                    // Get all session mappings
+                    let sessions = self.sessions.clone();
+
+                    for target in &targets {
+                        // Look up session for this target
+                        let session_name = if let Some(session) = sessions.get(target) {
+                            Some(session.clone())
+                        } else {
+                            // Try commander- prefix
+                            let prefixed = format!("commander-{}", target);
+                            if tmux.session_exists(&prefixed) {
+                                Some(prefixed)
+                            } else if tmux.session_exists(target) {
+                                Some(target.clone())
+                            } else {
+                                None
+                            }
+                        };
+
+                        match session_name {
+                            Some(session) => {
+                                match tmux.send_line(&session, None, &message) {
+                                    Ok(_) => {
+                                        self.messages.push(Message::sent(
+                                            format!("@{}", target),
+                                            message.clone(),
+                                        ));
+                                        sent_count += 1;
+                                    }
+                                    Err(e) => {
+                                        self.messages.push(Message::system(
+                                            format!("[@{}] Failed: {}", target, e),
+                                        ));
+                                        failed_targets.push(target.clone());
+                                    }
+                                }
+                            }
+                            None => {
+                                self.messages.push(Message::system(
+                                    format!("[@{}] Session not found", target),
+                                ));
+                                failed_targets.push(target.clone());
+                            }
+                        }
+                    }
+
+                    if sent_count > 0 && targets.len() > 1 {
+                        self.messages.push(Message::system(
+                            format!("Sent to {} session(s)", sent_count),
+                        ));
+                    }
+                    if !failed_targets.is_empty() {
+                        self.messages.push(Message::system("Use /sessions to see available sessions"));
+                    }
+                } else {
+                    self.messages.push(Message::system("Tmux not available"));
+                }
+            }
+            crate::repl::ReplCommand::Status(Some(target)) => {
+                // @alias with no message - show status
+                self.show_status(Some(&target));
+            }
+            _ => {
+                self.messages.push(Message::system("Invalid @ routing syntax. Use: @alias message"));
+            }
+        }
+        self.scroll_to_bottom();
     }
 
     // ==================== Tab Completion ====================
