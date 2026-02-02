@@ -50,9 +50,14 @@ pub fn is_telegram_running() -> bool {
 
 /// Start the Telegram bot daemon.
 pub fn start_telegram_daemon() -> Result<u32, String> {
+    // Load .env.local if it exists
+    let _ = dotenvy::from_filename(".env.local");
+
     // Check for TELEGRAM_BOT_TOKEN
     if std::env::var("TELEGRAM_BOT_TOKEN").is_err() {
-        return Err("TELEGRAM_BOT_TOKEN not set. Please set it in your environment.".to_string());
+        return Err(
+            "TELEGRAM_BOT_TOKEN not set. Add it to .env.local or set in environment.".to_string(),
+        );
     }
 
     // Find the commander-telegram binary
@@ -176,11 +181,17 @@ mod tests {
 
     #[test]
     fn test_start_telegram_daemon_without_token() {
+        // Run from a temp directory where .env.local doesn't exist
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
         // Remove token if set
         std::env::remove_var("TELEGRAM_BOT_TOKEN");
 
         let result = start_telegram_daemon();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("TELEGRAM_BOT_TOKEN"));
+        let err = result.unwrap_err();
+        assert!(err.contains("TELEGRAM_BOT_TOKEN"));
+        assert!(err.contains(".env.local"));
     }
 }
