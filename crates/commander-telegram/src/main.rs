@@ -49,10 +49,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    // Get state directory
-    let state_dir = dirs::data_local_dir()
-        .map(|p| p.join("commander"))
-        .unwrap_or_else(|| PathBuf::from(".commander"));
+    // Get state directory (same as CLI: ~/.commander)
+    let state_dir = std::env::var("COMMANDER_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .map(|h| h.join(".commander"))
+                .unwrap_or_else(|| PathBuf::from(".commander"))
+        });
 
     // Create the bot
     let mut bot = TelegramBot::new(&state_dir)?;
