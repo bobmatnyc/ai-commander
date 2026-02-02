@@ -1,78 +1,108 @@
-# Commander
+# AI Commander
 
-Multi-project AI orchestration system written in Rust.
+Multi-interface AI session management system written in Rust.
 
-> **Status**: ✅ All 8 phases complete! (293 tests passing)
+Control AI coding sessions from TUI, REPL, or Telegram with support for multiple adapters including Claude Code, MPM, Aider, and plain shell sessions.
+
+## Features
+
+### Core
+- **Multi-interface AI session management** - Control AI coding sessions from TUI, REPL, or Telegram
+- **Adapter system** - Support for Claude Code, MPM, Aider, and plain shell sessions
+- **Project management** - Create, connect, disconnect, and manage multiple projects
+- **Tmux integration** - Sessions run in tmux for persistence and multiplexing
+
+### TUI
+- Interactive terminal UI with ratatui
+- Session list view (F3)
+- Inspect mode for live tmux view (F2)
+- Text wrapping for long outputs
+- Tab autocomplete for slash commands
+
+### Telegram Bot
+- Remote session control from Telegram
+- Secure pairing with 6-character codes
+- Auto-start bot daemon on `/telegram` command
+- Auto-build binary if not found
+- Auto-restart bot on app launch
+- Response summarization for mobile (via OpenRouter)
+
+## Installation
+
+```bash
+# Clone and build
+git clone https://github.com/bobmatnyc/ai-commander
+cd ai-commander
+cargo build --release
+
+# Run TUI
+./target/release/commander tui
+
+# Run REPL
+./target/release/commander repl
+```
 
 ## Quick Start
 
-```bash
-# Build
-cargo build
+1. Start the TUI: `commander tui`
+2. Create a project: `/connect /path/to/project -a claude-code -n myproject`
+3. Send messages to interact with Claude Code
+4. Use `/telegram` to enable mobile access
+5. Use `/stop` to end session (auto-commits changes if in git repo)
 
-# Run CLI
-cargo run -p commander-cli -- --help
+## Slash Commands
 
-# Enter interactive REPL
-cargo run -p commander-cli
+| Command | Description |
+|---------|-------------|
+| `/list` | List all projects |
+| `/status` | Show project status |
+| `/connect <path> -a <adapter> -n <name>` | Connect to a project |
+| `/disconnect` | Disconnect from current project |
+| `/send <message>` | Send message to session |
+| `/sessions` | List active sessions |
+| `/stop` | Commit changes and end session |
+| `/telegram` | Generate pairing code for Telegram |
+| `/inspect` | Toggle inspect mode (live tmux view) |
+| `/clear` | Clear screen |
+| `/help` | Show help |
+| `/quit` | Exit |
 
-# List available adapters
-cargo run -p commander-cli -- adapters
+## Telegram Integration
 
-# Run all tests
-cargo test
-```
+1. Set `TELEGRAM_BOT_TOKEN` in `.env.local`
+2. Run `/telegram` in TUI to generate a pairing code
+3. In Telegram, send `/pair <code>` to your bot
+4. Control sessions remotely from your phone
 
-## Overview
-
-Commander manages multiple AI coding tool instances (Claude Code, Aider, etc.) across projects, providing:
-
-- **Project Management**: Track multiple projects with isolated state ✅
-- **Work Queue**: Priority-based task execution with dependencies ✅
-- **Event System**: Notifications, decisions, and approvals inbox ✅
-- **CLI & REPL**: Interactive command-line interface ✅
-- **REST API**: Programmatic control via axum ✅
-
-## Project Structure
-
-```
-.
-├── Cargo.toml                    # Workspace root
-└── crates/
-    ├── commander-models/         # ✅ Phase 1: Core data types
-    ├── commander-persistence/    # ✅ Phase 2: JSON file storage
-    ├── commander-adapters/       # ✅ Phase 3: Runtime adapters
-    ├── commander-cli/            # ✅ Phase 4: CLI and REPL
-    ├── commander-events/         # ✅ Phase 5: Event system
-    ├── commander-work/           # ✅ Phase 5: Work queue
-    ├── commander-tmux/           # ✅ Phase 6: Tmux orchestration
-    ├── commander-runtime/        # ✅ Phase 7: Async runtime
-    └── commander-api/            # ✅ Phase 8: REST API
-```
-
-## CLI Commands
-
-```bash
-commander start <path>       # Start a project instance
-commander stop <project>     # Stop a project
-commander list               # List all projects
-commander status [project]   # Show project status
-commander adapters           # List runtime adapters
-commander repl               # Interactive REPL mode
-```
-
-## REPL Commands
+## Architecture
 
 ```
-/list, /ls       List all projects
-/status [proj]   Show project status
-/connect <proj>  Connect to a project
-/disconnect      Disconnect from current project
-/help            Show help
-/quit            Exit
+crates/
+├── commander-core/      # Shared business logic (output filtering, summarization, config)
+├── commander-cli/       # TUI and REPL interfaces
+├── commander-telegram/  # Telegram bot
+├── commander-tmux/      # Tmux orchestration
+├── commander-adapters/  # Runtime adapters (Claude Code, MPM, Shell, etc.)
+├── commander-state/     # Project state management
+├── commander-models/    # Core data types
+├── commander-persistence/  # JSON file storage
+├── commander-events/    # Event system
+├── commander-work/      # Work queue
+├── commander-runtime/   # Async runtime
+└── commander-api/       # REST API
 ```
 
-## REST API Endpoints
+## Configuration
+
+| Variable | Description |
+|----------|-------------|
+| `COMMANDER_STATE_DIR` | Override state directory (default: `~/.commander/`) |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token for remote control |
+| `OPENROUTER_API_KEY` | API key for response summarization |
+
+Environment variables can be set in `.env.local` in the project root.
+
+## REST API
 
 ```
 GET    /api/health              Health check
@@ -94,35 +124,16 @@ POST   /api/work/:id/complete   Complete work
 GET    /api/adapters            List adapters
 ```
 
-## Development Phases
-
-| Phase | Crate | Status | Rust Concepts |
-|-------|-------|--------|---------------|
-| 1 | commander-models | ✅ Done | struct, enum, derive, Option, Vec, serde, newtype |
-| 2 | commander-persistence | ✅ Done | Result<T,E>, ?, thiserror, atomic file I/O |
-| 3 | commander-adapters | ✅ Done | trait, Box<dyn>, Arc<dyn>, Send+Sync, regex |
-| 4 | commander-cli | ✅ Done | clap, rustyline, tracing, match |
-| 5 | commander-events/work | ✅ Done | mpsc, Arc<Mutex>, Arc<RwLock>, BinaryHeap |
-| 6 | commander-tmux | ✅ Done | std::process::Command, output parsing |
-| 7 | commander-runtime | ✅ Done | tokio, async/await, select!, broadcast, watch |
-| 8 | commander-api | ✅ Done | axum, tower-http, REST API, JSON |
-
-## Testing
+## Development
 
 ```bash
-# Run all tests (293 tests)
+# Run all tests
 cargo test
 
 # Run specific crate tests
-cargo test -p commander-models
-cargo test -p commander-persistence
-cargo test -p commander-adapters
 cargo test -p commander-cli
-cargo test -p commander-events
-cargo test -p commander-work
+cargo test -p commander-telegram
 cargo test -p commander-tmux
-cargo test -p commander-runtime
-cargo test -p commander-api
 
 # Run tmux integration tests (requires tmux)
 cargo test -p commander-tmux -- --ignored
