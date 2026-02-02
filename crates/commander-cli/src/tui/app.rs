@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use commander_adapters::AdapterRegistry;
+use commander_core::{find_new_lines, is_claude_ready, summarize_blocking_with_fallback};
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
 
@@ -625,7 +626,7 @@ impl App {
             .unwrap_or(false);
 
         // Check for various Claude Code idle patterns
-        let has_prompt = is_claude_code_ready(&current_output);
+        let has_prompt = is_claude_ready(&current_output);
 
         if is_idle && has_prompt && !self.response_buffer.is_empty() {
             // Trigger summarization
@@ -650,7 +651,7 @@ impl App {
 
         // Spawn thread for blocking HTTP call
         std::thread::spawn(move || {
-            let summary = summarize_response_blocking(&query, &raw_response);
+            let summary = summarize_blocking_with_fallback(&query, &raw_response);
             let _ = tx.send(summary);
         });
     }
@@ -1292,251 +1293,6 @@ impl App {
     }
 }
 
-/// Find new lines in tmux output by comparing previous and current captures.
-fn find_new_lines(prev: &str, current: &str) -> Vec<String> {
-    use std::collections::HashSet;
-
-    let prev_lines: HashSet<&str> = prev.lines().collect();
-    let mut new_lines = Vec::new();
-
-    for line in current.lines() {
-        let trimmed = line.trim();
-        if !prev_lines.contains(line) && !prev_lines.contains(trimmed) && !trimmed.is_empty() {
-            // Filter out Claude Code UI noise
-            if !is_ui_noise(trimmed) {
-                new_lines.push(line.to_string());
-            }
-        }
-    }
-
-    new_lines
-}
-
-/// Check if Claude Code is ready for input (idle at prompt).
-fn is_claude_code_ready(output: &str) -> bool {
-    // Get the last few non-empty lines
-    let lines: Vec<&str> = output.lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(10)
-        .collect();
-
-    if lines.is_empty() {
-        return false;
-    }
-
-    // Pattern 1: Line contains just the prompt character ❯
-    // Claude Code shows "❯ " when ready for input
-    for line in &lines[..lines.len().min(3)] {
-        let trimmed = line.trim();
-        if trimmed == "❯" || trimmed == "❯ " {
-            return true;
-        }
-        // Also check for prompt at end of line (after path)
-        if trimmed.ends_with(" ❯") || trimmed.ends_with(" ❯ ") {
-            return true;
-        }
-    }
-
-    // Pattern 2: The input box separator lines
-    // Claude Code shows ──────────── above and below input
-    let has_separator = lines.iter().take(5).any(|l| {
-        let trimmed = l.trim();
-        trimmed.starts_with("───") || trimmed.starts_with("╭─") || trimmed.starts_with("╰─")
-    });
-
-    // Pattern 3: "bypass permissions" hint shown at prompt
-    let has_bypass_hint = lines.iter().take(5).any(|l| {
-        l.contains("bypass permissions")
-    });
-
-    // Pattern 4: Empty prompt box (two separators with nothing between)
-    if has_separator {
-        // Check if we see the prompt structure
-        for (i, line) in lines.iter().enumerate() {
-            if line.contains("❯") && i < 5 {
-                return true;
-            }
-        }
-    }
-
-    // Pattern 5: Check for common ready indicators
-    let has_ready_indicator = lines.iter().take(3).any(|l| {
-        let trimmed = l.trim();
-        // Empty input prompt
-        trimmed == "│ ❯" ||
-        trimmed.starts_with("│ ❯") ||
-        // Just the chevron
-        trimmed == ">" ||
-        trimmed.ends_with("> ") ||
-        // Explicit ready state
-        trimmed.contains("[ready]")
-    });
-
-    has_ready_indicator || has_bypass_hint
-}
-
-/// Check if a line is Claude Code UI noise that should be filtered out.
-fn is_ui_noise(line: &str) -> bool {
-    // Prompt lines - echoed user input from Claude Code
-    // Matches: [project] ❯ text, [project] > text, project> text
-    if line.contains("] ❯ ") || line.contains("] > ") {
-        return true;
-    }
-    // Also matches bare prompt at start: project>
-    if line.chars().take(30).collect::<String>().contains("> ")
-        && !line.contains(':')
-        && !line.contains("http") {
-        // Looks like a prompt echo, not content
-        if let Some(pos) = line.find("> ") {
-            let before = &line[..pos];
-            // If it's just a word before >, it's likely a prompt
-            if !before.contains(' ') || before.starts_with('[') {
-                return true;
-            }
-        }
-    }
-
-    // Spinner characters and thinking indicators
-    let spinners = ['✳', '✶', '✻', '✽', '✢', '⏺', '·', '●', '○', '◐', '◑', '◒', '◓'];
-    if line.chars().next().map(|c| spinners.contains(&c)).unwrap_or(false) {
-        return true;
-    }
-
-    // Status bar box drawing characters
-    if line.starts_with('╰') || line.starts_with('╭') || line.starts_with('│')
-        || line.starts_with('├') || line.starts_with('└') || line.starts_with('┌')
-        || line.starts_with('┐') || line.starts_with('┘') || line.starts_with('┤')
-        || line.starts_with('┬') || line.starts_with('┴') || line.starts_with('┼') {
-        return true;
-    }
-
-    // Claude Code branding and UI
-    if line.contains("▐▛") || line.contains("▜▌") || line.contains("▝▜") || line.contains("▛▘") {
-        return true;
-    }
-
-    // Thinking/processing indicators
-    let lower = line.to_lowercase();
-    if lower.contains("spelunking") || lower.contains("(thinking)")
-        || lower.contains("thinking…") || lower.contains("thinking...") {
-        return true;
-    }
-
-    // Status messages that are UI noise
-    if lower.contains("ctrl+b") || lower.contains("to run in background") {
-        return true;
-    }
-
-    // Claude Code version/branding line
-    if lower.contains("claude code v") || lower.contains("claude max")
-        || lower.contains("opus 4") || lower.contains("sonnet") {
-        return true;
-    }
-
-    // MCP tool invocation noise (keep the result, not the invocation)
-    if line.contains("(MCP)(") && (line.contains("owner:") || line.contains("repo:")) {
-        return true;
-    }
-
-    // Agent/task headers that are noise
-    if line.ends_with("(MCP)") && !line.contains(':') {
-        return true;
-    }
-
-    false
-}
-
-/// Blocking HTTP call to summarize a response via OpenRouter.
-fn summarize_response_blocking(query: &str, raw_response: &str) -> String {
-    use std::env;
-
-    let api_key = match env::var("OPENROUTER_API_KEY") {
-        Ok(key) => key,
-        Err(_) => {
-            // No API key - return cleaned raw response
-            return clean_raw_response(raw_response);
-        }
-    };
-
-    let model = env::var("OPENROUTER_MODEL")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4".to_string());
-
-    let system_prompt = r#"You are a response summarizer for Commander, an AI orchestration tool.
-Your job is to take raw output from Claude Code and summarize it conversationally.
-
-Rules:
-- Be concise but informative (2-4 sentences for simple responses, more for complex ones)
-- Focus on what was DONE or LEARNED, not the process
-- Skip UI noise, file listings, and verbose tool output
-- If code was written, summarize what it does
-- If a question was answered, give the key answer
-- Use natural language, not bullet points unless listing multiple items
-- Never say "Claude Code" or mention the underlying tool"#;
-
-    let user_prompt = format!(
-        "User asked: {}\n\nRaw response:\n{}\n\nProvide a conversational summary:",
-        query, raw_response
-    );
-
-    // Build request
-    let request_body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "max_tokens": 500
-    });
-
-    // Make blocking HTTP request
-    let client = reqwest::blocking::Client::new();
-    let response = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&request_body)
-        .send();
-
-    match response {
-        Ok(resp) => {
-            if let Ok(json) = resp.json::<serde_json::Value>() {
-                if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
-                    return content.to_string();
-                }
-            }
-            // Fallback to cleaned raw response
-            clean_raw_response(raw_response)
-        }
-        Err(_) => {
-            // Fallback to cleaned raw response
-            clean_raw_response(raw_response)
-        }
-    }
-}
-
-/// Clean raw response when summarization isn't available.
-fn clean_raw_response(raw: &str) -> String {
-    let mut lines: Vec<&str> = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        // Skip obvious noise
-        if trimmed.is_empty()
-            || trimmed.starts_with("⎿")
-            || trimmed.starts_with("⏺")
-            || trimmed.contains("hook")
-            || trimmed.contains("ctrl+o")
-            || trimmed.contains("(MCP)")
-            || trimmed.starts_with("Reading")
-            || trimmed.starts_with("Searched")
-        {
-            continue;
-        }
-        lines.push(trimmed);
-    }
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1546,31 +1302,6 @@ mod tests {
         let msg = Message::system("test");
         assert_eq!(msg.direction, MessageDirection::System);
         assert_eq!(msg.content, "test");
-    }
-
-    #[test]
-    fn test_find_new_lines() {
-        let prev = "line1\nline2\n";
-        let current = "line1\nline2\nline3\n";
-        let new = find_new_lines(prev, current);
-        assert_eq!(new, vec!["line3"]);
-    }
-
-    #[test]
-    fn test_find_new_lines_filters_prompt_echo() {
-        let prev = "";
-        let current = "[duetto] ❯ describe this project\nActual response here\n";
-        let new = find_new_lines(prev, current);
-        assert_eq!(new, vec!["Actual response here"]);
-    }
-
-    #[test]
-    fn test_is_ui_noise_prompt_lines() {
-        assert!(is_ui_noise("[duetto] ❯ some command"));
-        assert!(is_ui_noise("[project] > test input"));
-        assert!(is_ui_noise("duetto> hello"));
-        assert!(!is_ui_noise("This is actual content"));
-        assert!(!is_ui_noise("Response: here is the answer"));
     }
 
     #[test]
