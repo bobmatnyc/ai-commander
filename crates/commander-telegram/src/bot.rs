@@ -123,8 +123,6 @@ impl TelegramBot {
         let state_for_commands = Arc::clone(&state);
         let state_for_messages = Arc::clone(&state);
 
-        let state_for_unknown = Arc::clone(&state);
-
         let handler = dptree::entry()
             .branch(
                 Update::filter_message()
@@ -143,7 +141,6 @@ impl TelegramBot {
                             .unwrap_or(false)
                     })
                     .endpoint(move |bot: Bot, msg: Message| {
-                        let state = Arc::clone(&state_for_unknown);
                         async move {
                             if let Some(text) = msg.text() {
                                 info!(cmd = %text, "Unrecognized command received");
