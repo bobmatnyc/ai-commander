@@ -36,6 +36,17 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 
 /// Run the TUI event loop.
 pub fn run(state_dir: &std::path::Path, connect_to: Option<String>) -> Result<()> {
+    // Load config and check for first-run onboarding
+    commander_core::load_config();
+
+    if commander_core::needs_onboarding() {
+        if let Err(e) = commander_core::run_onboarding() {
+            eprintln!("Onboarding failed: {}", e);
+        }
+        // Reload config after onboarding
+        commander_core::load_config();
+    }
+
     // Setup terminal
     let mut terminal = setup_terminal()?;
 
