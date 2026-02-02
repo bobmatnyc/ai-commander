@@ -724,10 +724,10 @@ impl App {
 
     /// Check session status and notify when sessions become ready for input.
     pub fn check_session_status(&mut self) {
-        // Rate limit checks to every 2 seconds
+        // Rate limit checks to every 5 seconds (was 2, increased to reduce noise)
         let now = Instant::now();
         if let Some(last_check) = self.last_status_check {
-            if now.duration_since(last_check).as_secs() < 2 {
+            if now.duration_since(last_check).as_secs() < 5 {
                 return;
             }
         }
@@ -753,10 +753,15 @@ impl App {
             for (name, session) in sessions_to_check {
                 if let Ok(output) = tmux.capture_output(&session, None, Some(50)) {
                     let is_ready = is_claude_ready(&output);
+
+                    // Check if we have prior state - if not, just record current state
+                    // without notifying (avoids false positives on startup)
+                    let has_prior_state = self.session_ready_state.contains_key(&name);
                     let was_ready = self.session_ready_state.get(&name).copied().unwrap_or(true);
 
-                    // Notify when transitioning from not-ready to ready
-                    if is_ready && !was_ready {
+                    // Only notify on actual transitions (not-ready -> ready)
+                    // AND only if we had prior state (not first observation)
+                    if has_prior_state && is_ready && !was_ready {
                         let preview = extract_ready_preview(&output);
                         let is_connected = connected_project.as_ref() == Some(&name);
                         notifications.push((name.clone(), is_connected, preview));
@@ -770,19 +775,18 @@ impl App {
         // Apply notifications
         let mut should_scroll = false;
         for (name, is_connected, preview) in notifications {
-            if is_connected {
-                self.messages.push(Message::system(format!(
-                    "📬 {} is waiting for input{}",
-                    name,
-                    if preview.is_empty() { String::new() } else { format!(": {}", preview) }
-                )));
+            let msg = if is_connected {
+                format!("📬 {} is ready", name)
             } else {
-                self.messages.push(Message::system(format!(
-                    "📬 @{} is waiting for input{}",
-                    name,
-                    if preview.is_empty() { String::new() } else { format!(": {}", preview) }
-                )));
-            }
+                format!("📬 @{} is ready", name)
+            };
+            // Only add preview if it's meaningful
+            let full_msg = if preview.is_empty() {
+                msg
+            } else {
+                format!("{}: {}", msg, preview)
+            };
+            self.messages.push(Message::system(full_msg));
             should_scroll = true;
         }
 
@@ -805,6 +809,11 @@ impl App {
             if now.duration_since(last_scan).as_secs() < 300 {
                 return;
             }
+        } else {
+            // First call - don't run immediately, wait for the interval
+            // This prevents spamming on startup
+            self.last_full_scan = Some(now);
+            return;
         }
         self.last_full_scan = Some(now);
 
@@ -1563,10 +1572,19 @@ fn extract_ready_preview(output: &str) -> String {
     let lines: Vec<&str> = output.lines().rev()
         .filter(|l| {
             let trimmed = l.trim();
+            let lower = trimmed.to_lowercase();
             !trimmed.is_empty()
                 && !commander_core::output_filter::is_ui_noise(trimmed)
                 && !trimmed.contains('❯')  // Skip prompt lines
                 && !trimmed.starts_with("───")  // Skip separator
+                && !trimmed.starts_with("╭")  // Skip box drawing
+                && !trimmed.starts_with("╰")  // Skip box drawing
+                && !trimmed.starts_with("│")  // Skip box drawing
+                && !lower.contains("bypass permissions")  // Skip Claude Code hint
+                && !lower.contains("shift+tab")  // Skip Claude Code hint
+                && !lower.contains("shift-tab")  // Skip Claude Code hint
+                && !trimmed.contains("⏵")  // Skip play button indicators
+                && !trimmed.contains("⏺")  // Skip record indicators
         })
         .take(1)
         .collect();
@@ -1574,6 +1592,10 @@ fn extract_ready_preview(output: &str) -> String {
     lines.first()
         .map(|s| {
             let trimmed = s.trim();
+            // Additional check - skip if it looks like UI noise we missed
+            if trimmed.len() < 5 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
+                return String::new();
+            }
             if trimmed.len() > 60 {
                 format!("{}...", &trimmed[..57])
             } else {
