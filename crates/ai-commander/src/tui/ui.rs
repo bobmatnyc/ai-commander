@@ -27,7 +27,7 @@ fn draw_normal(frame: &mut Frame, app: &App) {
             Constraint::Length(1),  // Header
             Constraint::Min(5),     // Output area
             Constraint::Length(1),  // Status/Progress bar
-            Constraint::Length(3),  // Input area
+            Constraint::Length(5),  // Input area (increased for wrapping)
             Constraint::Length(1),  // Footer
         ])
         .split(frame.area());
@@ -262,7 +262,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Draw the input area.
+/// Draw the input area with text wrapping support.
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let input_style = match app.input_mode {
         InputMode::Normal => Style::default(),
@@ -275,16 +275,32 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     };
     let input_text = format!("{}{}", prompt, app.input);
 
-    let input = Paragraph::new(input_text)
+    let input = Paragraph::new(input_text.clone())
         .style(input_style)
-        .block(Block::default().borders(Borders::ALL).title(" Input "));
+        .block(Block::default().borders(Borders::ALL).title(" Input "))
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(input, area);
 
-    // Set cursor position (prompt is now dynamic length)
-    let cursor_x = area.x + prompt.len() as u16 + app.cursor_pos as u16 + 1;
-    let cursor_y = area.y + 1;
-    frame.set_cursor_position((cursor_x, cursor_y));
+    // Calculate cursor position accounting for wrapping
+    let inner_width = area.width.saturating_sub(2) as usize; // Account for borders
+    let cursor_offset = prompt.len() + app.cursor_pos;
+
+    if inner_width > 0 {
+        let cursor_line = cursor_offset / inner_width;
+        let cursor_col = cursor_offset % inner_width;
+
+        let cursor_x = area.x + 1 + cursor_col as u16;
+        let cursor_y = area.y + 1 + cursor_line as u16;
+
+        // Only set cursor if it's within the visible area
+        let max_y = area.y + area.height.saturating_sub(1);
+        if cursor_y <= max_y {
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    } else {
+        frame.set_cursor_position((area.x + 1, area.y + 1));
+    }
 }
 
 /// Draw the footer with keybindings.
