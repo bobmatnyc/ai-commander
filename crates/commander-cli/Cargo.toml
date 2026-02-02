@@ -30,6 +30,7 @@ shellexpand = { workspace = true }
 dotenvy = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+which = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }

@@ -1082,6 +1082,21 @@ impl Repl {
 
     /// Generate a pairing code for Telegram bot.
     fn generate_telegram_pairing(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Ensure telegram bot is running
+        match crate::ensure_telegram_running() {
+            Ok(was_running) => {
+                if was_running {
+                    println!("[ok] Telegram bot is running");
+                } else {
+                    println!("[ok] Telegram bot started");
+                }
+            }
+            Err(e) => {
+                println!("[warn] Could not start Telegram bot: {}", e);
+                println!("  You can start it manually: cargo run -p commander-telegram");
+            }
+        }
+
         // Don't require connected project - pairing authorizes for the whole instance
         let (project_name, session_name) = match &self.connected_project {
             Some(p) => (p.clone(), format!("commander-{}", p)),
