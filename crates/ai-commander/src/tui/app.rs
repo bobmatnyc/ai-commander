@@ -1196,6 +1196,28 @@ impl App {
                 if self.project.as_ref() == Some(&name) {
                     self.messages.push(Message::system("  Connected: Yes"));
                 }
+
+                // Show session activity if running
+                if session_exists {
+                    if let Some(tmux) = &self.tmux {
+                        if let Ok(output) = tmux.capture_output(&session_name, None, Some(100)) {
+                            let summary = crate::repl::extract_session_summary(&output);
+                            if !summary.is_empty() {
+                                self.messages.push(Message::system("  Activity:"));
+                                for line in summary {
+                                    self.messages.push(Message::system(format!("    {}", line)));
+                                }
+                            } else {
+                                let ready = commander_core::is_claude_ready(&output);
+                                if ready {
+                                    self.messages.push(Message::system("  Activity: Idle (waiting for input)"));
+                                } else {
+                                    self.messages.push(Message::system("  Activity: Processing..."));
+                                }
+                            }
+                        }
+                    }
+                }
             }
             None => {
                 self.messages.push(Message::system("No project specified. Use /status <project> or connect first."));
