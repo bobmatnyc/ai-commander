@@ -10,6 +10,10 @@ pub mod filesystem;
 pub mod repl;
 pub mod tui;
 
+// Re-export orchestrator when agents feature is enabled
+#[cfg(feature = "agents")]
+pub use commander_orchestrator;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

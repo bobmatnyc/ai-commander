@@ -51,5 +51,12 @@ dotenvy = { workspace = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# Optional dependencies (must be in [dependencies] section)
+commander-orchestrator = { path = "../commander-orchestrator", optional = true }
+
+[features]
+default = []
+agents = ["commander-orchestrator"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
