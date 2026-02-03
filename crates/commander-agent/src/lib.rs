@@ -64,6 +64,7 @@ pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod eval;
 pub mod response;
 pub mod session_agent;
 pub mod template;
@@ -77,6 +78,7 @@ pub use compaction::{ContextWindow, LlmSummarizer, SimpleSummarizer, Summarizer}
 pub use config::{ModelConfig, Provider};
 pub use context::{AgentContext, Message, MessageRole};
 pub use error::{AgentError, Result};
+pub use eval::{AutoEval, Feedback, FeedbackDetector, FeedbackStore, FeedbackSummary, FeedbackType};
 pub use response::AgentResponse;
 pub use session_agent::{OutputAnalysis, SessionAgent, SessionState};
 pub use tool::{ToolCall, ToolDefinition, ToolResult};
