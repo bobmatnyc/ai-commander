@@ -167,6 +167,13 @@ pub fn notifications_file() -> PathBuf {
     runtime_state_dir().join("notifications.json")
 }
 
+/// Get the authorized chats file path.
+///
+/// Stores authorized Telegram chat IDs that persist across bot restarts.
+pub fn authorized_chats_file() -> PathBuf {
+    runtime_state_dir().join("authorized_chats.json")
+}
+
 /// Get the main config file path.
 ///
 /// The config.toml file for user settings.
@@ -330,6 +337,12 @@ mod tests {
     fn test_notifications_file_name() {
         let file = notifications_file();
         assert!(file.ends_with("notifications.json"));
+    }
+
+    #[test]
+    fn test_authorized_chats_file_name() {
+        let file = authorized_chats_file();
+        assert!(file.ends_with("authorized_chats.json"));
     }
 
     #[test]
