@@ -60,6 +60,7 @@
 
 pub mod agent;
 pub mod client;
+pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod error;
@@ -71,6 +72,7 @@ pub mod user_agent;
 // Re-export commonly used items
 pub use agent::{Agent, AgentType};
 pub use client::OpenRouterClient;
+pub use compaction::{ContextWindow, LlmSummarizer, SimpleSummarizer, Summarizer};
 pub use config::{ModelConfig, Provider};
 pub use context::{AgentContext, Message, MessageRole};
 pub use error::{AgentError, Result};
