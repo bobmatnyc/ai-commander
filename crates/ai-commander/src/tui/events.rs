@@ -1,6 +1,8 @@
 //! Event handling for the TUI.
 
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::{
@@ -34,6 +36,28 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
+/// Register SIGHUP handler for hot-restart.
+fn setup_signal_handler() -> Result<Arc<AtomicBool>> {
+    let flag = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&flag))?;
+    Ok(flag)
+}
+
+/// Re-exec the current process to pick up a new binary.
+/// This replaces the current process entirely, preserving the terminal session.
+fn restart_self() -> ! {
+    use std::os::unix::process::CommandExt;
+
+    let args: Vec<String> = std::env::args().collect();
+    let err = std::process::Command::new(&args[0])
+        .args(&args[1..])
+        .exec();
+
+    // exec() only returns on error
+    eprintln!("Failed to restart: {}", err);
+    std::process::exit(1);
+}
+
 /// Run the TUI event loop.
 pub fn run(state_dir: &std::path::Path, connect_to: Option<String>) -> Result<()> {
     // Load config and check for first-run onboarding
@@ -46,6 +70,15 @@ pub fn run(state_dir: &std::path::Path, connect_to: Option<String>) -> Result<()
         // Reload config after onboarding
         commander_core::load_config();
     }
+
+    // Setup SIGHUP handler for hot-restart
+    let restart_flag = match setup_signal_handler() {
+        Ok(flag) => Some(flag),
+        Err(e) => {
+            eprintln!("Warning: Failed to setup signal handler: {}", e);
+            None
+        }
+    };
 
     // Setup terminal
     let mut terminal = setup_terminal()?;
@@ -61,10 +94,15 @@ pub fn run(state_dir: &std::path::Path, connect_to: Option<String>) -> Result<()
     }
 
     // Run event loop
-    let result = run_loop(&mut terminal, &mut app);
+    let result = run_loop(&mut terminal, &mut app, restart_flag.as_ref());
 
-    // Restore terminal
+    // Restore terminal before potentially restarting
     restore_terminal(&mut terminal)?;
+
+    // Check if restart was requested
+    if restart_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+        restart_self();
+    }
 
     result
 }
@@ -73,6 +111,7 @@ pub fn run(state_dir: &std::path::Path, connect_to: Option<String>) -> Result<()
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
+    restart_flag: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     let tick_rate = Duration::from_millis(100);
 
@@ -200,6 +239,12 @@ fn run_loop(
 
         // Check if should quit
         if app.should_quit {
+            break;
+        }
+
+        // Check if restart was requested via SIGHUP
+        if restart_flag.is_some_and(|f| f.load(Ordering::Relaxed)) {
+            app.messages.push(super::app::Message::system("Restart requested, reloading..."));
             break;
         }
     }

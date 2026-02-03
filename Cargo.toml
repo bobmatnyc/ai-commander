@@ -34,3 +34,4 @@ teloxide = { version = "0.13", features = ["webhooks-axum", "macros"] }
 futures = "0.3"
 url = "2.5"
 which = "7"
+signal-hook = "0.3"
