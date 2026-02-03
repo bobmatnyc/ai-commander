@@ -3,6 +3,7 @@
 use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
 
+use ai_commander::agent_cli;
 use ai_commander::cli::{Cli, Commands};
 use ai_commander::commands;
 use ai_commander::repl::Repl;
@@ -27,6 +28,7 @@ fn main() {
     let result = match cli.command {
         Some(Commands::Repl { project }) => run_repl(&state_dir, project),
         Some(Commands::Tui { project }) => run_tui(&state_dir, project),
+        Some(Commands::Agent { command }) => agent_cli::execute(command),
         Some(cmd) => commands::execute(cmd, &state_dir),
         None => {
             // No command = enter REPL

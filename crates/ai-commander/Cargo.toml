@@ -16,6 +16,8 @@ commander-adapters = { path = "../commander-adapters" }
 commander-tmux = { path = "../commander-tmux" }
 commander-telegram = { path = "../commander-telegram" }
 commander-core = { path = "../commander-core" }
+commander-memory = { path = "../commander-memory" }
+commander-agent = { path = "../commander-agent" }
 serde = { workspace = true }
 clap = { workspace = true }
 rustyline = { workspace = true }

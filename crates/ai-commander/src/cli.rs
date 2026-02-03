@@ -1,6 +1,6 @@
 //! Command-line interface definition using clap.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 /// Build version string with git hash and build date.
@@ -108,6 +108,170 @@ pub enum Commands {
 
     /// Show available runtime adapters
     Adapters,
+
+    /// Agent system commands (memory, chat, feedback)
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
+}
+
+/// Agent-related subcommands.
+#[derive(Subcommand, Debug)]
+pub enum AgentCommands {
+    /// Memory operations
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    },
+
+    /// Chat with the user agent
+    Chat {
+        /// Message to send (omit for interactive mode)
+        message: Option<String>,
+
+        /// Interactive chat mode
+        #[arg(short, long)]
+        interactive: bool,
+    },
+
+    /// Session agent operations
+    Session {
+        /// Session ID
+        #[arg(short, long)]
+        id: String,
+
+        /// Adapter type (claude-code, mpm, generic)
+        #[arg(short, long, default_value = "generic")]
+        adapter: String,
+
+        /// Input to process
+        input: String,
+    },
+
+    /// Feedback operations
+    Feedback {
+        #[command(subcommand)]
+        command: FeedbackCommands,
+    },
+
+    /// Show agent system status
+    Status,
+
+    /// Show storage paths
+    Paths,
+
+    /// Check agent system health
+    Check,
+}
+
+/// Memory subcommands.
+#[derive(Subcommand, Debug)]
+pub enum MemoryCommands {
+    /// Store a memory
+    Store {
+        /// Agent ID to store memory for
+        #[arg(long)]
+        agent_id: String,
+
+        /// Content to store
+        #[arg(long)]
+        content: String,
+    },
+
+    /// Search memories
+    Search {
+        /// Search query
+        #[arg(long)]
+        query: String,
+
+        /// Optional agent ID to filter by
+        #[arg(long)]
+        agent_id: Option<String>,
+
+        /// Maximum number of results
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+
+    /// List memories for an agent
+    List {
+        /// Agent ID to list memories for
+        #[arg(long)]
+        agent_id: String,
+
+        /// Maximum number of memories to show
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Clear memories for an agent
+    Clear {
+        /// Agent ID to clear memories for
+        #[arg(long)]
+        agent_id: String,
+    },
+
+    /// Show memory statistics
+    Stats,
+}
+
+/// Feedback subcommands.
+#[derive(Subcommand, Debug)]
+pub enum FeedbackCommands {
+    /// Show feedback summary
+    Summary {
+        /// Optional agent ID to filter by
+        #[arg(long)]
+        agent_id: Option<String>,
+    },
+
+    /// List recent feedback entries
+    List {
+        /// Maximum number of entries to show
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+
+    /// Add manual feedback (for testing)
+    Add {
+        /// Agent ID
+        #[arg(long)]
+        agent_id: String,
+
+        /// Feedback type
+        #[arg(long, value_enum)]
+        feedback_type: FeedbackTypeArg,
+
+        /// Context/situation description
+        #[arg(long)]
+        context: String,
+
+        /// User input that triggered feedback
+        #[arg(long)]
+        input: String,
+
+        /// Agent output that was problematic
+        #[arg(long)]
+        output: String,
+    },
+}
+
+/// Feedback type CLI argument.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum FeedbackTypeArg {
+    /// Explicit negative feedback
+    Negative,
+    /// Implicit retry
+    Retry,
+    /// Error occurred
+    Error,
+    /// Request timed out
+    Timeout,
+    /// User provided correction
+    Correction,
+    /// Positive feedback
+    Positive,
 }
 
 /// Output format for list commands
