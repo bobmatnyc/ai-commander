@@ -65,6 +65,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod response;
+pub mod session_agent;
 pub mod template;
 pub mod tool;
 pub mod user_agent;
@@ -77,6 +78,7 @@ pub use config::{ModelConfig, Provider};
 pub use context::{AgentContext, Message, MessageRole};
 pub use error::{AgentError, Result};
 pub use response::AgentResponse;
+pub use session_agent::{OutputAnalysis, SessionAgent, SessionState};
 pub use tool::{ToolCall, ToolDefinition, ToolResult};
 pub use user_agent::UserAgent;
 
