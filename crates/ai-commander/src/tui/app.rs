@@ -885,19 +885,13 @@ impl App {
                 "⏰ {} new session(s) waiting for input:",
                 newly_waiting.len()
             )));
-            for name in newly_waiting.iter().take(5) {
+            for name in &newly_waiting {
                 let display_name = name.strip_prefix("commander-").unwrap_or(name);
                 let preview = waiting_previews.get(name).map(|s| s.as_str()).unwrap_or("");
                 self.messages.push(Message::system(format!(
                     "   @{}{}",
                     display_name,
                     if preview.is_empty() { String::new() } else { format!(" - {}", preview) }
-                )));
-            }
-            if newly_waiting.len() > 5 {
-                self.messages.push(Message::system(format!(
-                    "   ... and {} more",
-                    newly_waiting.len() - 5
                 )));
             }
             self.scroll_to_bottom();
@@ -1723,11 +1717,8 @@ fn extract_ready_preview(output: &str) -> String {
             if trimmed.len() < 5 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
                 return String::new();
             }
-            if trimmed.len() > 60 {
-                format!("{}...", &trimmed[..57])
-            } else {
-                trimmed.to_string()
-            }
+            // Don't truncate - show full preview for actionable context
+            trimmed.to_string()
         })
         .unwrap_or_default()
 }

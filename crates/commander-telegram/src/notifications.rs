@@ -197,16 +197,14 @@ pub fn notify_sessions_waiting(sessions: &[(String, String)]) -> Result<(), std:
     }
 
     let mut message = format!("[timer] {} new session(s) waiting for input:", sessions.len());
-    for (name, preview) in sessions.iter().take(5) {
+    for (name, preview) in sessions.iter() {
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
         if preview.is_empty() {
             message.push_str(&format!("\n   @{}", display_name));
         } else {
+            // Show full preview, not truncated
             message.push_str(&format!("\n   @{} - {}", display_name, preview));
         }
-    }
-    if sessions.len() > 5 {
-        message.push_str(&format!("\n   ... and {} more", sessions.len() - 5));
     }
 
     push_notification(message, None)
