@@ -163,8 +163,7 @@ main() {
     # --why: show what triggered rebuild
     #
     # Note: Builds BOTH ai-commander (TUI) and commander-telegram binaries.
-    # Only the Telegram bot is auto-restarted here; user runs TUI separately
-    # and must manually restart it to pick up changes.
+    # Telegram bot is auto-restarted; TUI receives SIGHUP to hot-reload itself.
     cargo watch \
         -w "$PROJECT_ROOT/crates" \
         -x "build $build_flags -p ai-commander -p commander-telegram" \
@@ -175,6 +174,8 @@ main() {
             sleep 0.5
             '$TARGET_PATH' $verbose &
             echo -e '${BLUE}[info]${NC} Bot started (PID: \$!)'
+            # Send SIGHUP to TUI for hot-restart
+            pkill -HUP -f 'ai-commander' 2>/dev/null && echo -e '${BLUE}[info]${NC} Sent SIGHUP to TUI for hot-reload' || true
             echo ''
         " \
         --why
