@@ -6,17 +6,71 @@ use std::sync::Arc;
 
 use commander_adapters::AdapterRegistry;
 use commander_core::{
-    clean_screen_preview, find_new_lines, is_claude_ready, summarize_with_fallback,
+    clean_screen_preview, config::authorized_chats_file, find_new_lines, is_claude_ready,
+    summarize_with_fallback,
 };
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
 use teloxide::types::{ChatId, MessageId};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{Result, TelegramError};
 use crate::pairing;
 use crate::session::UserSession;
+
+/// Load authorized chat IDs from disk.
+fn load_authorized_chats() -> HashSet<i64> {
+    let path = authorized_chats_file();
+    if !path.exists() {
+        return HashSet::new();
+    }
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<Vec<i64>>(&content) {
+            Ok(chat_ids) => {
+                let set: HashSet<i64> = chat_ids.into_iter().collect();
+                info!(count = set.len(), "Loaded authorized chats from disk");
+                set
+            }
+            Err(e) => {
+                error!(error = %e, path = %path.display(), "Failed to parse authorized chats file");
+                HashSet::new()
+            }
+        },
+        Err(e) => {
+            error!(error = %e, path = %path.display(), "Failed to read authorized chats file");
+            HashSet::new()
+        }
+    }
+}
+
+/// Save authorized chat IDs to disk.
+fn save_authorized_chats(chat_ids: &HashSet<i64>) {
+    let path = authorized_chats_file();
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            error!(error = %e, "Failed to create state directory");
+            return;
+        }
+    }
+
+    let chat_vec: Vec<i64> = chat_ids.iter().copied().collect();
+    match serde_json::to_string_pretty(&chat_vec) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                error!(error = %e, path = %path.display(), "Failed to write authorized chats file");
+            } else {
+                debug!(count = chat_ids.len(), path = %path.display(), "Saved authorized chats to disk");
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to serialize authorized chats");
+        }
+    }
+}
 
 /// Validate that a project path exists, is a directory, and is accessible.
 fn validate_project_path(path: &str) -> std::result::Result<(), String> {
@@ -69,12 +123,15 @@ impl TelegramState {
             warn!("tmux not available - project connections will not work");
         }
 
+        // Load authorized chats from disk
+        let authorized_chats = load_authorized_chats();
+
         Self {
             sessions: RwLock::new(HashMap::new()),
             tmux,
             adapters,
             store,
-            authorized_chats: RwLock::new(HashSet::new()),
+            authorized_chats: RwLock::new(authorized_chats),
         }
     }
 
@@ -119,7 +176,12 @@ impl TelegramState {
             .ok_or(TelegramError::InvalidPairingCode)?;
 
         // Authorize this chat for the commander instance
-        self.authorized_chats.write().await.insert(chat_id);
+        {
+            let mut chats = self.authorized_chats.write().await;
+            chats.insert(chat_id);
+            // Persist to disk
+            save_authorized_chats(&chats);
+        }
 
         info!(
             chat_id = %chat_id,
@@ -132,6 +194,11 @@ impl TelegramState {
     /// Check if a chat is authorized for this commander instance.
     pub async fn is_authorized(&self, chat_id: i64) -> bool {
         self.authorized_chats.read().await.contains(&chat_id)
+    }
+
+    /// Get all authorized chat IDs for broadcasting notifications.
+    pub async fn get_authorized_chat_ids(&self) -> Vec<i64> {
+        self.authorized_chats.read().await.iter().copied().collect()
     }
 
     /// Connect a chat to a session after successful pairing.
