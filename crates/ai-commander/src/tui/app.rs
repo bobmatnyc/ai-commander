@@ -423,6 +423,102 @@ impl App {
         }
     }
 
+    /// Get the current tmux session name from environment or tmux command.
+    fn get_current_tmux_session(&self) -> Option<String> {
+        // First try environment variable
+        if std::env::var("TMUX").is_ok() {
+            // We're inside tmux, get the session name
+            if let Ok(output) = std::process::Command::new("tmux")
+                .args(["display-message", "-p", "#S"])
+                .output()
+            {
+                if output.status.success() {
+                    let session = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !session.is_empty() {
+                        // Strip "commander-" prefix if present for consistency
+                        return Some(session.strip_prefix("commander-")
+                            .unwrap_or(&session)
+                            .to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Rename the current tmux session.
+    fn rename_current_session(&mut self, new_name: &str) {
+        // Get current session name
+        let current_session = if std::env::var("TMUX").is_ok() {
+            std::process::Command::new("tmux")
+                .args(["display-message", "-p", "#S"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if !s.is_empty() { Some(s) } else { None }
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+
+        let Some(old_session) = current_session else {
+            self.messages.push(Message::system("Not running inside a tmux session"));
+            return;
+        };
+
+        // Determine new session name (add commander- prefix if old had it)
+        let new_session = if old_session.starts_with("commander-") {
+            format!("commander-{}", new_name)
+        } else {
+            new_name.to_string()
+        };
+
+        // Run tmux rename-session
+        match std::process::Command::new("tmux")
+            .args(["rename-session", "-t", &old_session, &new_session])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                self.messages.push(Message::system(format!(
+                    "Renamed session '{}' to '{}'",
+                    old_session, new_session
+                )));
+
+                // Update internal tracking if this was a commander session
+                if let Some(old_project) = old_session.strip_prefix("commander-") {
+                    // Remove old mapping
+                    self.sessions.remove(old_project);
+                    // Add new mapping
+                    self.sessions.insert(new_name.to_string(), new_session.clone());
+
+                    // Update connected project if it was the old one
+                    if self.project.as_deref() == Some(old_project) {
+                        self.project = Some(new_name.to_string());
+                        self.messages.push(Message::system(format!(
+                            "Updated connection to '{}'", new_name
+                        )));
+                    }
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                self.messages.push(Message::system(format!(
+                    "Failed to rename session: {}", stderr.trim()
+                )));
+            }
+            Err(e) => {
+                self.messages.push(Message::system(format!(
+                    "Failed to run tmux rename: {}", e
+                )));
+            }
+        }
+    }
+
     /// Stop a session: commit git changes and destroy tmux session.
     pub fn stop_session(&mut self, name: &str) {
         let session_name = format!("commander-{}", name);
@@ -1243,6 +1339,7 @@ impl App {
                 self.messages.push(Message::system("  /sessions                          Session picker (F3)"));
                 self.messages.push(Message::system("  /inspect                           Toggle inspect mode (F2)"));
                 self.messages.push(Message::system("  /stop [session]                    Stop session (commits git, ends tmux)"));
+                self.messages.push(Message::system("  /rename <new-name>                 Rename current tmux session"));
                 self.messages.push(Message::system("  /send <msg>                        Send message to connected session"));
                 self.messages.push(Message::system("  /telegram                          Generate Telegram pairing code"));
                 self.messages.push(Message::system("  /clear                             Clear output"));
@@ -1367,13 +1464,34 @@ impl App {
             }
             "stop" => {
                 // Stop a session (commit git changes and destroy tmux)
+                // Priority: arg > connected project > current tmux session
                 let target = arg.map(|s| s.to_string())
-                    .or_else(|| self.project.clone());
+                    .or_else(|| self.project.clone())
+                    .or_else(|| self.get_current_tmux_session());
 
                 if let Some(name) = target {
-                    self.stop_session(&name);
+                    // Check if we're stopping the session we're running in
+                    let current_session = self.get_current_tmux_session();
+                    let stopping_self = current_session.as_ref() == Some(&name)
+                        || current_session.as_ref().map(|s| s == &format!("commander-{}", name)).unwrap_or(false);
+
+                    if stopping_self {
+                        self.messages.push(Message::system(format!("Stopping current session '{}'...", name)));
+                        self.stop_session(&name);
+                        // Note: If we're running inside this tmux session, the process will be killed
+                    } else {
+                        self.stop_session(&name);
+                    }
                 } else {
                     self.messages.push(Message::system("Usage: /stop [session] or connect to a session first"));
+                }
+            }
+            "rename" => {
+                // Rename the current tmux session
+                if let Some(new_name) = arg {
+                    self.rename_current_session(new_name);
+                } else {
+                    self.messages.push(Message::system("Usage: /rename <new-name>"));
                 }
             }
             "inspect" => {
@@ -1607,8 +1725,8 @@ impl App {
     /// Available slash commands for completion.
     const COMMANDS: &'static [&'static str] = &[
         "/clear", "/connect", "/disconnect", "/help", "/inspect",
-        "/list", "/quit", "/send", "/sessions", "/status", "/stop",
-        "/telegram",
+        "/list", "/quit", "/rename", "/send", "/sessions", "/status",
+        "/stop", "/telegram",
     ];
 
     /// Perform tab completion on the current input.
