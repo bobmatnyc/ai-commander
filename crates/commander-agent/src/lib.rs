@@ -59,19 +59,24 @@
 //! ```
 
 pub mod agent;
+pub mod client;
 pub mod config;
 pub mod context;
 pub mod error;
 pub mod response;
+pub mod template;
 pub mod tool;
+pub mod user_agent;
 
 // Re-export commonly used items
 pub use agent::{Agent, AgentType};
+pub use client::OpenRouterClient;
 pub use config::{ModelConfig, Provider};
 pub use context::{AgentContext, Message, MessageRole};
 pub use error::{AgentError, Result};
 pub use response::AgentResponse;
 pub use tool::{ToolCall, ToolDefinition, ToolResult};
+pub use user_agent::UserAgent;
 
 #[cfg(test)]
 mod tests {
