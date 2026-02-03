@@ -103,13 +103,44 @@ crates/
 
 ## Configuration
 
+### Storage
+
+All application data is stored under `~/.ai-commander/`:
+
+```
+~/.ai-commander/
+├── db/           # Databases (ChromaDB, etc.)
+│   └── chroma/
+├── logs/         # Application logs
+├── config/       # User configuration
+│   ├── config.toml
+│   └── .env.local
+├── cache/        # Temporary cache files
+└── state/        # Runtime state files
+    ├── pairings.json
+    ├── projects.json
+    ├── notifications.json
+    ├── telegram.pid
+    └── sessions/
+```
+
+### Environment Variables
+
 | Variable | Description |
 |----------|-------------|
-| `COMMANDER_STATE_DIR` | Override state directory (default: `~/.commander/`) |
+| `COMMANDER_STATE_DIR` | Override base state directory (default: `~/.ai-commander/`) |
+| `COMMANDER_DB_DIR` | Override database directory |
+| `COMMANDER_LOG_DIR` | Override log directory |
+| `COMMANDER_CONFIG_DIR` | Override config directory |
+| `COMMANDER_CACHE_DIR` | Override cache directory |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for remote control |
 | `OPENROUTER_API_KEY` | API key for response summarization |
 
-Environment variables can be set in `.env.local` in the project root.
+Environment variables can be set in `~/.ai-commander/config/.env.local`.
+
+### Migration from v0.2.x
+
+If upgrading from v0.2.x, the application will automatically migrate data from `~/.commander/` to `~/.ai-commander/` on first run. The old directory is preserved with a marker file indicating migration occurred.
 
 ## REST API
 

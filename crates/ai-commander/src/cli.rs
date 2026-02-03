@@ -122,11 +122,9 @@ pub enum OutputFormat {
 impl Cli {
     /// Returns the state directory path, using default if not specified.
     pub fn state_dir(&self) -> PathBuf {
-        self.state_dir.clone().unwrap_or_else(|| {
-            dirs::home_dir()
-                .map(|h| h.join(".commander"))
-                .unwrap_or_else(|| PathBuf::from(".commander"))
-        })
+        self.state_dir
+            .clone()
+            .unwrap_or_else(commander_core::config::state_dir)
     }
 
     /// Returns the log level based on verbosity.
