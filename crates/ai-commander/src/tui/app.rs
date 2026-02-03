@@ -1310,27 +1310,51 @@ impl App {
                 self.disconnect();
             }
             "list" | "ls" | "l" => {
-                match self.store.load_all_projects() {
-                    Ok(projects) => {
-                        if projects.is_empty() {
-                            self.messages.push(Message::system("No projects found."));
-                        } else {
-                            self.messages.push(Message::system("Projects:"));
-                            for project in projects.values() {
-                                let marker = if Some(&project.name) == self.project.as_ref() {
-                                    "*"
+                let projects = self.store.load_all_projects().unwrap_or_default();
+                let tmux_sessions = self.tmux.as_ref().and_then(|t| t.list_sessions().ok());
+
+                if projects.is_empty() && tmux_sessions.as_ref().map_or(true, |s| s.is_empty()) {
+                    self.messages.push(Message::system("No projects or sessions found."));
+                } else {
+                    // Show projects if any
+                    if !projects.is_empty() {
+                        self.messages.push(Message::system("📁 Projects:"));
+                        for project in projects.values() {
+                            let marker = if Some(&project.name) == self.project.as_ref() {
+                                "✅"
+                            } else {
+                                "📁"
+                            };
+                            self.messages.push(Message::system(format!(
+                                "  {} {} ({:?})",
+                                marker, project.name, project.state
+                            )));
+                        }
+                    }
+
+                    // Show tmux sessions if any
+                    if let Some(sessions) = tmux_sessions {
+                        if !sessions.is_empty() {
+                            if !projects.is_empty() {
+                                self.messages.push(Message::system(""));
+                            }
+                            self.messages.push(Message::system("📟 Tmux Sessions:"));
+                            for session in &sessions {
+                                let is_commander = session.name.starts_with("commander-");
+                                let is_connected = self.sessions.values().any(|n| n == &session.name);
+                                let marker = if is_connected {
+                                    "✅"
+                                } else if is_commander {
+                                    "🤖"
                                 } else {
-                                    " "
+                                    "📟"
                                 };
                                 self.messages.push(Message::system(format!(
-                                    "  {} {} ({:?})",
-                                    marker, project.name, project.state
+                                    "  {} {}",
+                                    marker, session.name
                                 )));
                             }
                         }
-                    }
-                    Err(e) => {
-                        self.messages.push(Message::system(format!("Error: {}", e)));
                     }
                 }
             }
