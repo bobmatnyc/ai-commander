@@ -34,6 +34,7 @@ dotenvy = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 which = { workspace = true }
+regex = { workspace = true }
 
 # Optional dependencies (must be in [dependencies] section)
 commander-orchestrator = { path = "../commander-orchestrator", optional = true }

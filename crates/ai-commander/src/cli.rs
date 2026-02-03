@@ -163,6 +163,64 @@ pub enum AgentCommands {
 
     /// Check agent system health
     Check,
+
+    /// Test change detection on text input
+    Detect {
+        /// Input text to analyze
+        #[arg(long)]
+        input: Option<String>,
+
+        /// File to analyze
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Show verbose output including diff lines
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
+    /// Run autonomous task execution (requires agents feature)
+    Autonomous {
+        /// Task description
+        task: String,
+
+        /// Maximum iterations before check-in
+        #[arg(long, default_value = "50")]
+        max_iterations: usize,
+    },
+
+    /// Parse and show goals from a task description
+    Goals {
+        /// Task description to parse
+        task: String,
+    },
+
+    /// Context management commands
+    Context {
+        #[command(subcommand)]
+        command: ContextCommands,
+    },
+}
+
+/// Context management subcommands.
+#[derive(Subcommand, Debug)]
+pub enum ContextCommands {
+    /// Show context status for a hypothetical session
+    Status,
+
+    /// Check what action would be taken at a simulated usage level
+    Check {
+        /// Simulated usage percentage (0-100)
+        #[arg(long)]
+        usage: u32,
+    },
+
+    /// Show context strategy for an adapter type
+    Strategy {
+        /// Adapter type (claude-code, mpm, generic)
+        #[arg(long)]
+        adapter: String,
+    },
 }
 
 /// Memory subcommands.
