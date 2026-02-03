@@ -1,0 +1,23 @@
+[package]
+name = "commander-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vector database memory storage with semantic search for AI agents"
+
+[dependencies]
+commander-core = { path = "../commander-core" }
+qdrant-client = "1"
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
