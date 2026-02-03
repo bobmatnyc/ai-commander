@@ -174,8 +174,8 @@ main() {
             sleep 0.5
             '$TARGET_PATH' $verbose &
             echo -e '${BLUE}[info]${NC} Bot started (PID: \$!)'
-            # Send SIGHUP to TUI for hot-restart
-            pkill -HUP -f 'ai-commander' 2>/dev/null && echo -e '${BLUE}[info]${NC} Sent SIGHUP to TUI for hot-reload' || true
+            # Send SIGHUP to TUI for hot-restart (use -x for exact binary name match)
+            pkill -HUP -x 'ai-commander' 2>/dev/null && echo -e '${BLUE}[info]${NC} Sent SIGHUP to TUI for hot-reload' || true
             echo ''
         " \
         --why
