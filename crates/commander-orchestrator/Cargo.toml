@@ -1,0 +1,19 @@
+[package]
+name = "commander-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent orchestration layer for AI Commander multi-agent system"
+
+[dependencies]
+commander-agent = { path = "../commander-agent" }
+commander-memory = { path = "../commander-memory" }
+commander-core = { path = "../commander-core" }
+async-trait = "0.1"
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

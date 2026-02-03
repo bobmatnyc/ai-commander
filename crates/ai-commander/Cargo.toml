@@ -33,8 +33,15 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 which = { workspace = true }
 
+# Optional dependencies (must be in [dependencies] section)
+commander-orchestrator = { path = "../commander-orchestrator", optional = true }
+
 [build-dependencies]
 chrono = { workspace = true }
+
+[features]
+default = []
+agents = ["commander-orchestrator"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

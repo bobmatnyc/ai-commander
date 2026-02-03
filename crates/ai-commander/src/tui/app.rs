@@ -14,6 +14,9 @@ use commander_tmux::TmuxOrchestrator;
 use crate::filesystem;
 use crate::validate_project_path;
 
+#[cfg(feature = "agents")]
+use commander_orchestrator::AgentOrchestrator;
+
 /// Direction of a message in the output area.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageDirection {
@@ -192,6 +195,13 @@ pub struct App {
     last_status_check: Option<Instant>,
     /// Last time we did a full session scan (slow check - 5 min)
     last_full_scan: Option<Instant>,
+    /// Sessions that were waiting in the last full scan
+    last_scan_waiting: std::collections::HashSet<String>,
+
+    // Agent orchestration (optional, behind feature flag)
+    #[cfg(feature = "agents")]
+    /// Agent orchestrator for multi-agent system integration.
+    orchestrator: Option<AgentOrchestrator>,
 }
 
 impl App {
@@ -246,6 +256,10 @@ impl App {
             session_ready_state: HashMap::new(),
             last_status_check: None,
             last_full_scan: None,
+            last_scan_waiting: std::collections::HashSet::new(),
+
+            #[cfg(feature = "agents")]
+            orchestrator: None,
         };
 
         // Add welcome message
@@ -786,8 +800,17 @@ impl App {
             } else {
                 format!("{}: {}", msg, preview)
             };
-            self.messages.push(Message::system(full_msg));
+            self.messages.push(Message::system(full_msg.clone()));
             should_scroll = true;
+
+            // Broadcast to all channels (Telegram, etc.)
+            let session_name = format!("commander-{}", name);
+            if let Err(e) = commander_telegram::notify_session_ready(
+                &session_name,
+                if preview.is_empty() { None } else { Some(&preview) }
+            ) {
+                tracing::warn!(error = %e, "Failed to broadcast notification");
+            }
         }
 
         // Apply state updates
@@ -801,7 +824,7 @@ impl App {
     }
 
     /// Full scan of ALL tmux sessions every 5 minutes.
-    /// Reports any sessions that are waiting for input.
+    /// Reports only CHANGED state - new sessions waiting or sessions no longer waiting.
     pub fn scan_all_sessions(&mut self) {
         // Rate limit to every 5 minutes
         let now = Instant::now();
@@ -824,44 +847,92 @@ impl App {
         let Ok(all_sessions) = tmux.list_sessions() else { return };
 
         // Check each session for ready state
-        let mut waiting_sessions: Vec<(String, String)> = Vec::new();
+        let mut current_waiting: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut waiting_previews: HashMap<String, String> = HashMap::new();
 
         for session_info in &all_sessions {
             if let Ok(output) = tmux.capture_output(&session_info.name, None, Some(50)) {
                 if is_claude_ready(&output) {
                     let preview = extract_ready_preview(&output);
-                    waiting_sessions.push((session_info.name.clone(), preview));
+                    current_waiting.insert(session_info.name.clone());
+                    waiting_previews.insert(session_info.name.clone(), preview);
                 }
             }
         }
 
-        // Report if any sessions are waiting (excluding currently connected)
+        // Exclude currently connected session
         let connected = self.project.as_ref().map(|p| format!("commander-{}", p));
-        let other_waiting: Vec<_> = waiting_sessions.iter()
-            .filter(|(name, _)| connected.as_ref() != Some(name))
+        if let Some(ref conn) = connected {
+            current_waiting.remove(conn);
+        }
+
+        // Find newly waiting sessions (in current but not in last scan)
+        // Collect as owned strings to avoid borrow issues
+        let newly_waiting: Vec<String> = current_waiting.iter()
+            .filter(|name| !self.last_scan_waiting.contains(*name))
+            .cloned()
             .collect();
 
-        if !other_waiting.is_empty() {
+        // Find sessions no longer waiting (in last scan but not in current)
+        let no_longer_waiting: Vec<String> = self.last_scan_waiting.iter()
+            .filter(|name| !current_waiting.contains(*name))
+            .cloned()
+            .collect();
+
+        // Report newly waiting sessions
+        if !newly_waiting.is_empty() {
             self.messages.push(Message::system(format!(
-                "⏰ {} session(s) waiting for input:",
-                other_waiting.len()
+                "⏰ {} new session(s) waiting for input:",
+                newly_waiting.len()
             )));
-            for (name, preview) in other_waiting.iter().take(5) {
+            for name in newly_waiting.iter().take(5) {
                 let display_name = name.strip_prefix("commander-").unwrap_or(name);
+                let preview = waiting_previews.get(name).map(|s| s.as_str()).unwrap_or("");
                 self.messages.push(Message::system(format!(
                     "   @{}{}",
                     display_name,
                     if preview.is_empty() { String::new() } else { format!(" - {}", preview) }
                 )));
             }
-            if other_waiting.len() > 5 {
+            if newly_waiting.len() > 5 {
                 self.messages.push(Message::system(format!(
                     "   ... and {} more",
-                    other_waiting.len() - 5
+                    newly_waiting.len() - 5
                 )));
             }
             self.scroll_to_bottom();
+
+            // Broadcast to all channels (Telegram, etc.)
+            let sessions_for_broadcast: Vec<_> = newly_waiting.iter()
+                .map(|name| {
+                    let preview = waiting_previews.get(name).cloned().unwrap_or_default();
+                    (name.clone(), preview)
+                })
+                .collect();
+            if let Err(e) = commander_telegram::notify_sessions_waiting(&sessions_for_broadcast) {
+                tracing::warn!(error = %e, "Failed to broadcast notification");
+            }
         }
+
+        // Report sessions that resumed work (optional, can be noisy)
+        if !no_longer_waiting.is_empty() && no_longer_waiting.len() <= 3 {
+            for name in &no_longer_waiting {
+                let display_name = name.strip_prefix("commander-").unwrap_or(name);
+                self.messages.push(Message::system(format!(
+                    "▶️ @{} resumed work",
+                    display_name
+                )));
+
+                // Broadcast to all channels
+                if let Err(e) = commander_telegram::notify_session_resumed(name) {
+                    tracing::warn!(error = %e, "Failed to broadcast notification");
+                }
+            }
+            self.scroll_to_bottom();
+        }
+
+        // Update tracking state
+        self.last_scan_waiting = current_waiting;
     }
 
     /// Scroll up in inspect mode.
@@ -1563,6 +1634,62 @@ impl App {
     pub fn reset_completions(&mut self) {
         self.completions.clear();
         self.completion_index = None;
+    }
+
+    // ==================== Agent Orchestration ====================
+
+    /// Initialize the agent orchestrator (when agents feature is enabled).
+    ///
+    /// This should be called during app setup to enable agent-based processing.
+    /// If initialization fails, the app continues to work without agents.
+    #[cfg(feature = "agents")]
+    pub async fn init_orchestrator(&mut self) -> Result<(), String> {
+        match AgentOrchestrator::new().await {
+            Ok(orchestrator) => {
+                self.orchestrator = Some(orchestrator);
+                self.messages.push(Message::system("Agent orchestrator initialized"));
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("Failed to initialize orchestrator: {}", e);
+                self.messages.push(Message::system(&msg));
+                Err(msg)
+            }
+        }
+    }
+
+    /// Process user input through the agent orchestrator (if available).
+    ///
+    /// Returns the processed response, or the original input if no orchestrator.
+    #[cfg(feature = "agents")]
+    pub async fn process_with_agent(&mut self, input: &str) -> Result<String, String> {
+        if let Some(ref mut orchestrator) = self.orchestrator {
+            orchestrator
+                .process_user_input(input)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            // No orchestrator - return input unchanged
+            Ok(input.to_string())
+        }
+    }
+
+    /// Check if the orchestrator is initialized.
+    #[cfg(feature = "agents")]
+    pub fn has_orchestrator(&self) -> bool {
+        self.orchestrator.is_some()
+    }
+
+    /// Get a reference to the orchestrator (if available).
+    #[cfg(feature = "agents")]
+    pub fn orchestrator(&self) -> Option<&AgentOrchestrator> {
+        self.orchestrator.as_ref()
+    }
+
+    /// Get a mutable reference to the orchestrator (if available).
+    #[cfg(feature = "agents")]
+    pub fn orchestrator_mut(&mut self) -> Option<&mut AgentOrchestrator> {
+        self.orchestrator.as_mut()
     }
 }
 
