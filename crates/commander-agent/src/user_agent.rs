@@ -3,16 +3,27 @@
 //! The User Agent acts as the user's proxy, coordinating tasks and delegating
 //! to session agents. It uses Claude Opus via OpenRouter for reasoning and
 //! has access to memory search tools.
+//!
+//! ## Autonomous Execution
+//!
+//! The User Agent supports "Ralph" style push-to-completion behavior via the
+//! [`CompletionDriver`]. It drives work forward autonomously, only stopping when:
+//! - All goals are complete
+//! - A blocker requires user input
+//! - Maximum iterations reached (safety limit)
 
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use commander_memory::{EmbeddingGenerator, Memory, MemoryStore, SearchResult};
 
 use crate::agent::{Agent, AgentType};
 use crate::client::{ChatMessage, ChatTool, OpenRouterClient};
+use crate::completion_driver::{
+    AutonomousResult, Blocker, BlockerType, CompletionDriver, ContinueDecision, Goal, GoalStatus,
+};
 use crate::config::ModelConfig;
 use crate::context::{AgentContext, Message};
 use crate::error::{AgentError, Result};
@@ -22,28 +33,67 @@ use crate::tool::{ToolCall, ToolDefinition, ToolResult};
 /// Maximum iterations in the tool calling loop.
 const MAX_TOOL_ITERATIONS: u32 = 10;
 
-/// Default system prompt for the User Agent.
-const DEFAULT_SYSTEM_PROMPT: &str = r#"You are the User Agent in the AI Commander system. Your role is to:
+/// Default system prompt for the User Agent (autonomous mode).
+const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an autonomous AI agent that drives projects to completion.
 
-1. Understand what the user wants to accomplish
-2. Search memories for relevant context and past interactions
-3. Coordinate with session agents to execute coding tasks
-4. Maintain context across conversations
+## Core Principles
+1. **Take Action** - Don't ask permission, do the work
+2. **Be Proactive** - Anticipate next steps and execute them
+3. **Report Progress** - Tell the user what you did, not what you might do
+4. **Only Stop When Blocked** - Continue until you genuinely need user input
 
-You have access to tools for searching memories and delegating tasks to session agents.
-When working on a task:
-- First search for relevant memories to understand context
-- Consider what information you need from the user
-- Delegate specific coding tasks to session agents
-- Track progress and report back to the user
+## When to Continue Autonomously
+- Task is clear and you know what to do
+- You can make reasonable decisions without user input
+- Errors are recoverable or you can try alternatives
+- Next steps are obvious from context
 
-Be helpful, thorough, and proactive in driving projects to completion."#;
+## When to Stop for User
+- Ambiguous requirements that could go multiple ways
+- Destructive operations (delete, overwrite) on user data
+- Need credentials or access you don't have
+- Multiple valid approaches and user preference matters
+- Error requires judgment call on how to proceed
+
+## Response Format When Working
+"[x] [What I just completed]
+-> [What I'm doing next]"
+
+## Response Format When Blocked
+"[!] I need your input:
+[Clear description of what's needed]
+
+Options:
+1. [Option A]
+2. [Option B]
+..."
+
+## Response Format When Complete
+"[DONE] Completed: [Summary of what was achieved]
+
+Results:
+- [Key outcome 1]
+- [Key outcome 2]"
+
+## Your Capabilities
+You have access to tools for:
+- Searching memories for relevant context
+- Delegating tasks to session agents
+- Querying session status
+
+Use these proactively to drive work forward."#;
 
 /// User Agent that acts as the user's proxy in the multi-agent system.
 ///
 /// The User Agent coordinates tasks, maintains context through memory,
 /// and delegates work to session agents. It uses Claude Opus 4 via
 /// OpenRouter for reasoning.
+///
+/// ## Autonomous Mode
+///
+/// The User Agent supports autonomous "push-to-completion" behavior where it
+/// drives work forward without waiting for user permission at each step.
+/// Use [`process_autonomous`](Self::process_autonomous) for this mode.
 pub struct UserAgent {
     /// Unique identifier for this agent.
     id: String,
@@ -65,6 +115,9 @@ pub struct UserAgent {
 
     /// Agent context for conversation history.
     context: AgentContext,
+
+    /// Completion driver for autonomous execution.
+    completion_driver: Option<CompletionDriver>,
 }
 
 impl UserAgent {
@@ -81,6 +134,7 @@ impl UserAgent {
             tools: Self::default_tools(),
             client,
             context: AgentContext::new(),
+            completion_driver: None,
         })
     }
 
@@ -97,6 +151,7 @@ impl UserAgent {
             tools: Self::default_tools(),
             client,
             context: AgentContext::new(),
+            completion_driver: None,
         })
     }
 
@@ -116,6 +171,7 @@ impl UserAgent {
             tools: Self::default_tools(),
             client,
             context: AgentContext::new(),
+            completion_driver: None,
         }
     }
 
@@ -397,6 +453,360 @@ impl UserAgent {
 
         Ok(ToolResult::success(&call.id, output))
     }
+
+    // ==================== Autonomous Execution ====================
+
+    /// Process a user request autonomously until completion or blocker.
+    ///
+    /// This implements "Ralph" style push-to-completion behavior where the agent
+    /// drives work forward, only stopping when:
+    /// - All goals are complete
+    /// - A blocker requires user input
+    /// - Maximum iterations reached (safety limit)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let result = agent.process_autonomous("Implement user authentication").await?;
+    /// match result {
+    ///     AutonomousResult::Complete { summary, .. } => println!("Done: {}", summary),
+    ///     AutonomousResult::NeedsInput { reason, blockers, .. } => {
+    ///         println!("Blocked: {}", reason);
+    ///         for blocker in blockers {
+    ///             println!("- {}", blocker.reason);
+    ///         }
+    ///     }
+    ///     AutonomousResult::CheckIn { progress, .. } => println!("Progress: {}", progress),
+    /// }
+    /// ```
+    pub async fn process_autonomous(&mut self, initial_request: &str) -> Result<AutonomousResult> {
+        info!("Starting autonomous processing: {}...", &initial_request[..initial_request.len().min(50)]);
+
+        // Initialize completion driver
+        let mut driver = CompletionDriver::new();
+
+        // Parse initial request into goals
+        let goals = self.parse_goals(initial_request).await?;
+        driver.set_goals(goals);
+
+        info!("Parsed {} goals from request", driver.goals().len());
+
+        // Main autonomous loop
+        loop {
+            match driver.should_continue() {
+                ContinueDecision::Continue => {
+                    // Execute next action
+                    let action_result = self.execute_next_action(&mut driver).await;
+
+                    match action_result {
+                        Ok(Some(blocker)) => {
+                            driver.add_blocker(blocker);
+                        }
+                        Ok(None) => {
+                            // Action completed successfully
+                        }
+                        Err(e) => {
+                            // Error occurred - determine if we should add a blocker
+                            warn!("Action error: {}", e);
+                            let blocker = self.classify_error_as_blocker(&e);
+                            if let Some(b) = blocker {
+                                driver.add_blocker(b);
+                            } else {
+                                // Recoverable error, continue
+                                debug!("Error was recoverable, continuing");
+                            }
+                        }
+                    }
+
+                    driver.increment_iteration();
+                }
+                ContinueDecision::StopForUser { reason, blockers } => {
+                    info!("Stopping for user input: {}", reason);
+                    return Ok(AutonomousResult::NeedsInput {
+                        reason,
+                        blockers,
+                        progress: driver.format_progress(),
+                    });
+                }
+                ContinueDecision::CheckIn { reason, progress } => {
+                    info!("Periodic check-in: {}", reason);
+                    return Ok(AutonomousResult::CheckIn { reason, progress });
+                }
+                ContinueDecision::Complete { summary } => {
+                    info!("All goals complete");
+                    return Ok(AutonomousResult::Complete {
+                        summary,
+                        goals_achieved: driver.goals().to_vec(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Resume autonomous processing after user provides input.
+    ///
+    /// Call this after receiving user input that resolves blockers.
+    pub async fn resume_autonomous(
+        &mut self,
+        user_input: &str,
+        driver: &mut CompletionDriver,
+    ) -> Result<AutonomousResult> {
+        info!("Resuming autonomous processing with user input");
+
+        // Clear blockers since user provided input
+        driver.clear_blockers();
+        driver.reset_iterations();
+
+        // Process the user input to update context
+        let context = self.context.clone();
+        let _ = self.process(user_input, &context).await?;
+
+        // Continue autonomous processing
+        loop {
+            match driver.should_continue() {
+                ContinueDecision::Continue => {
+                    let action_result = self.execute_next_action(driver).await;
+                    if let Ok(Some(blocker)) = action_result {
+                        driver.add_blocker(blocker);
+                    }
+                    driver.increment_iteration();
+                }
+                ContinueDecision::StopForUser { reason, blockers } => {
+                    return Ok(AutonomousResult::NeedsInput {
+                        reason,
+                        blockers,
+                        progress: driver.format_progress(),
+                    });
+                }
+                ContinueDecision::CheckIn { reason, progress } => {
+                    return Ok(AutonomousResult::CheckIn { reason, progress });
+                }
+                ContinueDecision::Complete { summary } => {
+                    return Ok(AutonomousResult::Complete {
+                        summary,
+                        goals_achieved: driver.goals().to_vec(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Parse a user request into actionable goals.
+    async fn parse_goals(&mut self, request: &str) -> Result<Vec<Goal>> {
+        // Use the LLM to parse goals from the request
+        let goal_prompt = format!(
+            r#"Analyze this request and extract actionable goals.
+Return goals as a simple numbered list, one goal per line.
+Keep goals specific and actionable.
+
+Request: {}
+
+Goals:"#,
+            request
+        );
+
+        let messages = vec![
+            ChatMessage::system("You are a task decomposition assistant. Extract clear, actionable goals from user requests."),
+            ChatMessage::user(&goal_prompt),
+        ];
+
+        let response = self.client.chat(&self.config, messages, None).await?;
+
+        let content = response
+            .message()
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+
+        // Parse the response into goals
+        let goals: Vec<Goal> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                // Remove numbering like "1. " or "- "
+                let cleaned = line
+                    .trim()
+                    .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == ' ');
+                Goal::new(cleaned.trim())
+            })
+            .filter(|g| !g.description.is_empty())
+            .collect();
+
+        // If parsing failed, create a single goal from the original request
+        if goals.is_empty() {
+            Ok(vec![Goal::new(request)])
+        } else {
+            Ok(goals)
+        }
+    }
+
+    /// Execute the next action toward completing goals.
+    async fn execute_next_action(&mut self, driver: &mut CompletionDriver) -> Result<Option<Blocker>> {
+        // Find the next goal to work on
+        let next_goal = if let Some(current) = driver.current_goal() {
+            current.description.clone()
+        } else if let Some(pending) = driver.next_pending_goal() {
+            // Mark it as in progress
+            let desc = pending.description.clone();
+            driver.update_goal_status(&desc, GoalStatus::InProgress);
+            desc
+        } else {
+            // No more goals
+            return Ok(None);
+        };
+
+        debug!("Working on goal: {}", next_goal);
+
+        // Generate action for this goal
+        let action_prompt = format!(
+            r#"You are working on this goal: {}
+
+Current progress:
+{}
+
+Determine the next concrete action to take. If you need to use a tool, use it.
+If this goal is complete, say "[GOAL COMPLETE]".
+If you're blocked and need user input, say "[BLOCKED]" followed by what you need.
+
+What is your next action?"#,
+            next_goal,
+            driver.format_progress()
+        );
+
+        // Process through the normal flow which handles tool calling
+        let context = self.context.clone();
+        let response = self.process(&action_prompt, &context).await?;
+
+        // Analyze the response
+        let content = response.content.to_lowercase();
+
+        if content.contains("[goal complete]") || content.contains("completed") || content.contains("[done]") {
+            driver.complete_goal(&next_goal);
+            info!("Goal completed: {}", next_goal);
+            return Ok(None);
+        }
+
+        if content.contains("[blocked]") || content.contains("need your input") || content.contains("cannot proceed") {
+            // Extract blocker reason from response
+            let reason = self.extract_blocker_reason(&response.content);
+            let blocker_type = self.classify_blocker_type(&response.content);
+            let options = self.extract_options(&response.content);
+
+            return Ok(Some(Blocker::with_options(reason, blocker_type, options)));
+        }
+
+        // Goal still in progress
+        Ok(None)
+    }
+
+    /// Classify an error to determine if it should create a blocker.
+    fn classify_error_as_blocker(&self, error: &AgentError) -> Option<Blocker> {
+        match error {
+            AgentError::Configuration(msg) => {
+                Some(Blocker::external(format!("Configuration error: {}", msg)))
+            }
+            AgentError::MaxIterationsExceeded(_) => {
+                Some(Blocker::new(
+                    "Maximum iterations reached - may need guidance",
+                    BlockerType::DecisionNeeded,
+                ))
+            }
+            AgentError::ToolExecution { tool_name, message } => {
+                // Some tool errors are recoverable
+                if message.contains("not found") || message.contains("permission") {
+                    Some(Blocker::error_judgment(
+                        format!("Tool '{}' failed: {}", tool_name, message),
+                        vec!["Retry".into(), "Skip this step".into(), "Try alternative".into()],
+                    ))
+                } else {
+                    None // Recoverable
+                }
+            }
+            _ => None, // Most errors are recoverable
+        }
+    }
+
+    /// Extract blocker reason from response text.
+    fn extract_blocker_reason(&self, content: &str) -> String {
+        // Look for text after [BLOCKED] marker
+        if let Some(idx) = content.to_lowercase().find("[blocked]") {
+            let after = &content[idx + 9..];
+            let reason = after
+                .lines()
+                .next()
+                .unwrap_or("User input needed")
+                .trim()
+                .trim_start_matches(':')
+                .trim();
+            if !reason.is_empty() {
+                return reason.to_string();
+            }
+        }
+
+        // Look for "need" phrases
+        for line in content.lines() {
+            let lower = line.to_lowercase();
+            if lower.contains("need") && (lower.contains("input") || lower.contains("decision") || lower.contains("information")) {
+                return line.trim().to_string();
+            }
+        }
+
+        "User input needed to proceed".to_string()
+    }
+
+    /// Classify the type of blocker from response text.
+    fn classify_blocker_type(&self, content: &str) -> BlockerType {
+        let lower = content.to_lowercase();
+
+        if lower.contains("decision") || lower.contains("choose") || lower.contains("option") {
+            BlockerType::DecisionNeeded
+        } else if lower.contains("credential") || lower.contains("api key") || lower.contains("access") {
+            BlockerType::ExternalDependency
+        } else if lower.contains("error") || lower.contains("failed") {
+            BlockerType::ErrorRequiresJudgment
+        } else if lower.contains("unclear") || lower.contains("ambiguous") || lower.contains("which") {
+            BlockerType::AmbiguousRequirements
+        } else {
+            BlockerType::InformationNeeded
+        }
+    }
+
+    /// Extract options from response text.
+    fn extract_options(&self, content: &str) -> Vec<String> {
+        let mut options = Vec::new();
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // Look for numbered options like "1. " or "1) "
+            if trimmed.len() > 2 {
+                let first_char = trimmed.chars().next().unwrap_or(' ');
+                if first_char.is_ascii_digit() {
+                    let rest = trimmed[1..].trim_start_matches(['.', ')', ':', ' '].as_ref());
+                    if !rest.is_empty() {
+                        options.push(rest.to_string());
+                    }
+                }
+            }
+        }
+
+        options
+    }
+
+    /// Get the current completion driver state.
+    pub fn completion_driver(&self) -> Option<&CompletionDriver> {
+        self.completion_driver.as_ref()
+    }
+
+    /// Set or replace the completion driver.
+    pub fn set_completion_driver(&mut self, driver: CompletionDriver) {
+        self.completion_driver = Some(driver);
+    }
+
+    /// Clear the completion driver.
+    pub fn clear_completion_driver(&mut self) {
+        self.completion_driver = None;
+    }
+
+    // ==================== Memory Operations ====================
 
     /// Store a memory from the conversation.
     pub async fn store_memory(&self, content: &str) -> Result<()> {
@@ -720,5 +1130,138 @@ mod tests {
 
         let results = store.search_all(&[0.1; 64], 10).await.unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    // ==================== Autonomous Behavior Tests ====================
+
+    #[test]
+    fn test_extract_blocker_reason() {
+        // Create a minimal agent for testing helper methods
+        let agent = create_test_agent_struct();
+
+        // Test [BLOCKED] marker extraction
+        let content = "[BLOCKED] Need database credentials to proceed";
+        let reason = agent.extract_blocker_reason(content);
+        assert!(reason.contains("credentials") || reason.contains("database"));
+
+        // Test "need" phrase extraction
+        let content = "I need your input on which approach to use";
+        let reason = agent.extract_blocker_reason(content);
+        assert!(reason.contains("need"));
+
+        // Test fallback
+        let content = "Something without clear markers";
+        let reason = agent.extract_blocker_reason(content);
+        assert_eq!(reason, "User input needed to proceed");
+    }
+
+    #[test]
+    fn test_classify_blocker_type() {
+        let agent = create_test_agent_struct();
+
+        assert_eq!(
+            agent.classify_blocker_type("Please make a decision"),
+            BlockerType::DecisionNeeded
+        );
+        assert_eq!(
+            agent.classify_blocker_type("I need an API key"),
+            BlockerType::ExternalDependency
+        );
+        assert_eq!(
+            agent.classify_blocker_type("An error occurred"),
+            BlockerType::ErrorRequiresJudgment
+        );
+        assert_eq!(
+            agent.classify_blocker_type("The requirements are unclear"),
+            BlockerType::AmbiguousRequirements
+        );
+        assert_eq!(
+            agent.classify_blocker_type("I need some details"),
+            BlockerType::InformationNeeded
+        );
+    }
+
+    #[test]
+    fn test_extract_options() {
+        let agent = create_test_agent_struct();
+
+        let content = r#"Options:
+1. Use approach A
+2. Use approach B
+3. Skip this step"#;
+        let options = agent.extract_options(content);
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0], "Use approach A");
+        assert_eq!(options[1], "Use approach B");
+        assert_eq!(options[2], "Skip this step");
+
+        // Test with parentheses style
+        let content = r#"1) First option
+2) Second option"#;
+        let options = agent.extract_options(content);
+        assert_eq!(options.len(), 2);
+    }
+
+    #[test]
+    fn test_classify_error_as_blocker() {
+        let agent = create_test_agent_struct();
+
+        // Configuration error should create a blocker
+        let err = AgentError::Configuration("Missing API key".to_string());
+        let blocker = agent.classify_error_as_blocker(&err);
+        assert!(blocker.is_some());
+        assert_eq!(blocker.unwrap().blocker_type, BlockerType::ExternalDependency);
+
+        // Max iterations should create a blocker
+        let err = AgentError::MaxIterationsExceeded(10);
+        let blocker = agent.classify_error_as_blocker(&err);
+        assert!(blocker.is_some());
+
+        // Tool not found error should create a blocker
+        let err = AgentError::ToolExecution {
+            tool_name: "test".to_string(),
+            message: "file not found".to_string(),
+        };
+        let blocker = agent.classify_error_as_blocker(&err);
+        assert!(blocker.is_some());
+
+        // Generic model invocation error should not create a blocker (recoverable)
+        let err = AgentError::ModelInvocation("temporary failure".to_string());
+        let blocker = agent.classify_error_as_blocker(&err);
+        assert!(blocker.is_none());
+    }
+
+    #[test]
+    fn test_completion_driver_accessors() {
+        let mut agent = create_test_agent_struct();
+
+        // Initially no driver
+        assert!(agent.completion_driver().is_none());
+
+        // Set a driver
+        let driver = CompletionDriver::new();
+        agent.set_completion_driver(driver);
+        assert!(agent.completion_driver().is_some());
+
+        // Clear the driver
+        agent.clear_completion_driver();
+        assert!(agent.completion_driver().is_none());
+    }
+
+    /// Helper to create a UserAgent struct for testing helper methods.
+    /// This avoids needing a real API key.
+    fn create_test_agent_struct() -> UserAgent {
+        use std::sync::Arc;
+
+        UserAgent {
+            id: "test-user-agent".to_string(),
+            config: UserAgent::default_config(),
+            memory: Arc::new(MockMemoryStore::new()),
+            embedder: EmbeddingGenerator::from_env(),
+            tools: UserAgent::default_tools(),
+            client: OpenRouterClient::new("fake-key-for-testing"),
+            context: AgentContext::new(),
+            completion_driver: None,
+        }
     }
 }

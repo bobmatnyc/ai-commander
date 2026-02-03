@@ -6,6 +6,7 @@ license.workspace = true
 description = "Agent trait and types for AI Commander multi-agent system"
 
 [dependencies]
+commander-core = { path = "../commander-core" }
 commander-memory = { path = "../commander-memory" }
 async-trait = "0.1"
 regex = "1"
