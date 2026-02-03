@@ -6,7 +6,7 @@
 #[cfg(feature = "agents")]
 use std::io::{self, BufRead, Write};
 
-use crate::cli::{AgentCommands, FeedbackCommands, FeedbackTypeArg, MemoryCommands};
+use crate::cli::{AgentCommands, ContextCommands, FeedbackCommands, FeedbackTypeArg, MemoryCommands};
 
 /// Result type for agent CLI operations.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -29,6 +29,17 @@ pub fn execute(command: AgentCommands) -> Result<()> {
         AgentCommands::Status => handle_status(),
         AgentCommands::Paths => handle_paths(),
         AgentCommands::Check => rt.block_on(handle_check()),
+        AgentCommands::Detect {
+            input,
+            file,
+            verbose,
+        } => handle_detect(input.as_deref(), file.as_deref(), verbose),
+        AgentCommands::Autonomous {
+            task,
+            max_iterations,
+        } => rt.block_on(handle_autonomous(&task, max_iterations)),
+        AgentCommands::Goals { task } => handle_goals(&task),
+        AgentCommands::Context { command } => handle_context(command),
     }
 }
 
@@ -484,6 +495,320 @@ fn print_file_status(name: &str, path: &std::path::Path) {
     }
 }
 
+// =============================================================================
+// Change Detection Commands
+// =============================================================================
+
+fn handle_detect(input: Option<&str>, file: Option<&std::path::Path>, verbose: bool) -> Result<()> {
+    use commander_core::change_detector::{ChangeDetector, Significance};
+
+    let text = if let Some(input) = input {
+        input.to_string()
+    } else if let Some(file) = file {
+        std::fs::read_to_string(file)?
+    } else {
+        return Err("Provide --input or --file".into());
+    };
+
+    let mut detector = ChangeDetector::new();
+    let event = detector.detect(&text);
+
+    println!("Change Detection Result");
+    println!("=======================");
+    println!("Type: {:?}", event.change_type);
+    println!("Significance: {:?}", event.significance);
+    println!("Summary: {}", event.summary);
+
+    if verbose && !event.diff_lines.is_empty() {
+        println!("\nDiff Lines:");
+        for line in &event.diff_lines {
+            println!("  + {}", line);
+        }
+    }
+
+    // Show if this would trigger LLM analysis
+    let would_invoke_llm = event.significance >= Significance::Medium;
+    println!(
+        "\nWould invoke LLM: {}",
+        if would_invoke_llm { "Yes" } else { "No" }
+    );
+    println!(
+        "Would notify user: {}",
+        if event.requires_notification() {
+            "Yes"
+        } else {
+            "No"
+        }
+    );
+
+    Ok(())
+}
+
+// =============================================================================
+// Autonomous Mode Commands
+// =============================================================================
+
+#[cfg(feature = "agents")]
+async fn handle_autonomous(task: &str, max_iterations: usize) -> Result<()> {
+    use commander_agent::{CompletionDriver, Goal};
+
+    println!("Autonomous Task Execution");
+    println!("=========================\n");
+    println!("Task: {}", task);
+    println!("Max iterations: {}\n", max_iterations);
+
+    // Parse goals from task (simplified extraction)
+    let goals = extract_goals_from_task(task);
+
+    let mut driver = CompletionDriver::with_max_iterations(max_iterations);
+    for goal in goals {
+        driver.add_goal(Goal::new(goal));
+    }
+
+    println!("Parsed Goals:");
+    println!("{}", driver.format_progress());
+
+    println!("\nNote: Full autonomous execution requires a running session.");
+    println!("This command demonstrates goal parsing and driver setup.");
+
+    // Show what the driver would do
+    let decision = driver.should_continue();
+    println!("\nInitial Decision: {:?}", decision);
+
+    Ok(())
+}
+
+#[cfg(not(feature = "agents"))]
+async fn handle_autonomous(_task: &str, _max_iterations: usize) -> Result<()> {
+    eprintln!("Error: Autonomous mode requires the 'agents' feature.");
+    eprintln!("Rebuild with: cargo build --features agents");
+    std::process::exit(1);
+}
+
+fn handle_goals(task: &str) -> Result<()> {
+    println!("Goal Extraction");
+    println!("===============\n");
+    println!("Task: {}\n", task);
+
+    let goals = extract_goals_from_task(task);
+
+    if goals.is_empty() {
+        println!("No specific goals detected. Using task as single goal.");
+        println!("\n1. {}", task);
+    } else {
+        println!("Extracted Goals:");
+        for (i, goal) in goals.iter().enumerate() {
+            println!("{}. {}", i + 1, goal);
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract goals from a task description using simple heuristics.
+fn extract_goals_from_task(task: &str) -> Vec<String> {
+    let mut goals = Vec::new();
+
+    // Look for numbered items: "1. ", "2. ", etc.
+    let numbered_re = regex::Regex::new(r"(?m)^\s*\d+\.\s*(.+)$").ok();
+    if let Some(re) = numbered_re {
+        for cap in re.captures_iter(task) {
+            if let Some(goal) = cap.get(1) {
+                goals.push(goal.as_str().trim().to_string());
+            }
+        }
+    }
+
+    // Look for bullet points: "- ", "* "
+    if goals.is_empty() {
+        let bullet_re = regex::Regex::new(r"(?m)^\s*[-*]\s*(.+)$").ok();
+        if let Some(re) = bullet_re {
+            for cap in re.captures_iter(task) {
+                if let Some(goal) = cap.get(1) {
+                    goals.push(goal.as_str().trim().to_string());
+                }
+            }
+        }
+    }
+
+    // Look for "and" separated items in common patterns
+    if goals.is_empty() {
+        // Pattern: "Implement X and Y and Z"
+        let and_re = regex::Regex::new(r"(?i)^(?:implement|create|build|add|write)\s+(.+)$").ok();
+        if let Some(re) = and_re {
+            if let Some(cap) = re.captures(task) {
+                if let Some(items) = cap.get(1) {
+                    let items_str = items.as_str();
+                    // Split by " and " or ", "
+                    for item in items_str.split(" and ").flat_map(|s| s.split(", ")) {
+                        let item = item.trim();
+                        if !item.is_empty() {
+                            goals.push(item.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // If still no goals, use the whole task as a single goal
+    if goals.is_empty() && !task.trim().is_empty() {
+        goals.push(task.trim().to_string());
+    }
+
+    goals
+}
+
+// =============================================================================
+// Context Management Commands
+// =============================================================================
+
+fn handle_context(command: ContextCommands) -> Result<()> {
+    use commander_agent::{
+        context_manager::model_contexts, ContextAction, ContextManager, ContextStrategy,
+    };
+
+    match command {
+        ContextCommands::Status => {
+            println!("Context Management Status");
+            println!("=========================\n");
+
+            println!("Default Model Contexts:");
+            println!("  Claude 3.5 Sonnet: {} tokens", model_contexts::CLAUDE_3_5_SONNET);
+            println!("  Claude 3 Haiku:    {} tokens", model_contexts::CLAUDE_3_HAIKU);
+            println!("  Claude 3 Opus:     {} tokens", model_contexts::CLAUDE_3_OPUS);
+            println!("  GPT-4 Turbo:       {} tokens", model_contexts::GPT_4_TURBO);
+            println!("  Default:           {} tokens", model_contexts::DEFAULT);
+
+            println!("\nThresholds (default):");
+            println!("  Warning:  20% remaining");
+            println!("  Critical: 10% remaining");
+
+            println!("\nStrategies by Adapter:");
+            println!("  claude-code: Compaction (summarize old messages)");
+            println!("  mpm:         Pause/Resume (save state, resume later)");
+            println!("  generic:     Warn and Continue");
+        }
+
+        ContextCommands::Check { usage } => {
+            let usage = usage.min(100);
+            let remaining = 100 - usage;
+
+            println!("Context Check Simulation");
+            println!("========================\n");
+            println!("Simulated usage: {}%", usage);
+            println!("Remaining: {}%\n", remaining);
+
+            // Check against default thresholds
+            let manager =
+                ContextManager::new(ContextStrategy::Compaction, model_contexts::CLAUDE_3_5_SONNET);
+
+            let tokens_used = (model_contexts::CLAUDE_3_5_SONNET as f32 * (usage as f32 / 100.0)) as usize;
+            let mut test_manager = ContextManager::new(ContextStrategy::Compaction, model_contexts::CLAUDE_3_5_SONNET);
+            let action = test_manager.update(tokens_used);
+
+            println!("Thresholds:");
+            println!("  Warning:  {}%", (manager.warning_threshold() * 100.0) as u32);
+            println!("  Critical: {}%", (manager.critical_threshold() * 100.0) as u32);
+
+            println!("\nAction that would be taken:");
+            match action {
+                ContextAction::Continue => {
+                    println!("  Continue - Context is healthy");
+                }
+                ContextAction::Warn { remaining_percent } => {
+                    println!(
+                        "  Warn - {:.1}% remaining, approaching critical",
+                        remaining_percent * 100.0
+                    );
+                }
+                ContextAction::Critical { action } => {
+                    println!("  Critical - Immediate action required:");
+                    match action {
+                        commander_agent::CriticalAction::Compact { messages_to_summarize } => {
+                            println!("    -> Compact {} messages", messages_to_summarize);
+                        }
+                        commander_agent::CriticalAction::Pause { command, .. } => {
+                            println!("    -> Execute pause command: {}", command);
+                        }
+                        commander_agent::CriticalAction::Alert { message } => {
+                            println!("    -> Alert: {}", message);
+                        }
+                    }
+                }
+            }
+        }
+
+        ContextCommands::Strategy { adapter } => {
+            use commander_agent::template::{AdapterType, TemplateRegistry};
+
+            let adapter_type: AdapterType = adapter.parse().map_err(|e| {
+                format!(
+                    "Invalid adapter type '{}': {}. Valid types: claude-code, mpm, generic",
+                    adapter, e
+                )
+            })?;
+
+            let registry = TemplateRegistry::new();
+
+            if let Some(template) = registry.get(&adapter_type) {
+                println!("Context Strategy for {:?}", adapter_type);
+                println!("================================\n");
+
+                match &template.context_strategy {
+                    Some(ContextStrategy::PauseResume {
+                        pause_command,
+                        resume_command,
+                    }) => {
+                        println!("Strategy: Pause/Resume");
+                        println!("Pause Command:  {}", pause_command);
+                        println!("Resume Command: {}", resume_command);
+                        println!("\nBehavior:");
+                        println!("  When context < 10%:");
+                        println!("    1. Execute pause command to save state");
+                        println!("    2. Summarize current work and remaining tasks");
+                        println!("    3. Provide resume instructions");
+                        println!("  When resuming:");
+                        println!("    1. Execute resume command to load state");
+                        println!("    2. Review saved context");
+                        println!("    3. Continue from where left off");
+                    }
+                    Some(ContextStrategy::Compaction) => {
+                        println!("Strategy: Compaction");
+                        println!("\nBehavior:");
+                        println!("  When context < 10%:");
+                        println!("    1. Summarize older messages");
+                        println!("    2. Keep recent messages in full detail");
+                        println!("    3. Preserve key facts and decisions");
+                        println!("    4. Continue without interruption");
+                    }
+                    Some(ContextStrategy::WarnAndContinue) => {
+                        println!("Strategy: Warn and Continue");
+                        println!("\nBehavior:");
+                        println!("  When context < 10%:");
+                        println!("    1. Display warning to user");
+                        println!("    2. Suggest starting a new session");
+                        println!("    3. Continue with reduced context");
+                    }
+                    None => {
+                        println!("Strategy: None (default behavior)");
+                        println!("\nNo specific context strategy configured.");
+                    }
+                }
+
+                println!("\nMemory Categories:");
+                for cat in &template.memory_categories {
+                    println!("  - {}", cat);
+                }
+            } else {
+                return Err(format!("No template found for adapter type: {}", adapter).into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +826,48 @@ mod tests {
     #[test]
     fn test_truncate_exact() {
         assert_eq!(truncate("hi", 2), "hi");
+    }
+
+    #[test]
+    fn test_extract_goals_numbered_list() {
+        let task = "1. Create login form\n2. Add OAuth2\n3. Write tests";
+        let goals = extract_goals_from_task(task);
+        assert_eq!(goals.len(), 3);
+        assert_eq!(goals[0], "Create login form");
+        assert_eq!(goals[1], "Add OAuth2");
+        assert_eq!(goals[2], "Write tests");
+    }
+
+    #[test]
+    fn test_extract_goals_bullet_list() {
+        let task = "- Add user model\n- Add authentication\n- Add tests";
+        let goals = extract_goals_from_task(task);
+        assert_eq!(goals.len(), 3);
+        assert_eq!(goals[0], "Add user model");
+    }
+
+    #[test]
+    fn test_extract_goals_implement_pattern() {
+        let task = "Implement login and signup and logout";
+        let goals = extract_goals_from_task(task);
+        assert_eq!(goals.len(), 3);
+        assert!(goals.contains(&"login".to_string()));
+        assert!(goals.contains(&"signup".to_string()));
+        assert!(goals.contains(&"logout".to_string()));
+    }
+
+    #[test]
+    fn test_extract_goals_single_task() {
+        let task = "Fix the authentication bug";
+        let goals = extract_goals_from_task(task);
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0], "Fix the authentication bug");
+    }
+
+    #[test]
+    fn test_extract_goals_empty() {
+        let task = "";
+        let goals = extract_goals_from_task(task);
+        assert!(goals.is_empty());
     }
 }
