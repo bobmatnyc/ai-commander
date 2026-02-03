@@ -161,9 +161,13 @@ main() {
     # -c: clear screen before each run
     # -q: quiet cargo output (only show errors)
     # --why: show what triggered rebuild
+    #
+    # Note: Builds BOTH ai-commander (TUI) and commander-telegram binaries.
+    # Only the Telegram bot is auto-restarted here; user runs TUI separately
+    # and must manually restart it to pick up changes.
     cargo watch \
         -w "$PROJECT_ROOT/crates" \
-        -x "build $build_flags -p commander-telegram" \
+        -x "build $build_flags -p ai-commander -p commander-telegram" \
         -s "
             echo ''
             echo -e '${GREEN}[ok]${NC} Build successful - restarting bot...'
