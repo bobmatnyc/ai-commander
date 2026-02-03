@@ -5,19 +5,15 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+
+use crate::config;
 
 /// Check if onboarding has been completed.
 ///
 /// Returns `true` if the config file does not exist (meaning the user
 /// has not completed setup yet).
 pub fn needs_onboarding() -> bool {
-    !config_file().exists()
-}
-
-/// Get the config file path.
-fn config_file() -> PathBuf {
-    crate::config::state_dir().join("config.toml")
+    !config::config_file().exists()
 }
 
 /// Run the onboarding wizard.
@@ -29,15 +25,15 @@ fn config_file() -> PathBuf {
 /// Returns an error if reading from stdin or writing to files fails.
 pub fn run_onboarding() -> io::Result<()> {
     println!();
-    println!("╔════════════════════════════════════════╗");
-    println!("║       Welcome to AI Commander!         ║");
-    println!("╚════════════════════════════════════════╝");
+    println!("+===========================================+");
+    println!("|       Welcome to AI Commander!            |");
+    println!("+===========================================+");
     println!();
     println!("Let's set up your configuration.");
     println!();
 
     // OpenRouter API Key
-    println!("━━━ OpenRouter API Key (optional) ━━━");
+    println!("--- OpenRouter API Key (optional) ---");
     println!("Used for response summarization on mobile.");
     println!("Get one at: https://openrouter.ai/keys");
     println!();
@@ -51,7 +47,7 @@ pub fn run_onboarding() -> io::Result<()> {
     println!();
 
     // Telegram Bot Token
-    println!("━━━ Telegram Bot Token (optional) ━━━");
+    println!("--- Telegram Bot Token (optional) ---");
     println!("Used for mobile access to your AI sessions.");
     println!("Create a bot: https://t.me/BotFather");
     println!();
@@ -66,19 +62,19 @@ pub fn run_onboarding() -> io::Result<()> {
     save_config(&openrouter_key, &telegram_token)?;
 
     println!();
-    println!("━━━ Setup Complete! ━━━");
+    println!("--- Setup Complete! ---");
     println!();
 
     if !openrouter_key.is_empty() {
         println!("[ok] OpenRouter API key saved");
     } else {
-        println!("[ ] OpenRouter: skipped (add later to ~/.commander/.env.local)");
+        println!("[ ] OpenRouter: skipped (add later to ~/.ai-commander/config/.env.local)");
     }
 
     if !telegram_token.is_empty() {
         println!("[ok] Telegram bot token saved");
     } else {
-        println!("[ ] Telegram: skipped (add later to ~/.commander/.env.local)");
+        println!("[ ] Telegram: skipped (add later to ~/.ai-commander/config/.env.local)");
     }
 
     println!();
@@ -93,12 +89,10 @@ pub fn run_onboarding() -> io::Result<()> {
 
 /// Save configuration to files.
 fn save_config(openrouter_key: &str, telegram_token: &str) -> io::Result<()> {
-    let config_path = config_file();
+    // Ensure config directory exists
+    config::ensure_config_dir()?;
 
-    // Ensure directory exists
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let config_path = config::config_file();
 
     // Build config.toml content
     let mut content = String::from("# AI Commander Configuration\n\n");
@@ -114,8 +108,8 @@ fn save_config(openrouter_key: &str, telegram_token: &str) -> io::Result<()> {
     // Write config.toml (creates it even if empty to mark onboarding as done)
     fs::write(&config_path, content)?;
 
-    // Also write to .env.local in state dir for compatibility with existing code
-    let env_path = crate::config::state_dir().join(".env.local");
+    // Also write to .env.local for compatibility with existing code
+    let env_path = config::env_file();
     let mut env_content = String::new();
 
     if !openrouter_key.is_empty() {
@@ -135,12 +129,20 @@ fn save_config(openrouter_key: &str, telegram_token: &str) -> io::Result<()> {
 
 /// Load saved config into environment variables.
 ///
-/// Reads the `.env.local` file from the state directory and sets
+/// Reads the `.env.local` file from the config directory and sets
 /// environment variables accordingly. This should be called on startup.
 pub fn load_config() {
-    let env_path = crate::config::state_dir().join(".env.local");
+    let env_path = config::env_file();
     if env_path.exists() {
         let _ = dotenvy::from_path(&env_path);
+    }
+
+    // Also try legacy location for backwards compatibility
+    if let Some(legacy_dir) = config::legacy_state_dir() {
+        let legacy_env = legacy_dir.join(".env.local");
+        if legacy_env.exists() {
+            let _ = dotenvy::from_path(&legacy_env);
+        }
     }
 }
 
@@ -150,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_config_file_path() {
-        let path = config_file();
+        let path = config::config_file();
         assert!(path.ends_with("config.toml"));
     }
 

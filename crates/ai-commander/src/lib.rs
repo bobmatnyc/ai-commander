@@ -14,17 +14,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// PID file location for the telegram bot daemon.
-fn telegram_pid_file() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".commander")
-        .join("telegram.pid")
-}
+use commander_core::config;
 
 /// Check if the Telegram bot daemon is running.
 pub fn is_telegram_running() -> bool {
-    let pid_file = telegram_pid_file();
+    let pid_file = config::telegram_pid_file();
     if let Ok(pid_str) = fs::read_to_string(&pid_file) {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
             // Check if process is running (Unix-specific)
@@ -61,14 +55,20 @@ pub enum TelegramStartResult {
 
 /// Start the Telegram bot daemon.
 pub fn start_telegram_daemon() -> Result<u32, String> {
-    // Load .env.local if it exists
+    // Load .env.local from config directory
+    let env_path = config::env_file();
+    if env_path.exists() {
+        let _ = dotenvy::from_path(&env_path);
+    }
+    // Also try local .env.local for backwards compatibility
     let _ = dotenvy::from_filename(".env.local");
 
     // Check for TELEGRAM_BOT_TOKEN
     if std::env::var("TELEGRAM_BOT_TOKEN").is_err() {
-        return Err(
-            "TELEGRAM_BOT_TOKEN not set. Add it to .env.local or set in environment.".to_string(),
-        );
+        return Err(format!(
+            "TELEGRAM_BOT_TOKEN not set. Add it to {} or set in environment.",
+            env_path.display()
+        ));
     }
 
     // Find the commander-telegram binary
@@ -93,11 +93,9 @@ pub fn start_telegram_daemon() -> Result<u32, String> {
 
     let pid = child.id();
 
-    // Write PID file
-    let pid_file = telegram_pid_file();
-    if let Some(parent) = pid_file.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
+    // Write PID file - ensure state directory exists
+    let _ = config::ensure_runtime_state_dir();
+    let pid_file = config::telegram_pid_file();
     fs::write(&pid_file, pid.to_string())
         .map_err(|e| format!("Failed to write PID file: {}", e))?;
 
@@ -167,7 +165,7 @@ pub fn restart_telegram_if_running() {
     tracing::info!("Restarting Telegram bot with updated code...");
 
     // Kill the old process
-    let pid_file = telegram_pid_file();
+    let pid_file = config::telegram_pid_file();
     if let Ok(pid_str) = fs::read_to_string(&pid_file) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             #[cfg(unix)]
@@ -256,9 +254,9 @@ mod tests {
 
     #[test]
     fn test_telegram_pid_file_location() {
-        let pid_file = telegram_pid_file();
-        // Should be in .commander directory
-        assert!(pid_file.to_string_lossy().contains(".commander"));
+        let pid_file = config::telegram_pid_file();
+        // Should be in .ai-commander directory
+        assert!(pid_file.to_string_lossy().contains(".ai-commander"));
         assert!(pid_file.file_name().unwrap().to_string_lossy() == "telegram.pid");
     }
 
@@ -285,6 +283,5 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("TELEGRAM_BOT_TOKEN"));
-        assert!(err.contains(".env.local"));
     }
 }

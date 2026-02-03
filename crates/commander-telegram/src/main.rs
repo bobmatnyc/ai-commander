@@ -5,9 +5,8 @@
 //! TELEGRAM_BOT_TOKEN=xxx cargo run -p commander-telegram
 //! ```
 
-use std::path::PathBuf;
-
 use clap::Parser;
+use commander_core::config;
 use commander_telegram::TelegramBot;
 use tracing_subscriber::EnvFilter;
 
@@ -33,7 +32,12 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Load environment variables from .env.local or .env
+    // Load environment variables from config directory first
+    let env_path = config::env_file();
+    if env_path.exists() {
+        let _ = dotenvy::from_path(&env_path);
+    }
+    // Also try local .env.local or .env for backwards compatibility
     let _ = dotenvy::from_filename(".env.local")
         .or_else(|_| dotenvy::dotenv());
 
@@ -49,14 +53,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    // Get state directory (same as CLI: ~/.commander)
-    let state_dir = std::env::var("COMMANDER_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .map(|h| h.join(".commander"))
-                .unwrap_or_else(|| PathBuf::from(".commander"))
-        });
+    // Get state directory
+    let state_dir = config::state_dir();
+
+    // Ensure all directories exist
+    if let Err(e) = config::ensure_all_dirs() {
+        tracing::warn!(error = %e, "Failed to create all directories");
+    }
 
     // Create the bot
     let mut bot = TelegramBot::new(&state_dir)?;
@@ -65,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match bot.get_me().await {
         Ok(username) => {
             tracing::info!(username = %username, "Bot initialized successfully");
-            println!("\n🤖 Commander Telegram Bot");
+            println!("\n[robot] Commander Telegram Bot");
             println!("   Bot: @{}", username);
             println!("   Mode: {}", if args.webhook { "webhook" } else { "polling" });
         }
@@ -75,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("\n📱 Open Telegram and send /start to begin");
+    println!("\n[phone] Open Telegram and send /start to begin");
     println!("   Press Ctrl+C to stop\n");
 
     // Start the bot

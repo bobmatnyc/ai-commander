@@ -1,14 +1,14 @@
 //! Shared pairing file for CLI-Telegram communication.
 //!
-//! Pairings are stored in `~/.commander/pairings.json` so that:
+//! Pairings are stored in `~/.ai-commander/state/pairings.json` so that:
 //! - The CLI can generate pairing codes and write them
 //! - The Telegram bot can read and consume them
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use commander_core::config;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -35,11 +35,6 @@ impl FilePairing {
             .as_secs();
         now.saturating_sub(self.created_at) > PAIRING_EXPIRY_SECS
     }
-}
-
-/// Get the path to the pairings file.
-fn pairings_file_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".commander").join("pairings.json"))
 }
 
 /// Generate a random 6-character pairing code.
@@ -69,10 +64,7 @@ pub fn generate_code() -> String {
 
 /// Load all pairings from the shared file.
 pub fn load_pairings() -> HashMap<String, FilePairing> {
-    let Some(path) = pairings_file_path() else {
-        warn!("Could not determine pairings file path");
-        return HashMap::new();
-    };
+    let path = config::pairing_file();
 
     if !path.exists() {
         return HashMap::new();
@@ -94,17 +86,10 @@ pub fn load_pairings() -> HashMap<String, FilePairing> {
 
 /// Save all pairings to the shared file.
 fn save_pairings(pairings: &HashMap<String, FilePairing>) -> Result<(), std::io::Error> {
-    let Some(path) = pairings_file_path() else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Could not determine pairings file path",
-        ));
-    };
+    let path = config::pairing_file();
 
     // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    config::ensure_runtime_state_dir()?;
 
     let content = serde_json::to_string_pretty(pairings)?;
     fs::write(&path, content)?;

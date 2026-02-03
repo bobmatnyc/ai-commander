@@ -4,17 +4,25 @@
 //! and Telegram (commander-telegram) interfaces:
 //!
 //! - **config**: Shared configuration paths and utilities
+//! - **migration**: Storage migration from legacy paths
 //! - **onboarding**: First-run setup wizard
 //! - **output_filter**: Filter UI noise from Claude Code terminal output
 //! - **summarizer**: Summarize long responses using OpenRouter API
 
 pub mod config;
+pub mod migration;
 pub mod onboarding;
 pub mod output_filter;
 pub mod summarizer;
 
 // Re-export commonly used items for convenience
-pub use config::state_dir;
+pub use config::{
+    cache_dir, chroma_dir, config_dir, config_file, db_dir, ensure_all_dirs, ensure_config_dir,
+    ensure_runtime_state_dir, ensure_sessions_dir, ensure_state_dir, env_file, legacy_state_dir,
+    logs_dir, notifications_file, pairing_file, projects_file, runtime_state_dir, sessions_dir,
+    state_dir, telegram_pid_file,
+};
+pub use migration::migrate_if_needed;
 pub use onboarding::{load_config, needs_onboarding, run_onboarding};
 pub use output_filter::{clean_response, clean_screen_preview, find_new_lines, is_claude_ready, is_ui_noise};
 pub use summarizer::{
