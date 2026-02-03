@@ -35,6 +35,10 @@ pub fn execute(command: Commands, state_dir: &Path) -> Result<()> {
             Ok(())
         }
         Commands::Adapters => cmd_adapters(),
+        Commands::Agent { .. } => {
+            // Agent commands are handled separately in main.rs
+            Ok(())
+        }
     }
 }
 
