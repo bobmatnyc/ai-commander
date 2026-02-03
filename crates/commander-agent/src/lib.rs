@@ -61,8 +61,10 @@
 pub mod agent;
 pub mod client;
 pub mod compaction;
+pub mod completion_driver;
 pub mod config;
 pub mod context;
+pub mod context_manager;
 pub mod error;
 pub mod eval;
 pub mod response;
@@ -75,8 +77,12 @@ pub mod user_agent;
 pub use agent::{Agent, AgentType};
 pub use client::OpenRouterClient;
 pub use compaction::{ContextWindow, LlmSummarizer, SimpleSummarizer, Summarizer};
+pub use completion_driver::{
+    AutonomousResult, Blocker, BlockerType, CompletionDriver, ContinueDecision, Goal, GoalStatus,
+};
 pub use config::{ModelConfig, Provider};
 pub use context::{AgentContext, Message, MessageRole};
+pub use context_manager::{ContextAction, ContextManager, ContextStrategy, CriticalAction};
 pub use error::{AgentError, Result};
 pub use eval::{AutoEval, Feedback, FeedbackDetector, FeedbackStore, FeedbackSummary, FeedbackType};
 pub use response::AgentResponse;

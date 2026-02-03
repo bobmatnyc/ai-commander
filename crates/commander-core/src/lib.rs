@@ -3,12 +3,14 @@
 //! This crate provides core functionality used by both the TUI (ai-commander)
 //! and Telegram (commander-telegram) interfaces:
 //!
+//! - **change_detector**: Smart change detection to reduce inference costs
 //! - **config**: Shared configuration paths and utilities
 //! - **migration**: Storage migration from legacy paths
 //! - **onboarding**: First-run setup wizard
 //! - **output_filter**: Filter UI noise from Claude Code terminal output
 //! - **summarizer**: Summarize long responses using OpenRouter API
 
+pub mod change_detector;
 pub mod config;
 pub mod migration;
 pub mod onboarding;
@@ -28,4 +30,9 @@ pub use output_filter::{clean_response, clean_screen_preview, find_new_lines, is
 pub use summarizer::{
     is_available as is_summarization_available, summarize_async, summarize_blocking,
     summarize_blocking_with_fallback, summarize_with_fallback, SummarizerError,
+};
+
+// Re-export change detection types
+pub use change_detector::{
+    ChangeDetector, ChangeEvent, ChangeNotification, ChangeType, Significance, SmartPoller,
 };

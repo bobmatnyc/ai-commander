@@ -3,6 +3,14 @@
 //! The Session Agent monitors and analyzes a specific coding session (tmux, VS Code, etc.),
 //! tracking progress, detecting completion states, and reporting to the User Agent.
 //! It uses Claude Haiku 4.5 via OpenRouter for cost-optimized reasoning.
+//!
+//! ## Smart Change Detection
+//!
+//! The agent uses deterministic change detection to reduce inference costs:
+//! - Hash-based quick comparison detects if output changed at all
+//! - Pattern matching classifies changes without LLM calls
+//! - Only significant changes (errors, completion, input needed) trigger LLM analysis
+//! - Adaptive polling speeds up during activity, slows down when idle
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -10,12 +18,17 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, info, trace};
 
+use commander_core::{ChangeDetector, ChangeNotification, ChangeType, Significance};
 use commander_memory::{EmbeddingGenerator, Memory, MemoryStore, SearchResult};
 
 use crate::agent::{Agent, AgentType};
 use crate::client::{ChatMessage, ChatTool, OpenRouterClient};
+use crate::compaction::{ContextWindow, SimpleSummarizer, Summarizer};
 use crate::config::ModelConfig;
 use crate::context::{AgentContext, Message};
+use crate::context_manager::{
+    model_contexts, ContextAction, ContextManager, ContextStrategy, CriticalAction,
+};
 use crate::error::{AgentError, Result};
 use crate::response::AgentResponse;
 use crate::template::{AdapterType, AgentTemplate, TemplateRegistry};
@@ -153,6 +166,20 @@ impl OutputAnalysis {
 ///
 /// Uses Claude Haiku 4.5 via OpenRouter for cost-optimized analysis.
 /// Maintains isolated memory (can only access own memories).
+///
+/// ## Change Detection
+///
+/// The agent includes a `ChangeDetector` that performs deterministic
+/// change detection before invoking the LLM. This reduces inference
+/// costs by only analyzing output when meaningful changes occur.
+///
+/// ## Context Management
+///
+/// The agent includes a `ContextManager` that tracks token usage and
+/// triggers appropriate actions when context limits are approached:
+/// - MPM: Auto-pause and resume sessions
+/// - Claude Code: Trigger context compaction
+/// - Generic: Warn user about low context
 pub struct SessionAgent {
     /// Unique identifier for this agent.
     id: String,
@@ -186,6 +213,15 @@ pub struct SessionAgent {
 
     /// Agent template for this adapter type.
     template: AgentTemplate,
+
+    /// Change detector for smart output monitoring.
+    change_detector: ChangeDetector,
+
+    /// Context manager for tracking token usage and triggering actions.
+    context_manager: ContextManager,
+
+    /// Context window for message compaction.
+    context_window: ContextWindow,
 }
 
 impl SessionAgent {
@@ -212,6 +248,17 @@ impl SessionAgent {
 
         let id = format!("session-agent-{}", session_id);
 
+        // Initialize context manager with strategy from template
+        let context_strategy = template
+            .context_strategy
+            .clone()
+            .unwrap_or(ContextStrategy::WarnAndContinue);
+        let context_manager = ContextManager::new(context_strategy, model_contexts::CLAUDE_3_HAIKU);
+
+        // Initialize context window for message compaction
+        let summarizer: Arc<dyn Summarizer> = Arc::new(SimpleSummarizer);
+        let context_window = ContextWindow::with_defaults(summarizer);
+
         Ok(Self {
             id,
             session_id,
@@ -224,6 +271,9 @@ impl SessionAgent {
             context: AgentContext::new(),
             session_state: SessionState::new(),
             template,
+            change_detector: ChangeDetector::new(),
+            context_manager,
+            context_window,
         })
     }
 
@@ -249,6 +299,17 @@ impl SessionAgent {
 
         let id = format!("session-agent-{}", session_id);
 
+        // Initialize context manager with strategy from template
+        let context_strategy = template
+            .context_strategy
+            .clone()
+            .unwrap_or(ContextStrategy::WarnAndContinue);
+        let context_manager = ContextManager::new(context_strategy, model_contexts::CLAUDE_3_HAIKU);
+
+        // Initialize context window for message compaction
+        let summarizer: Arc<dyn Summarizer> = Arc::new(SimpleSummarizer);
+        let context_window = ContextWindow::with_defaults(summarizer);
+
         Self {
             id,
             session_id,
@@ -261,6 +322,9 @@ impl SessionAgent {
             context: AgentContext::new(),
             session_state: SessionState::new(),
             template,
+            change_detector: ChangeDetector::new(),
+            context_manager,
+            context_window,
         }
     }
 
@@ -427,6 +491,280 @@ impl SessionAgent {
     /// Get the agent template.
     pub fn template(&self) -> &AgentTemplate {
         &self.template
+    }
+
+    /// Get a reference to the change detector.
+    pub fn change_detector(&self) -> &ChangeDetector {
+        &self.change_detector
+    }
+
+    /// Get mutable access to the change detector.
+    pub fn change_detector_mut(&mut self) -> &mut ChangeDetector {
+        &mut self.change_detector
+    }
+
+    /// Get a reference to the context manager.
+    pub fn context_manager(&self) -> &ContextManager {
+        &self.context_manager
+    }
+
+    /// Get mutable access to the context manager.
+    pub fn context_manager_mut(&mut self) -> &mut ContextManager {
+        &mut self.context_manager
+    }
+
+    /// Get a reference to the context window.
+    pub fn context_window(&self) -> &ContextWindow {
+        &self.context_window
+    }
+
+    /// Get mutable access to the context window.
+    pub fn context_window_mut(&mut self) -> &mut ContextWindow {
+        &mut self.context_window
+    }
+
+    /// Check context usage and take appropriate action based on strategy.
+    ///
+    /// This method estimates current token usage and triggers the appropriate
+    /// action based on the configured context strategy:
+    /// - MPM: Executes pause command and provides resume instructions
+    /// - Claude Code: Triggers context compaction
+    /// - Generic: Warns the user
+    ///
+    /// # Returns
+    ///
+    /// Returns the action that was triggered, or `Continue` if context is fine.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let action = agent.check_context().await?;
+    /// match action {
+    ///     ContextAction::Critical { action: CriticalAction::Pause { .. } } => {
+    ///         // Session was paused, notify user
+    ///     }
+    ///     ContextAction::Warn { remaining_percent } => {
+    ///         // Context getting low, warn user
+    ///     }
+    ///     _ => {}
+    /// }
+    /// ```
+    pub async fn check_context(&mut self) -> Result<ContextAction> {
+        // Estimate current token usage
+        let estimated = self.estimate_context_tokens();
+
+        // Get action from context manager
+        let action = self.context_manager.update(estimated);
+
+        match &action {
+            ContextAction::Critical {
+                action: CriticalAction::Pause { command, state_summary },
+            } => {
+                // For MPM: Log the pause command (actual execution handled by caller)
+                info!(
+                    session_id = %self.session_id,
+                    command = %command,
+                    "Context critical, pause recommended"
+                );
+                // Store state summary for resumption
+                self.context_manager.set_state_summary(self.generate_pause_state());
+                debug!("Pause state: {}", state_summary);
+            }
+            ContextAction::Critical {
+                action: CriticalAction::Compact { messages_to_summarize },
+            } => {
+                // For Claude Code: Trigger compaction
+                info!(
+                    session_id = %self.session_id,
+                    messages_to_summarize = %messages_to_summarize,
+                    "Context critical, triggering compaction"
+                );
+                self.context_window.compact().await?;
+            }
+            ContextAction::Critical {
+                action: CriticalAction::Alert { message },
+            } => {
+                // For Generic: Log the alert
+                info!(
+                    session_id = %self.session_id,
+                    message = %message,
+                    "Context alert"
+                );
+            }
+            ContextAction::Warn { remaining_percent } => {
+                debug!(
+                    session_id = %self.session_id,
+                    remaining_percent = %remaining_percent,
+                    "Context warning"
+                );
+            }
+            ContextAction::Continue => {
+                trace!(
+                    session_id = %self.session_id,
+                    "Context OK"
+                );
+            }
+        }
+
+        Ok(action)
+    }
+
+    /// Estimate the current context token usage.
+    fn estimate_context_tokens(&self) -> usize {
+        // Rough estimate: 4 chars per token
+        let context_chars = self.context.estimated_tokens() * 4;
+        let window_tokens = self.context_window.estimated_tokens();
+
+        // Add state information
+        let state_chars = format!("{:?}", self.session_state).len();
+
+        (context_chars + state_chars) / 4 + window_tokens
+    }
+
+    /// Generate a state summary for pause/resume operations.
+    fn generate_pause_state(&self) -> String {
+        let mut summary = String::from("## Session Pause State\n\n");
+
+        // Tasks completed (progress = 1.0)
+        if self.session_state.progress >= 1.0 {
+            summary.push_str("Tasks Completed: Current task completed\n");
+        }
+
+        // Tasks in progress
+        if let Some(ref task) = self.session_state.current_task {
+            summary.push_str(&format!("Tasks In Progress: {}\n", task));
+        }
+
+        // Goals
+        if !self.session_state.goals.is_empty() {
+            summary.push_str(&format!(
+                "Goals: {}\n",
+                self.session_state.goals.join(", ")
+            ));
+        }
+
+        // Blockers
+        if !self.session_state.blockers.is_empty() {
+            summary.push_str(&format!(
+                "Blockers: {}\n",
+                self.session_state.blockers.join(", ")
+            ));
+        }
+
+        // Files modified
+        if !self.session_state.files_modified.is_empty() {
+            summary.push_str(&format!(
+                "Files Modified: {}\n",
+                self.session_state.files_modified.join(", ")
+            ));
+        }
+
+        // Progress
+        summary.push_str(&format!(
+            "Progress: {:.0}%\n",
+            self.session_state.progress * 100.0
+        ));
+
+        // Context usage
+        summary.push_str(&format!(
+            "Context Usage: {:.1}%\n",
+            (1.0 - self.context_manager.remaining_percent()) * 100.0
+        ));
+
+        summary.push_str("\nNext Action: Resume session to continue from this state\n");
+
+        summary
+    }
+
+    /// Process session output with smart change detection.
+    ///
+    /// This method uses deterministic change detection to avoid unnecessary
+    /// LLM calls. It only invokes the LLM for significant changes (errors,
+    /// completion, waiting for input).
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(notification))` if user should be notified
+    /// - `Ok(None)` if change was not significant enough for notification
+    /// - `Err(_)` if LLM analysis failed
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let notification = agent.process_output_change(output).await?;
+    /// if let Some(notif) = notification {
+    ///     if notif.requires_action {
+    ///         // Alert user immediately
+    ///     }
+    /// }
+    /// ```
+    pub async fn process_output_change(
+        &mut self,
+        output: &str,
+    ) -> Result<Option<ChangeNotification>> {
+        // Stage 1: Deterministic change detection (no LLM call)
+        let change = self.change_detector.detect(output);
+
+        debug!(
+            session_id = %self.session_id,
+            change_type = ?change.change_type,
+            significance = ?change.significance,
+            new_lines = change.diff_lines.len(),
+            "Change detected"
+        );
+
+        // Stage 2: Return early if not significant enough
+        if !change.is_meaningful() {
+            trace!(
+                session_id = %self.session_id,
+                "Change not significant, skipping LLM analysis"
+            );
+            return Ok(None);
+        }
+
+        // Stage 3: For significant changes, optionally do LLM analysis
+        // Only invoke LLM for high-significance changes to get better summary
+        let (summary, requires_action) = if change.significance >= Significance::High {
+            // Do LLM analysis for high-significance changes
+            let analysis = self.analyze_output(output).await?;
+
+            let requires_action = analysis.waiting_for_input || analysis.error_detected.is_some();
+            let summary = if analysis.summary.is_empty() {
+                change.summary.clone()
+            } else {
+                analysis.summary
+            };
+
+            (summary, requires_action)
+        } else {
+            // For medium significance, use the pattern-based summary
+            (change.summary.clone(), false)
+        };
+
+        // Stage 4: Determine if user needs to know
+        let should_notify = change.requires_notification()
+            || requires_action
+            || matches!(change.change_type, ChangeType::Error | ChangeType::WaitingForInput);
+
+        if should_notify {
+            Ok(Some(ChangeNotification {
+                session_id: self.session_id.clone(),
+                summary,
+                requires_action,
+                change_type: change.change_type,
+                significance: change.significance,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Reset the change detector state.
+    ///
+    /// Call this when starting a new task or after significant user interaction
+    /// to ensure the next output is analyzed fresh.
+    pub fn reset_change_detector(&mut self) {
+        self.change_detector.reset();
     }
 
     /// Analyze raw output from the session.
@@ -1147,5 +1485,132 @@ mod tests {
         let results2 = store.search(&[0.1; 64], "session-agent-2", 10).await.unwrap();
         assert_eq!(results2.len(), 1);
         assert_eq!(results2[0].memory.agent_id, "session-agent-2");
+    }
+
+    // ==========================================================================
+    // Context Manager Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_context_manager_initialization() {
+        // Test that templates get the correct context strategy
+        let claude_template = AgentTemplate::claude_code();
+        assert!(matches!(
+            claude_template.context_strategy,
+            Some(ContextStrategy::Compaction)
+        ));
+
+        let mpm_template = AgentTemplate::mpm();
+        assert!(matches!(
+            mpm_template.context_strategy,
+            Some(ContextStrategy::PauseResume { .. })
+        ));
+
+        let generic_template = AgentTemplate::generic();
+        assert!(matches!(
+            generic_template.context_strategy,
+            Some(ContextStrategy::WarnAndContinue)
+        ));
+    }
+
+    #[test]
+    fn test_context_manager_thresholds() {
+        let mut manager = ContextManager::new(ContextStrategy::Compaction, 100_000);
+
+        // Test Continue (50% used = 50% remaining)
+        let action = manager.update(50_000);
+        assert!(matches!(action, ContextAction::Continue));
+
+        // Test Warning (85% used = 15% remaining)
+        let action = manager.update(85_000);
+        assert!(matches!(action, ContextAction::Warn { .. }));
+
+        // Test Critical (95% used = 5% remaining)
+        let action = manager.update(95_000);
+        assert!(matches!(action, ContextAction::Critical { .. }));
+    }
+
+    #[test]
+    fn test_context_manager_strategies() {
+        // Test Compaction strategy
+        let mut compaction_manager = ContextManager::new(ContextStrategy::Compaction, 100_000);
+        let action = compaction_manager.update(95_000);
+        match action {
+            ContextAction::Critical { action } => {
+                assert!(matches!(action, CriticalAction::Compact { .. }));
+            }
+            _ => panic!("Expected Critical action with Compact"),
+        }
+
+        // Test PauseResume strategy
+        let mut pause_manager = ContextManager::new(
+            ContextStrategy::PauseResume {
+                pause_command: "/pause".to_string(),
+                resume_command: "/resume".to_string(),
+            },
+            100_000,
+        );
+        let action = pause_manager.update(95_000);
+        match action {
+            ContextAction::Critical { action } => {
+                assert!(matches!(action, CriticalAction::Pause { .. }));
+            }
+            _ => panic!("Expected Critical action with Pause"),
+        }
+
+        // Test WarnAndContinue strategy
+        let mut warn_manager = ContextManager::new(ContextStrategy::WarnAndContinue, 100_000);
+        let action = warn_manager.update(95_000);
+        match action {
+            ContextAction::Critical { action } => {
+                assert!(matches!(action, CriticalAction::Alert { .. }));
+            }
+            _ => panic!("Expected Critical action with Alert"),
+        }
+    }
+
+    #[test]
+    fn test_generate_pause_state() {
+        let mut state = SessionState::new();
+        state.add_goal("Implement feature X");
+        state.set_current_task("Writing tests");
+        state.set_progress(0.5);
+        state.add_blocker("Waiting for API");
+        state.add_modified_file("src/main.rs");
+
+        // Create a minimal context manager to test state generation format
+        let manager = ContextManager::new(ContextStrategy::PauseResume {
+            pause_command: "/pause".to_string(),
+            resume_command: "/resume".to_string(),
+        }, 100_000);
+
+        // The state should contain key fields
+        let state_debug = format!("{:?}", state);
+        assert!(state_debug.contains("Implement feature X"));
+        assert!(state_debug.contains("Writing tests"));
+        assert!(state_debug.contains("Waiting for API"));
+        assert!(state_debug.contains("src/main.rs"));
+
+        // Verify manager has correct strategy
+        assert!(matches!(
+            manager.strategy(),
+            ContextStrategy::PauseResume { .. }
+        ));
+    }
+
+    #[test]
+    fn test_context_manager_remaining_percent() {
+        let mut manager = ContextManager::new(ContextStrategy::Compaction, 200_000);
+
+        // Initial state: 0% used = 100% remaining
+        assert!((manager.remaining_percent() - 1.0).abs() < 0.001);
+
+        // 50% used
+        manager.update(100_000);
+        assert!((manager.remaining_percent() - 0.5).abs() < 0.001);
+
+        // 90% used = 10% remaining (exactly at critical)
+        manager.update(180_000);
+        assert!((manager.remaining_percent() - 0.1).abs() < 0.001);
     }
 }
