@@ -1,0 +1,19 @@
+[package]
+name = "commander-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent trait and types for AI Commander multi-agent system"
+
+[dependencies]
+commander-memory = { path = "../commander-memory" }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
