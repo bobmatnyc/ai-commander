@@ -49,10 +49,40 @@
 //! 2. **OpenRouter** (set `OPENROUTER_API_KEY`): Uses `openai/text-embedding-3-small`
 //! 3. **Hash-based** (no API key): Deterministic hash-based embeddings for testing
 //!
-//! # Agent Isolation
+//! # Agent Isolation and Access Control
 //!
-//! Memories are tagged with an `agent_id` for isolation. Use `search()` to query
-//! within a specific agent's context, or `search_all()` for cross-agent search.
+//! Memories are tagged with an `agent_id` for isolation. The crate provides
+//! explicit access control through the [`AccessLevel`] enum:
+//!
+//! - `AccessLevel::Own`: Session agents can only access their own memories
+//! - `AccessLevel::All`: User agent has privileged access to all memories
+//!
+//! Use [`AccessControlledStore`] to wrap any `MemoryStore` with automatic
+//! access control enforcement:
+//!
+//! ```no_run
+//! use commander_memory::{LocalStore, AccessControlledStore, AccessLevel};
+//! use std::sync::Arc;
+//!
+//! # async fn example() -> commander_memory::Result<()> {
+//! let store = Arc::new(LocalStore::default().await?);
+//!
+//! // Session agent with isolated access
+//! let session_store = AccessControlledStore::new(
+//!     store.clone(),
+//!     "session-agent-1".to_string(),
+//!     AccessLevel::Own,
+//! );
+//!
+//! // User agent with privileged access
+//! let user_store = AccessControlledStore::new(
+//!     store,
+//!     "user-agent".to_string(),
+//!     AccessLevel::All,
+//! );
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod embedding;
 pub mod error;
@@ -67,7 +97,7 @@ pub use error::{MemoryError, Result};
 pub use local::LocalStore;
 pub use memory::{Memory, SearchResult, DEFAULT_EMBEDDING_DIM};
 pub use qdrant::QdrantStore;
-pub use store::MemoryStore;
+pub use store::{AccessControlledStore, AccessLevel, MemoryStore};
 
 /// Create the default memory store.
 ///
@@ -164,5 +194,56 @@ mod tests {
         // Search all should see both
         let all = store.search_all(&embedding, 10).await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_access_controlled_store_integration() {
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(LocalStore::new(temp_dir.path().to_path_buf()).await.unwrap());
+
+        let embedding = vec![0.5; 64];
+
+        // Store memories for different agents using the raw store
+        store
+            .store(Memory::with_id("mem-1", "session-1", "session 1 secret", embedding.clone()))
+            .await
+            .unwrap();
+        store
+            .store(Memory::with_id("mem-2", "session-2", "session 2 secret", embedding.clone()))
+            .await
+            .unwrap();
+
+        // Create access-controlled store for session agent (isolated)
+        let session_store = AccessControlledStore::new(
+            store.clone(),
+            "session-1".to_string(),
+            AccessLevel::Own,
+        );
+
+        // Session agent should only see its own memory
+        let session_results = session_store.search(&embedding, 10).await.unwrap();
+        assert_eq!(session_results.len(), 1);
+        assert_eq!(session_results[0].memory.content, "session 1 secret");
+
+        // Session agent cannot access other agent's memory by ID
+        let blocked = session_store.get("mem-2").await.unwrap();
+        assert!(blocked.is_none());
+
+        // Create access-controlled store for user agent (privileged)
+        let user_store = AccessControlledStore::new(
+            store.clone(),
+            "user-agent".to_string(),
+            AccessLevel::All,
+        );
+
+        // User agent should see all memories
+        let user_results = user_store.search(&embedding, 10).await.unwrap();
+        assert_eq!(user_results.len(), 2);
+
+        // User agent can access any memory by ID
+        let allowed = user_store.get("mem-2").await.unwrap();
+        assert!(allowed.is_some());
     }
 }
