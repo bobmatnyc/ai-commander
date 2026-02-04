@@ -9,12 +9,17 @@
 
 mod agents;
 mod app;
+mod commands;
 mod completion;
+mod connection;
 mod events;
 mod git;
 mod helpers;
+mod input;
 mod inspect;
+mod messaging;
 mod scroll;
+mod sessions;
 mod ui;
 
 pub use app::{App, Message, MessageDirection, SessionInfo, ViewMode};
