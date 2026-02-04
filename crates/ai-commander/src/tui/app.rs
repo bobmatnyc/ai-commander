@@ -274,66 +274,95 @@ impl App {
     }
 
     /// Connect to a project by name.
+    ///
+    /// Fallback chain:
+    /// 1. Try registered project (has adapter, path, etc.)
+    /// 2. Try tmux session directly (if no project found)
     pub fn connect(&mut self, name: &str) -> Result<(), String> {
         // Strip commander- prefix if present (user might use session name)
-        let name = name.strip_prefix("commander-").unwrap_or(name);
+        let base_name = name.strip_prefix("commander-").unwrap_or(name);
 
         // Load all projects
         let projects = self.store.load_all_projects()
             .map_err(|e| format!("Failed to load projects: {}", e))?;
 
-        // Find project by name
-        let project = projects.values()
-            .find(|p| p.name == name || p.id.as_str() == name)
-            .ok_or_else(|| format!("Project not found: {}", name))?;
+        // Try 1: Find registered project by name
+        if let Some(project) = projects.values()
+            .find(|p| p.name == base_name || p.id.as_str() == base_name)
+        {
+            // Validate project path still exists and is accessible
+            validate_project_path(&project.path)?;
 
-        // Validate project path still exists and is accessible
-        validate_project_path(&project.path)?;
+            let session_name = format!("commander-{}", project.name);
 
-        let session_name = format!("commander-{}", project.name);
+            // Check if tmux session exists
+            if let Some(ref tmux) = self.tmux {
+                if tmux.session_exists(&session_name) {
+                    self.sessions.insert(project.name.clone(), session_name);
+                    self.project = Some(project.name.clone());
+                    self.project_path = Some(project.path.clone());
+                    self.messages.push(Message::system(format!("Connected to '{}'", project.name)));
+                    return Ok(());
+                }
 
-        // Check if tmux session exists
-        if let Some(ref tmux) = self.tmux {
-            if tmux.session_exists(&session_name) {
-                self.sessions.insert(project.name.clone(), session_name);
-                self.project = Some(project.name.clone());
-                self.project_path = Some(project.path.clone());
-                self.messages.push(Message::system(format!("Connected to '{}'", project.name)));
-                return Ok(());
+                // Try to start the project
+                let tool_id = project.config.get("tool")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("claude-code");
+
+                if let Some(adapter) = self.registry.get(tool_id) {
+                    let (cmd, cmd_args) = adapter.launch_command(&project.path);
+                    let full_cmd = if cmd_args.is_empty() {
+                        cmd
+                    } else {
+                        format!("{} {}", cmd, cmd_args.join(" "))
+                    };
+
+                    // Create tmux session in project directory
+                    if let Err(e) = tmux.create_session_in_dir(&session_name, Some(&project.path)) {
+                        return Err(format!("Failed to create tmux session: {}", e));
+                    }
+
+                    // Send launch command
+                    if let Err(e) = tmux.send_line(&session_name, None, &full_cmd) {
+                        return Err(format!("Failed to start adapter: {}", e));
+                    }
+
+                    self.sessions.insert(project.name.clone(), session_name);
+                    self.project = Some(project.name.clone());
+                    self.project_path = Some(project.path.clone());
+                    self.messages.push(Message::system(format!("Started and connected to '{}'", project.name)));
+                    return Ok(());
+                }
             }
 
-            // Try to start the project
-            let tool_id = project.config.get("tool")
-                .and_then(|v| v.as_str())
-                .unwrap_or("claude-code");
+            return Err("Tmux not available".to_string());
+        }
 
-            if let Some(adapter) = self.registry.get(tool_id) {
-                let (cmd, cmd_args) = adapter.launch_command(&project.path);
-                let full_cmd = if cmd_args.is_empty() {
-                    cmd
-                } else {
-                    format!("{} {}", cmd, cmd_args.join(" "))
-                };
+        // Try 2: Check for tmux session directly (unregistered session)
+        if let Some(ref tmux) = self.tmux {
+            // Try multiple session name variants
+            let session_candidates = [
+                format!("commander-{}", base_name),
+                name.to_string(),
+                base_name.to_string(),
+            ];
 
-                // Create tmux session in project directory
-                if let Err(e) = tmux.create_session_in_dir(&session_name, Some(&project.path)) {
-                    return Err(format!("Failed to create tmux session: {}", e));
+            for session_name in session_candidates {
+                if tmux.session_exists(&session_name) {
+                    // Connect to external/unregistered session
+                    self.sessions.insert(base_name.to_string(), session_name.clone());
+                    self.project = Some(base_name.to_string());
+                    self.project_path = None;
+                    self.messages.push(Message::system(
+                        format!("Connected to session '{}' (unregistered)", session_name)
+                    ));
+                    return Ok(());
                 }
-
-                // Send launch command
-                if let Err(e) = tmux.send_line(&session_name, None, &full_cmd) {
-                    return Err(format!("Failed to start adapter: {}", e));
-                }
-
-                self.sessions.insert(project.name.clone(), session_name);
-                self.project = Some(project.name.clone());
-                self.project_path = Some(project.path.clone());
-                self.messages.push(Message::system(format!("Started and connected to '{}'", project.name)));
-                return Ok(());
             }
         }
 
-        Err("Tmux not available".to_string())
+        Err(format!("No project or session found: {}", name))
     }
 
     /// Parse connect command arguments.
