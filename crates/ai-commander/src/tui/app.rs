@@ -275,6 +275,9 @@ impl App {
 
     /// Connect to a project by name.
     pub fn connect(&mut self, name: &str) -> Result<(), String> {
+        // Strip commander- prefix if present (user might use session name)
+        let name = name.strip_prefix("commander-").unwrap_or(name);
+
         // Load all projects
         let projects = self.store.load_all_projects()
             .map_err(|e| format!("Failed to load projects: {}", e))?;
@@ -521,6 +524,8 @@ impl App {
 
     /// Stop a session: commit git changes and destroy tmux session.
     pub fn stop_session(&mut self, name: &str) {
+        // Strip commander- prefix if present (user might use session name)
+        let name = name.strip_prefix("commander-").unwrap_or(name);
         let session_name = format!("commander-{}", name);
 
         // Find project path for git operations

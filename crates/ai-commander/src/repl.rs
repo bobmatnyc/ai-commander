@@ -637,10 +637,12 @@ impl Repl {
                 let id = project.as_ref().or(self.connected_project.as_ref());
                 match id {
                     Some(id) => {
+                        // Strip commander- prefix if present (user might use session name)
+                        let id = id.strip_prefix("commander-").unwrap_or(id);
                         let projects = self.store.load_all_projects()?;
                         match projects
                             .values()
-                            .find(|p| &p.name == id || p.id.as_str() == id)
+                            .find(|p| p.name == id || p.id.as_str() == id)
                         {
                             Some(p) => {
                                 println!("Project: {} ({})", p.name, p.id);
@@ -1009,6 +1011,8 @@ impl Repl {
             }
 
             ConnectTarget::Existing(name) => {
+                // Strip commander- prefix if present (user might use session name)
+                let name = name.strip_prefix("commander-").unwrap_or(&name);
                 let projects = self.store.load_all_projects()?;
                 if let Some(project) = projects
                     .values()
