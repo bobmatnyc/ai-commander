@@ -184,9 +184,9 @@ pub struct App {
 
     // Tab completion
     /// Cached completions for current input prefix
-    completions: Vec<String>,
+    pub(super) completions: Vec<String>,
     /// Current completion index (None = not in completion mode)
-    completion_index: Option<usize>,
+    pub(super) completion_index: Option<usize>,
 
     // Session status monitoring
     /// Last known ready state for each session (true = waiting for input)
@@ -201,7 +201,7 @@ pub struct App {
     // Agent orchestration (optional, behind feature flag)
     #[cfg(feature = "agents")]
     /// Agent orchestrator for multi-agent system integration.
-    orchestrator: Option<AgentOrchestrator>,
+    pub(super) orchestrator: Option<AgentOrchestrator>,
 }
 
 impl App {
@@ -604,98 +604,7 @@ impl App {
         }
     }
 
-    /// Check if path is inside a git worktree.
-    fn is_git_worktree(path: &str) -> bool {
-        std::process::Command::new("git")
-            .args(["rev-parse", "--is-inside-work-tree"])
-            .current_dir(path)
-            .output()
-            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-            .unwrap_or(false)
-    }
-
-    /// Commit any uncommitted git changes in the project directory.
-    /// Returns Ok(None) if not a git repository, Ok(Some(true)) if committed,
-    /// Ok(Some(false)) if no changes, or Err on failure.
-    fn git_commit_changes(&self, path: &str, project_name: &str) -> Result<Option<bool>, String> {
-        use std::process::Command;
-
-        // Skip git operations if not in a git worktree
-        if !Self::is_git_worktree(path) {
-            return Ok(None);
-        }
-
-        // Check if there are changes
-        let status = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(path)
-            .output()
-            .map_err(|e| format!("Failed to run git status: {}", e))?;
-
-        let changes = String::from_utf8_lossy(&status.stdout);
-        if changes.trim().is_empty() {
-            return Ok(Some(false)); // No changes
-        }
-
-        // Stage all changes
-        Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(path)
-            .output()
-            .map_err(|e| format!("Failed to stage changes: {}", e))?;
-
-        // Commit with message (may fail if pre-commit hooks modify files)
-        let message = format!("WIP: Auto-commit from Commander session '{}'", project_name);
-        let commit = Command::new("git")
-            .args(["commit", "-m", &message])
-            .current_dir(path)
-            .output()
-            .map_err(|e| format!("Failed to commit: {}", e))?;
-
-        if commit.status.success() {
-            return Ok(Some(true));
-        }
-
-        // Pre-commit hooks may have modified files - re-stage and retry
-        let stdout = String::from_utf8_lossy(&commit.stdout);
-        if stdout.contains("Passed") || stdout.contains("Fixed") || stdout.contains("trailing whitespace") {
-            // Hooks ran and fixed things - re-stage and commit again
-            Command::new("git")
-                .args(["add", "-A"])
-                .current_dir(path)
-                .output()
-                .map_err(|e| format!("Failed to re-stage changes: {}", e))?;
-
-            let retry = Command::new("git")
-                .args(["commit", "-m", &message])
-                .current_dir(path)
-                .output()
-                .map_err(|e| format!("Failed to commit after hooks: {}", e))?;
-
-            if retry.status.success() {
-                return Ok(Some(true));
-            }
-
-            // Check if nothing to commit after hooks
-            let status2 = Command::new("git")
-                .args(["status", "--porcelain"])
-                .current_dir(path)
-                .output()
-                .ok();
-
-            if let Some(s) = status2 {
-                if String::from_utf8_lossy(&s.stdout).trim().is_empty() {
-                    return Ok(Some(false)); // Hooks fixed everything, nothing to commit
-                }
-            }
-
-            let stderr = String::from_utf8_lossy(&retry.stderr);
-            Err(format!("Commit failed after hooks: {}", stderr))
-        } else {
-            let stderr = String::from_utf8_lossy(&commit.stderr);
-            Err(format!("Commit failed: {}", stderr))
-        }
-    }
+    // Git methods (is_git_worktree, git_commit_changes) moved to git.rs
 
     /// Send a message to the connected project.
     pub fn send_message(&mut self, message: &str) -> Result<(), String> {
@@ -834,37 +743,7 @@ impl App {
         self.response_buffer.len()
     }
 
-    /// Toggle inspect mode (live tmux view).
-    pub fn toggle_inspect_mode(&mut self) {
-        match self.view_mode {
-            ViewMode::Normal | ViewMode::Sessions => {
-                if self.project.is_some() {
-                    self.view_mode = ViewMode::Inspect;
-                    self.inspect_scroll = 0;
-                    self.refresh_inspect_content();
-                    self.messages.push(Message::system("Entering inspect mode (F2 to exit)"));
-                } else {
-                    self.messages.push(Message::system("Connect to a project first"));
-                }
-            }
-            ViewMode::Inspect => {
-                self.view_mode = ViewMode::Normal;
-                self.messages.push(Message::system("Exited inspect mode"));
-            }
-        }
-    }
-
-    /// Refresh the inspect content from tmux.
-    pub fn refresh_inspect_content(&mut self) {
-        if let (Some(project), Some(tmux)) = (&self.project, &self.tmux) {
-            if let Some(session) = self.sessions.get(project) {
-                // Capture more lines for full view
-                if let Ok(output) = tmux.capture_output(session, None, Some(200)) {
-                    self.inspect_content = output;
-                }
-            }
-        }
-    }
+    // Inspect mode methods (toggle_inspect_mode, refresh_inspect_content) moved to inspect.rs
 
     /// Check session status and notify when sessions become ready for input.
     pub fn check_session_status(&mut self) {
@@ -1059,31 +938,7 @@ impl App {
         self.last_scan_waiting = current_waiting;
     }
 
-    /// Scroll up in inspect mode.
-    pub fn inspect_scroll_up(&mut self) {
-        let max_scroll = self.inspect_content.lines().count().saturating_sub(1);
-        if self.inspect_scroll < max_scroll {
-            self.inspect_scroll += 1;
-        }
-    }
-
-    /// Scroll down in inspect mode.
-    pub fn inspect_scroll_down(&mut self) {
-        if self.inspect_scroll > 0 {
-            self.inspect_scroll -= 1;
-        }
-    }
-
-    /// Scroll up by a page in inspect mode.
-    pub fn inspect_scroll_page_up(&mut self, page_size: usize) {
-        let max_scroll = self.inspect_content.lines().count().saturating_sub(1);
-        self.inspect_scroll = self.inspect_scroll.saturating_add(page_size).min(max_scroll);
-    }
-
-    /// Scroll down by a page in inspect mode.
-    pub fn inspect_scroll_page_down(&mut self, page_size: usize) {
-        self.inspect_scroll = self.inspect_scroll.saturating_sub(page_size);
-    }
+    // Inspect scroll methods (inspect_scroll_up, inspect_scroll_down, etc.) moved to inspect.rs
 
     // ==================== Sessions Mode ====================
 
@@ -1182,35 +1037,7 @@ impl App {
         }
     }
 
-    /// Scroll to the bottom of the output.
-    pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = 0;
-    }
-
-    /// Scroll up by one line.
-    pub fn scroll_up(&mut self) {
-        if self.scroll_offset < self.messages.len().saturating_sub(1) {
-            self.scroll_offset += 1;
-        }
-    }
-
-    /// Scroll down by one line.
-    pub fn scroll_down(&mut self) {
-        if self.scroll_offset > 0 {
-            self.scroll_offset -= 1;
-        }
-    }
-
-    /// Scroll up by a page.
-    pub fn scroll_page_up(&mut self, page_size: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(page_size)
-            .min(self.messages.len().saturating_sub(1));
-    }
-
-    /// Scroll down by a page.
-    pub fn scroll_page_down(&mut self, page_size: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
-    }
+    // Scroll methods (scroll_to_bottom, scroll_up, scroll_down, etc.) moved to scroll.rs
 
     /// Handle character input.
     pub fn enter_char(&mut self, c: char) {
@@ -1754,150 +1581,12 @@ impl App {
         self.scroll_to_bottom();
     }
 
-    // ==================== Tab Completion ====================
-
-    /// Available slash commands for completion.
-    const COMMANDS: &'static [&'static str] = &[
-        "/clear", "/connect", "/disconnect", "/help", "/inspect",
-        "/list", "/quit", "/rename", "/send", "/sessions", "/status",
-        "/stop", "/telegram",
-    ];
-
-    /// Perform tab completion on the current input.
-    pub fn complete_command(&mut self) {
-        // Only complete if input starts with /
-        if !self.input.starts_with('/') {
-            self.completions.clear();
-            self.completion_index = None;
-            return;
-        }
-
-        // Build completions if not already built for this prefix
-        if self.completions.is_empty() || self.completion_index.is_none() {
-            self.completions = Self::COMMANDS
-                .iter()
-                .filter(|cmd| cmd.starts_with(self.input.as_str()))
-                .map(|s| s.to_string())
-                .collect();
-            self.completion_index = if self.completions.is_empty() {
-                None
-            } else {
-                Some(0)
-            };
-        } else {
-            // Cycle through completions
-            if let Some(idx) = self.completion_index {
-                self.completion_index = Some((idx + 1) % self.completions.len());
-            }
-        }
-
-        // Apply completion
-        if let Some(idx) = self.completion_index {
-            if let Some(completion) = self.completions.get(idx) {
-                self.input = completion.clone();
-                self.cursor_pos = self.input.len();
-            }
-        }
-    }
-
-    /// Reset completion state (called when input changes).
-    pub fn reset_completions(&mut self) {
-        self.completions.clear();
-        self.completion_index = None;
-    }
-
-    // ==================== Agent Orchestration ====================
-
-    /// Initialize the agent orchestrator (when agents feature is enabled).
-    ///
-    /// This should be called during app setup to enable agent-based processing.
-    /// If initialization fails, the app continues to work without agents.
-    #[cfg(feature = "agents")]
-    pub async fn init_orchestrator(&mut self) -> Result<(), String> {
-        match AgentOrchestrator::new().await {
-            Ok(orchestrator) => {
-                self.orchestrator = Some(orchestrator);
-                self.messages.push(Message::system("Agent orchestrator initialized"));
-                Ok(())
-            }
-            Err(e) => {
-                let msg = format!("Failed to initialize orchestrator: {}", e);
-                self.messages.push(Message::system(&msg));
-                Err(msg)
-            }
-        }
-    }
-
-    /// Process user input through the agent orchestrator (if available).
-    ///
-    /// Returns the processed response, or the original input if no orchestrator.
-    #[cfg(feature = "agents")]
-    pub async fn process_with_agent(&mut self, input: &str) -> Result<String, String> {
-        if let Some(ref mut orchestrator) = self.orchestrator {
-            orchestrator
-                .process_user_input(input)
-                .await
-                .map_err(|e| e.to_string())
-        } else {
-            // No orchestrator - return input unchanged
-            Ok(input.to_string())
-        }
-    }
-
-    /// Check if the orchestrator is initialized.
-    #[cfg(feature = "agents")]
-    pub fn has_orchestrator(&self) -> bool {
-        self.orchestrator.is_some()
-    }
-
-    /// Get a reference to the orchestrator (if available).
-    #[cfg(feature = "agents")]
-    pub fn orchestrator(&self) -> Option<&AgentOrchestrator> {
-        self.orchestrator.as_ref()
-    }
-
-    /// Get a mutable reference to the orchestrator (if available).
-    #[cfg(feature = "agents")]
-    pub fn orchestrator_mut(&mut self) -> Option<&mut AgentOrchestrator> {
-        self.orchestrator.as_mut()
-    }
+    // Tab completion methods (complete_command, reset_completions) moved to completion.rs
+    // Agent orchestration methods moved to agents.rs
 }
 
-/// Extract a preview of the last meaningful line when session is ready.
-fn extract_ready_preview(output: &str) -> String {
-    // Look for the last non-UI-noise line before the prompt
-    let lines: Vec<&str> = output.lines().rev()
-        .filter(|l| {
-            let trimmed = l.trim();
-            let lower = trimmed.to_lowercase();
-            !trimmed.is_empty()
-                && !commander_core::output_filter::is_ui_noise(trimmed)
-                && !trimmed.contains('❯')  // Skip prompt lines
-                && !trimmed.starts_with("───")  // Skip separator
-                && !trimmed.starts_with("╭")  // Skip box drawing
-                && !trimmed.starts_with("╰")  // Skip box drawing
-                && !trimmed.starts_with("│")  // Skip box drawing
-                && !lower.contains("bypass permissions")  // Skip Claude Code hint
-                && !lower.contains("shift+tab")  // Skip Claude Code hint
-                && !lower.contains("shift-tab")  // Skip Claude Code hint
-                && !trimmed.contains("⏵")  // Skip play button indicators
-                && !trimmed.contains("⏺")  // Skip record indicators
-        })
-        .take(1)
-        .collect();
-
-    lines.first()
-        .map(|s| {
-            let trimmed = s.trim();
-            // Additional check - skip if it looks like UI noise we missed
-            if trimmed.len() < 5 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
-                return String::new();
-            }
-            // Don't truncate - show full preview for actionable context
-            trimmed.to_string()
-        })
-        .unwrap_or_default()
-}
+// extract_ready_preview moved to helpers.rs
+use super::helpers::extract_ready_preview;
 
 #[cfg(test)]
 mod tests {
