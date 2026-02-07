@@ -44,7 +44,7 @@ commander-orchestrator = { path = "../commander-orchestrator", optional = true }
 chrono = { workspace = true }
 
 [features]
-default = []
+default = ["agents"]
 agents = ["commander-orchestrator"]
 
 [dev-dependencies]

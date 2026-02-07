@@ -55,7 +55,7 @@ tracing-subscriber = { workspace = true }
 commander-orchestrator = { path = "../commander-orchestrator", optional = true }
 
 [features]
-default = []
+default = ["agents"]
 agents = ["commander-orchestrator"]
 
 [dev-dependencies]
