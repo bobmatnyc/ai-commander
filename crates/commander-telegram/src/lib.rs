@@ -9,6 +9,14 @@
 //! - Send messages to Claude Code and receive responses
 //! - Automatic response summarization via OpenRouter
 //! - ngrok integration for webhook tunneling
+//! - **AgentOrchestrator integration** (with `agents` feature): Routes messages
+//!   through LLM for intelligent interpretation and generates human-readable
+//!   notification summaries
+//!
+//! # Cargo Features
+//!
+//! - `agents` (default): Enables AgentOrchestrator integration for LLM-based
+//!   message processing and notification summarization
 //!
 //! # Environment Variables
 //!
@@ -17,7 +25,7 @@
 //! - `NGROK_AUTHTOKEN`: ngrok authentication token (for webhook mode)
 //!
 //! Optional:
-//! - `OPENROUTER_API_KEY`: For response summarization
+//! - `OPENROUTER_API_KEY`: For response summarization (and agents feature)
 //! - `OPENROUTER_MODEL`: Model to use (default: anthropic/claude-sonnet-4)
 //! - `TELEGRAM_WEBHOOK_PORT`: Webhook port (default: 8443)
 //!
@@ -56,6 +64,7 @@ pub mod bot;
 pub mod error;
 pub mod handlers;
 pub mod ngrok;
+pub mod notifications;
 pub mod pairing;
 pub mod session;
 pub mod state;
@@ -63,6 +72,10 @@ pub mod state;
 pub use bot::TelegramBot;
 pub use error::{Result, TelegramError};
 pub use ngrok::NgrokTunnel;
+pub use notifications::{
+    get_unread_notifications, mark_notifications_read, notify_session_ready,
+    notify_session_resumed, notify_sessions_waiting, push_notification, Notification,
+};
 pub use pairing::{consume_pairing, create_pairing, generate_code};
 pub use session::UserSession;
 pub use state::{create_shared_state, TelegramState};

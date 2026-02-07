@@ -15,6 +15,9 @@ use teloxide::types::{ChatId, MessageId};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+#[cfg(feature = "agents")]
+use commander_orchestrator::AgentOrchestrator;
+
 use crate::error::{Result, TelegramError};
 use crate::pairing;
 use crate::session::UserSession;
@@ -110,6 +113,9 @@ pub struct TelegramState {
     store: StateStore,
     /// Authorized chat IDs for this commander instance.
     authorized_chats: RwLock<HashSet<i64>>,
+    /// Agent orchestrator for LLM-based message processing (feature-gated).
+    #[cfg(feature = "agents")]
+    orchestrator: RwLock<Option<AgentOrchestrator>>,
 }
 
 impl TelegramState {
@@ -132,6 +138,80 @@ impl TelegramState {
             adapters,
             store,
             authorized_chats: RwLock::new(authorized_chats),
+            #[cfg(feature = "agents")]
+            orchestrator: RwLock::new(None),
+        }
+    }
+
+    /// Initialize the agent orchestrator asynchronously (when agents feature is enabled).
+    ///
+    /// This should be called after state creation to enable LLM-based processing.
+    /// Returns Ok(true) if initialized, Ok(false) if already initialized or unavailable.
+    #[cfg(feature = "agents")]
+    pub async fn init_orchestrator(&self) -> Result<bool> {
+        let mut orchestrator = self.orchestrator.write().await;
+        if orchestrator.is_some() {
+            return Ok(false); // Already initialized
+        }
+
+        match AgentOrchestrator::new().await {
+            Ok(orch) => {
+                info!("Agent orchestrator initialized for Telegram bot");
+                *orchestrator = Some(orch);
+                Ok(true)
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to initialize orchestrator, continuing without LLM features");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Check if the orchestrator is available.
+    #[cfg(feature = "agents")]
+    pub async fn has_orchestrator(&self) -> bool {
+        self.orchestrator.read().await.is_some()
+    }
+
+    /// Generate an LLM-interpreted summary for a notification message.
+    ///
+    /// Uses the orchestrator's UserAgent to create a more human-readable
+    /// summary of session activity. Falls back to the original message
+    /// if orchestrator is unavailable or processing fails.
+    #[cfg(feature = "agents")]
+    pub async fn generate_notification_summary(&self, raw_message: &str, session_name: Option<&str>) -> String {
+        let mut orchestrator = self.orchestrator.write().await;
+        if let Some(ref mut orch) = *orchestrator {
+            // Create a prompt for summarization
+            let prompt = if let Some(session) = session_name {
+                format!(
+                    "Summarize this session activity notification in 1-2 sentences for Telegram. \
+                    Session: {}. Activity: {}",
+                    session, raw_message
+                )
+            } else {
+                format!(
+                    "Summarize this activity notification in 1-2 sentences for Telegram: {}",
+                    raw_message
+                )
+            };
+
+            match orch.process_user_input(&prompt).await {
+                Ok(summary) => {
+                    debug!(
+                        original = %raw_message,
+                        summary = %summary,
+                        "Generated LLM notification summary"
+                    );
+                    summary
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to generate notification summary");
+                    raw_message.to_string()
+                }
+            }
+        } else {
+            raw_message.to_string()
         }
     }
 
@@ -367,10 +447,40 @@ impl TelegramState {
     }
 
     /// Send a message to the user's connected project.
+    ///
+    /// When agents feature is enabled and orchestrator is available, messages are
+    /// processed through the UserAgent for interpretation before being sent to tmux.
     pub async fn send_message(&self, chat_id: ChatId, message: &str, message_id: Option<MessageId>) -> Result<()> {
         let tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
+
+        // Try to process message through orchestrator first (agents feature)
+        #[cfg(feature = "agents")]
+        let processed_message = {
+            let mut orchestrator = self.orchestrator.write().await;
+            if let Some(ref mut orch) = *orchestrator {
+                match orch.process_user_input(message).await {
+                    Ok(processed) => {
+                        debug!(
+                            original = %message,
+                            processed = %processed,
+                            "Message processed through orchestrator"
+                        );
+                        processed
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Orchestrator processing failed, using original message");
+                        message.to_string()
+                    }
+                }
+            } else {
+                message.to_string()
+            }
+        };
+
+        #[cfg(not(feature = "agents"))]
+        let processed_message = message.to_string();
 
         let mut sessions = self.sessions.write().await;
         let session = sessions
@@ -382,17 +492,17 @@ impl TelegramState {
             .capture_output(&session.tmux_session, None, Some(200))
             .unwrap_or_default();
 
-        // Send the message
-        tmux.send_line(&session.tmux_session, None, message)
+        // Send the processed message
+        tmux.send_line(&session.tmux_session, None, &processed_message)
             .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
 
         // Start response collection with message ID for reply threading
-        session.start_response_collection(message, last_output, message_id);
+        session.start_response_collection(&processed_message, last_output, message_id);
 
         debug!(
             chat_id = %chat_id.0,
             project = %session.project_name,
-            message = %message,
+            message = %processed_message,
             "Message sent to project"
         );
 

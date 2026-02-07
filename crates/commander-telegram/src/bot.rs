@@ -20,6 +20,9 @@ const DEFAULT_WEBHOOK_PORT: u16 = 8443;
 /// Polling interval for output checking.
 const POLL_INTERVAL_MS: u64 = 500;
 
+/// Polling interval for notification checking (less frequent).
+const NOTIFICATION_POLL_INTERVAL_MS: u64 = 2000;
+
 /// The Telegram bot for Commander.
 pub struct TelegramBot {
     /// The teloxide bot instance.
@@ -109,6 +112,14 @@ impl TelegramBot {
     pub async fn start_polling(&self) -> Result<()> {
         info!("Starting Telegram bot in polling mode...");
 
+        // Initialize agent orchestrator (if agents feature enabled)
+        #[cfg(feature = "agents")]
+        {
+            if let Err(e) = self.state.init_orchestrator().await {
+                warn!(error = %e, "Could not initialize orchestrator");
+            }
+        }
+
         let bot = self.bot.clone();
         let state = Arc::clone(&self.state);
 
@@ -117,6 +128,13 @@ impl TelegramBot {
         let poll_bot = bot.clone();
         tokio::spawn(async move {
             poll_output_loop(poll_bot, poll_state).await;
+        });
+
+        // Start the notification polling task
+        let notify_state = Arc::clone(&self.state);
+        let notify_bot = bot.clone();
+        tokio::spawn(async move {
+            poll_notifications_loop(notify_bot, notify_state).await;
         });
 
         // Set up the command and message handlers
@@ -213,7 +231,7 @@ impl TelegramBot {
 
 /// Background task to poll for output from connected sessions and send responses.
 async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
-    use teloxide::types::ChatId;
+    use teloxide::types::{ChatId, ChatAction, ReplyParameters};
 
     let mut poll_interval = interval(Duration::from_millis(POLL_INTERVAL_MS));
 
@@ -224,11 +242,22 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
         let waiting_ids = state.get_waiting_chat_ids().await;
 
         for chat_id in waiting_ids {
+            // Refresh typing indicator to show processing is ongoing
+            let _ = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await;
+
             // Poll for output from this session
             match state.poll_output(ChatId(chat_id)).await {
-                Ok(Some(response)) => {
-                    // Send the response back to the user
-                    if let Err(e) = bot.send_message(ChatId(chat_id), &response).await {
+                Ok(Some((response, message_id))) => {
+                    // Send the response back to the user, as a reply if we have a message ID
+                    let send_result = if let Some(msg_id) = message_id {
+                        bot.send_message(ChatId(chat_id), &response)
+                            .reply_parameters(ReplyParameters::new(msg_id))
+                            .await
+                    } else {
+                        bot.send_message(ChatId(chat_id), &response).await
+                    };
+
+                    if let Err(e) = send_result {
                         warn!(chat_id = %chat_id, error = %e, "Failed to send response");
                     } else {
                         info!(chat_id = %chat_id, "Response sent to user");
@@ -241,6 +270,65 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     warn!(chat_id = %chat_id, error = %e, "Error polling output");
                 }
             }
+        }
+    }
+}
+
+/// Background task to poll for cross-channel notifications and broadcast to authorized users.
+async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
+    use teloxide::types::ChatId;
+    use crate::notifications::{get_unread_notifications, mark_notifications_read};
+
+    let mut poll_interval = interval(Duration::from_millis(NOTIFICATION_POLL_INTERVAL_MS));
+
+    loop {
+        poll_interval.tick().await;
+
+        // Get unread notifications for the telegram channel
+        let notifications = get_unread_notifications("telegram");
+        if notifications.is_empty() {
+            continue;
+        }
+
+        // Get all authorized chat IDs
+        let authorized_chats = state.get_authorized_chat_ids().await;
+        if authorized_chats.is_empty() {
+            // No authorized users yet, mark as read anyway to avoid backlog
+            let ids: Vec<_> = notifications.iter().map(|n| n.id.clone()).collect();
+            if let Err(e) = mark_notifications_read("telegram", &ids) {
+                warn!(error = %e, "Failed to mark notifications as read");
+            }
+            continue;
+        }
+
+        // Send each notification to all authorized chats
+        let mut sent_ids = Vec::new();
+        for notification in &notifications {
+            // Generate LLM summary when agents feature is enabled
+            #[cfg(feature = "agents")]
+            let message = state
+                .generate_notification_summary(
+                    &notification.message,
+                    notification.session.as_deref(),
+                )
+                .await;
+
+            #[cfg(not(feature = "agents"))]
+            let message = notification.message.clone();
+
+            for &chat_id in &authorized_chats {
+                if let Err(e) = bot.send_message(ChatId(chat_id), &message).await {
+                    warn!(chat_id = %chat_id, error = %e, "Failed to send notification");
+                } else {
+                    info!(chat_id = %chat_id, notification_id = %notification.id, "Notification sent");
+                }
+            }
+            sent_ids.push(notification.id.clone());
+        }
+
+        // Mark notifications as read
+        if let Err(e) = mark_notifications_read("telegram", &sent_ids) {
+            warn!(error = %e, "Failed to mark notifications as read");
         }
     }
 }
