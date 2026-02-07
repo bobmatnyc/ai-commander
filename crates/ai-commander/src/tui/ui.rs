@@ -131,14 +131,18 @@ fn draw_sessions(frame: &mut Frame, app: &App) {
 }
 
 /// Format a session list item.
+/// Uses [C] for Commander-managed sessions and [R] for regular tmux sessions.
 fn format_session_item(index: usize, session: &SessionInfo, selected: usize) -> ListItem<'static> {
     let marker = if index == selected { ">" } else { " " };
+
+    // Type indicator: [C] = Commander-managed, [R] = Regular tmux
+    let type_indicator = if session.is_commander { "[C]" } else { "[R]" };
+
+    // Status indicator
     let status = if session.is_connected {
-        "* connected".to_string()
-    } else if session.is_commander {
-        "o idle".to_string()
+        "connected"
     } else {
-        "(external)".to_string()
+        ""
     };
 
     let style = if index == selected {
@@ -151,7 +155,13 @@ fn format_session_item(index: usize, session: &SessionInfo, selected: usize) -> 
         Style::default()
     };
 
-    ListItem::new(format!("  {} {:<30} {}", marker, session.name, status)).style(style)
+    let text = if status.is_empty() {
+        format!("  {} {} {}", marker, type_indicator, session.name)
+    } else {
+        format!("  {} {} {:<30} {}", marker, type_indicator, session.name, status)
+    };
+
+    ListItem::new(text).style(style)
 }
 
 /// Draw the header bar.
