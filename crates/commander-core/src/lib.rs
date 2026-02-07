@@ -6,6 +6,7 @@
 //! - **change_detector**: Smart change detection to reduce inference costs
 //! - **config**: Shared configuration paths and utilities
 //! - **migration**: Storage migration from legacy paths
+//! - **notification_parser**: Parse timer notifications into structured data
 //! - **onboarding**: First-run setup wizard
 //! - **output_filter**: Filter UI noise from Claude Code terminal output
 //! - **summarizer**: Summarize long responses using OpenRouter API
@@ -13,6 +14,7 @@
 pub mod change_detector;
 pub mod config;
 pub mod migration;
+pub mod notification_parser;
 pub mod onboarding;
 pub mod output_filter;
 pub mod summarizer;
@@ -36,3 +38,6 @@ pub use summarizer::{
 pub use change_detector::{
     ChangeDetector, ChangeEvent, ChangeNotification, ChangeType, Significance, SmartPoller,
 };
+
+// Re-export notification parsing
+pub use notification_parser::{parse_notification, parse_session_preview, strip_ansi, ParsedSessionStatus};
