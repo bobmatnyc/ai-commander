@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use commander_adapters::AdapterRegistry;
 use commander_models::Project;
+#[cfg(feature = "agents")]
+use commander_orchestrator::AgentOrchestrator;
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
 use rustyline::completion::{Completer, Pair};
@@ -491,6 +493,11 @@ pub struct Repl {
     tmux: Option<TmuxOrchestrator>,
     /// Map of project name/alias to tmux session name.
     sessions: HashMap<String, String>,
+
+    // Agent orchestration (optional, behind feature flag)
+    #[cfg(feature = "agents")]
+    /// Agent orchestrator for multi-agent system integration.
+    orchestrator: Option<AgentOrchestrator>,
 }
 
 impl Repl {
@@ -540,6 +547,21 @@ impl Repl {
             }
         };
 
+        // Initialize agent orchestrator (gracefully handle if unavailable)
+        #[cfg(feature = "agents")]
+        let orchestrator = {
+            match runtime.block_on(AgentOrchestrator::new()) {
+                Ok(o) => {
+                    info!("Agent orchestrator initialized");
+                    Some(o)
+                }
+                Err(e) => {
+                    debug!("Agent orchestrator not available: {}", e);
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             editor,
             store,
@@ -550,6 +572,8 @@ impl Repl {
             runtime,
             tmux,
             sessions: HashMap::new(),
+            #[cfg(feature = "agents")]
+            orchestrator,
         })
     }
 
@@ -559,6 +583,10 @@ impl Repl {
         println!("Type /help for commands, /quit to exit");
         if self.chat_client.is_available() {
             println!("Chat mode available (OpenRouter)");
+        }
+        #[cfg(feature = "agents")]
+        if self.orchestrator.is_some() {
+            println!("Agent orchestrator enabled (LLM interpretation)");
         }
         println!();
 
@@ -699,93 +727,102 @@ impl Repl {
             }
 
             ReplCommand::Send(message) => {
-                match &self.connected_project {
-                    Some(project) => {
+                // Clone values upfront to avoid borrow checker issues
+                let project = self.connected_project.clone();
+                let session = project.as_ref().and_then(|p| self.sessions.get(p).cloned());
+
+                match (project, session) {
+                    (Some(project), Some(session)) => {
                         if let Some(tmux) = &self.tmux {
-                            if let Some(session) = self.sessions.get(project) {
-                                // Capture initial output to establish baseline (full content hash)
-                                let initial_output = tmux
-                                    .capture_output(session, None, Some(200))
-                                    .unwrap_or_default();
+                            // Capture initial output to establish baseline (full content hash)
+                            let initial_output = tmux
+                                .capture_output(&session, None, Some(200))
+                                .unwrap_or_default();
 
-                                match tmux.send_line(session, None, &message) {
-                                    Ok(_) => {
-                                        println!("[{}] > {}", project, message);
-                                        print!("[working");
-                                        io::stdout().flush().ok();
+                            match tmux.send_line(&session, None, &message) {
+                                Ok(_) => {
+                                    println!("[{}] > {}", project, message);
+                                    print!("[working");
+                                    io::stdout().flush().ok();
 
-                                        // Poll for new output using content comparison
-                                        let poll_interval = std::time::Duration::from_millis(250);
-                                        let max_wait = std::time::Duration::from_secs(60);
-                                        let start = std::time::Instant::now();
-                                        let mut last_change_time = start;
-                                        let idle_timeout = std::time::Duration::from_secs(3);
-                                        let mut last_output = initial_output.clone();
-                                        let mut dots_printed = 0;
-                                        let mut got_response = false;
+                                    // Poll for new output using content comparison
+                                    let poll_interval = std::time::Duration::from_millis(250);
+                                    let max_wait = std::time::Duration::from_secs(60);
+                                    let start = std::time::Instant::now();
+                                    let mut last_change_time = start;
+                                    let idle_timeout = std::time::Duration::from_secs(3);
+                                    let mut last_output = initial_output.clone();
+                                    let mut dots_printed = 0;
+                                    let mut got_response = false;
 
-                                        while start.elapsed() < max_wait {
-                                            std::thread::sleep(poll_interval);
+                                    while start.elapsed() < max_wait {
+                                        std::thread::sleep(poll_interval);
 
-                                            // Show progress dots
-                                            if dots_printed < 20 {
-                                                print!(".");
-                                                io::stdout().flush().ok();
-                                                dots_printed += 1;
-                                            }
+                                        // Show progress dots
+                                        if dots_printed < 20 {
+                                            print!(".");
+                                            io::stdout().flush().ok();
+                                            dots_printed += 1;
+                                        }
 
-                                            if let Ok(current_output) =
-                                                tmux.capture_output(session, None, Some(200))
-                                            {
-                                                // Find new content by comparing outputs
-                                                if current_output != last_output {
-                                                    // Find lines that weren't in the previous capture
-                                                    let new_lines = find_new_lines(&last_output, &current_output, &message);
+                                        if let Ok(current_output) =
+                                            tmux.capture_output(&session, None, Some(200))
+                                        {
+                                            // Find new content by comparing outputs
+                                            if current_output != last_output {
+                                                // Find lines that weren't in the previous capture
+                                                let new_lines = find_new_lines(&last_output, &current_output, &message);
 
-                                                    if !new_lines.is_empty() {
-                                                        // End the [working...] line on first output
-                                                        if !got_response {
-                                                            println!("]");
-                                                            got_response = true;
-                                                        }
-
-                                                        for line in &new_lines {
-                                                            println!("[{}] {}", project, line);
-                                                        }
-                                                        last_change_time = std::time::Instant::now();
+                                                if !new_lines.is_empty() {
+                                                    // End the [working...] line on first output
+                                                    if !got_response {
+                                                        println!("]");
+                                                        got_response = true;
                                                     }
 
-                                                    last_output = current_output;
+                                                    for line in &new_lines {
+                                                        println!("[{}] {}", project, line);
+                                                    }
+                                                    last_change_time = std::time::Instant::now();
                                                 }
-                                            }
 
-                                            // Stop polling after idle period with some response
-                                            if last_change_time.elapsed() > idle_timeout && got_response {
-                                                break;
+                                                last_output = current_output;
                                             }
                                         }
 
-                                        // End progress indicator if no response received
-                                        if !got_response {
-                                            println!("]");
-                                            println!("(AI is processing - response will appear in tmux session)");
+                                        // Stop polling after idle period with some response
+                                        if last_change_time.elapsed() > idle_timeout && got_response {
+                                            break;
                                         }
                                     }
-                                    Err(e) => {
-                                        println!("Failed to send message: {}", e);
+
+                                    // End progress indicator if no response received
+                                    if !got_response {
+                                        println!("]");
+                                        println!("(AI is processing - response will appear in tmux session)");
+                                    } else {
+                                        // Try to provide orchestrator summary if available
+                                        #[cfg(feature = "agents")]
+                                        if let Some(summary) = self.try_orchestrator_analysis(&session, &last_output) {
+                                            println!("[{}] Summary: {}", project, summary);
+                                        }
                                     }
                                 }
-                            } else {
-                                println!(
-                                    "Project '{}' not running. Reconnect with path to start it.",
-                                    project
-                                );
+                                Err(e) => {
+                                    println!("Failed to send message: {}", e);
+                                }
                             }
                         } else {
                             println!("Tmux not available. Cannot send messages to projects.");
                         }
                     }
-                    None => {
+                    (Some(project), None) => {
+                        println!(
+                            "Project '{}' not running. Reconnect with path to start it.",
+                            project
+                        );
+                    }
+                    (None, _) => {
                         println!("Not connected to any project. Use /connect <project> first.");
                     }
                 }
@@ -919,17 +956,26 @@ impl Repl {
                     // If connected, treat as message to send to connected session
                     if self.connected_project.is_some() {
                         self.handle_command(ReplCommand::Send(text))?;
-                    } else if self.chat_client.is_available() {
-                        // Chat mode - send to OpenRouter
-                        self.handle_chat(&text)?;
                     } else {
-                        // Not connected - treat as Commander instruction, ask for clarification
-                        println!("Commander: {}", text);
-                        println!();
-                        println!("Did you mean to route this to a session?");
-                        println!("  @<session> <message>  - Send to specific session");
-                        println!("  /connect <name>       - Connect to a session first");
-                        println!("  /sessions             - List available sessions");
+                        // Not connected - try orchestrator for LLM interpretation first
+                        #[cfg(feature = "agents")]
+                        if let Some(response) = self.try_orchestrator_input(&text) {
+                            println!("Commander: {}", response);
+                            return Ok(false);
+                        }
+
+                        // Fallback to chat mode if available
+                        if self.chat_client.is_available() {
+                            self.handle_chat(&text)?;
+                        } else {
+                            // No AI available - ask for clarification
+                            println!("Commander: {}", text);
+                            println!();
+                            println!("Did you mean to route this to a session?");
+                            println!("  @<session> <message>  - Send to specific session");
+                            println!("  /connect <name>       - Connect to a session first");
+                            println!("  /sessions             - List available sessions");
+                        }
                     }
                 }
                 Ok(false)
@@ -1288,6 +1334,92 @@ impl Repl {
         }
 
         Ok(())
+    }
+
+    /// Try to process user input through the agent orchestrator.
+    ///
+    /// Returns Some(response) if orchestrator processed the input, None to fall back.
+    #[cfg(feature = "agents")]
+    fn try_orchestrator_input(&mut self, input: &str) -> Option<String> {
+        let orchestrator = self.orchestrator.as_mut()?;
+
+        match self.runtime.block_on(orchestrator.process_user_input(input)) {
+            Ok(response) => Some(response),
+            Err(e) => {
+                debug!("Orchestrator input processing failed: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Try to analyze session output using the agent orchestrator.
+    ///
+    /// Returns Some(summary) if orchestrator analysis succeeded, None to fall back.
+    #[cfg(feature = "agents")]
+    fn try_orchestrator_analysis(&mut self, session_name: &str, output: &str) -> Option<String> {
+        let orchestrator = self.orchestrator.as_mut()?;
+
+        // Determine adapter type (default to claude_code)
+        let adapter_type = "claude_code";
+
+        match self.runtime.block_on(orchestrator.process_session_output(session_name, adapter_type, output)) {
+            Ok(analysis) => {
+                // Build summary from OutputAnalysis
+                let mut summary = analysis.summary.clone();
+
+                // Add context about state
+                if analysis.waiting_for_input {
+                    if !summary.is_empty() {
+                        summary.push_str(" ");
+                    }
+                    summary.push_str("[Ready]");
+                }
+
+                if analysis.detected_completion {
+                    if !summary.is_empty() {
+                        summary.push_str(" ");
+                    }
+                    summary.push_str("[Done]");
+                }
+
+                if let Some(error) = &analysis.error_detected {
+                    if !summary.is_empty() {
+                        summary.push_str(" ");
+                    }
+                    summary.push_str(&format!("[Error: {}]", error));
+                }
+
+                if !analysis.files_changed.is_empty() {
+                    if !summary.is_empty() {
+                        summary.push_str("\n");
+                    }
+                    summary.push_str(&format!("Files: {}", analysis.files_changed.join(", ")));
+                }
+
+                if summary.is_empty() {
+                    None
+                } else {
+                    Some(summary)
+                }
+            }
+            Err(e) => {
+                debug!("Orchestrator analysis failed: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Check if orchestrator is available.
+    #[allow(dead_code)]
+    fn has_orchestrator(&self) -> bool {
+        #[cfg(feature = "agents")]
+        {
+            self.orchestrator.is_some()
+        }
+        #[cfg(not(feature = "agents"))]
+        {
+            false
+        }
     }
 }
 
