@@ -44,7 +44,7 @@ impl App {
                     self.sessions.insert(project.name.clone(), session_name);
                     self.project = Some(project.name.clone());
                     self.project_path = Some(project.path.clone());
-                    self.messages.push(Message::system(format!("Connected to '{}'", project.name)));
+                    self.messages.push(Message::system(format!("[C] Connected to '{}'", project.name)));
                     return Ok(());
                 }
 
@@ -74,7 +74,7 @@ impl App {
                     self.sessions.insert(project.name.clone(), session_name);
                     self.project = Some(project.name.clone());
                     self.project_path = Some(project.path.clone());
-                    self.messages.push(Message::system(format!("Started and connected to '{}'", project.name)));
+                    self.messages.push(Message::system(format!("[C] Started and connected to '{}'", project.name)));
                     return Ok(());
                 }
             }
@@ -93,13 +93,28 @@ impl App {
 
             for session_name in session_candidates {
                 if tmux.session_exists(&session_name) {
-                    // Connect to external/unregistered session
-                    self.sessions.insert(base_name.to_string(), session_name.clone());
-                    self.project = Some(base_name.to_string());
+                    // Connect to regular/unregistered tmux session
+                    let is_commander = session_name.starts_with("commander-");
+                    let display_name = if is_commander {
+                        session_name.strip_prefix("commander-").unwrap_or(&session_name)
+                    } else {
+                        &session_name
+                    };
+                    self.sessions.insert(display_name.to_string(), session_name.clone());
+                    self.project = Some(display_name.to_string());
                     self.project_path = None;
-                    self.messages.push(Message::system(
-                        format!("Connected to session '{}' (unregistered)", session_name)
-                    ));
+                    if is_commander {
+                        self.messages.push(Message::system(
+                            format!("[C] Connected to session '{}' (unregistered project)", display_name)
+                        ));
+                    } else {
+                        self.messages.push(Message::system(
+                            format!("[R] Connected to regular session '{}'", session_name)
+                        ));
+                        self.messages.push(Message::system(
+                            "    Note: This session is not managed by Commander. Some features may be limited."
+                        ));
+                    }
                     return Ok(());
                 }
             }

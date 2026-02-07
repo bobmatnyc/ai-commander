@@ -15,8 +15,9 @@ impl App {
         match command.as_str() {
             "help" | "h" | "?" => {
                 self.messages.push(Message::system("=== TUI Commands ==="));
-                self.messages.push(Message::system("  /connect <name>                    Connect to existing project"));
+                self.messages.push(Message::system("  /connect <name>                    Connect to project or tmux session"));
                 self.messages.push(Message::system("  /connect <path> -a <adapter> -n <name>  Start new project"));
+                self.messages.push(Message::system("    Note: [C] = Commander-managed, [R] = Regular tmux session"));
                 self.messages.push(Message::system("  /disconnect                        Disconnect from project"));
                 self.messages.push(Message::system("  /list                              List projects"));
                 self.messages.push(Message::system("  /status [name]                     Show project status"));
@@ -120,19 +121,15 @@ impl App {
                                 self.messages.push(Message::system(""));
                             }
                             self.messages.push(Message::system("[terminal] Tmux Sessions:"));
+                            self.messages.push(Message::system("  [C] = Commander-managed, [R] = Regular tmux"));
                             for session in &sessions {
                                 let is_commander = session.name.starts_with("commander-");
                                 let is_connected = self.sessions.values().any(|n| n == &session.name);
-                                let marker = if is_connected {
-                                    "[check]"
-                                } else if is_commander {
-                                    "[robot]"
-                                } else {
-                                    "[terminal]"
-                                };
+                                let type_indicator = if is_commander { "[C]" } else { "[R]" };
+                                let status = if is_connected { " (connected)" } else { "" };
                                 self.messages.push(Message::system(format!(
-                                    "  {} {}",
-                                    marker, session.name
+                                    "  {} {}{}",
+                                    type_indicator, session.name, status
                                 )));
                             }
                         }

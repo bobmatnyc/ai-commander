@@ -80,7 +80,10 @@ impl App {
             should_scroll = true;
 
             // Broadcast to all channels (Telegram, etc.)
-            let session_name = format!("commander-{}", name);
+            // Use the actual session name (might be commander-prefixed or not)
+            let session_name = self.sessions.get(&name)
+                .cloned()
+                .unwrap_or_else(|| format!("commander-{}", name));
             if let Err(e) = commander_telegram::notify_session_ready(
                 &session_name,
                 if preview.is_empty() { None } else { Some(&preview) }
@@ -264,15 +267,16 @@ impl App {
                 self.sessions.insert(project_name.clone(), session.name.clone());
                 self.project = Some(project_name.clone());
                 self.project_path = path;
-                self.messages.push(Message::system(format!("Connected to '{}'", project_name)));
+                self.messages.push(Message::system(format!("[C] Connected to '{}'", project_name)));
                 self.view_mode = ViewMode::Normal;
             } else {
-                // Connect to external session (use session name as project name)
+                // Connect to regular tmux session (use session name as project name)
                 let project_name = session.name.clone();
                 self.sessions.insert(project_name.clone(), session.name.clone());
                 self.project = Some(project_name.clone());
-                self.project_path = None;  // No project path for external sessions
-                self.messages.push(Message::system(format!("Connected to external session '{}'", project_name)));
+                self.project_path = None;  // No project path for regular sessions
+                self.messages.push(Message::system(format!("[R] Connected to regular session '{}'", project_name)));
+                self.messages.push(Message::system("    Note: This session is not managed by Commander. Some features may be limited."));
                 self.view_mode = ViewMode::Normal;
             }
         }
