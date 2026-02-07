@@ -2,6 +2,10 @@
 //!
 //! Contains methods for monitoring session status, scanning sessions,
 //! and managing the sessions list view.
+//!
+//! Uses a hybrid tiered approach for activity interpretation:
+//! - Tier 1 (Fast Path): Regex-based `is_claude_ready()` for quick checks
+//! - Tier 2 (Semantic): Optional LLM analysis via AgentOrchestrator
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -302,6 +306,57 @@ impl App {
                         self.session_selected -= 1;
                     }
                 }
+            }
+        }
+    }
+
+    /// Analyze session output using the orchestrator (Tier 2: semantic analysis).
+    ///
+    /// This provides LLM-based interpretation for cases where regex patterns
+    /// are ambiguous. Falls back to regex-based detection if orchestrator unavailable.
+    ///
+    /// Returns (is_ready, summary) where summary is an optional semantic description.
+    #[cfg(feature = "agents")]
+    pub fn analyze_session_with_orchestrator(
+        &mut self,
+        session_name: &str,
+        output: &str,
+    ) -> (bool, Option<String>) {
+        // Tier 1: Fast path with regex
+        let regex_ready = is_claude_ready(output);
+
+        // If regex is confident (clear prompt visible), use that result
+        // Only escalate to Tier 2 for ambiguous cases
+        if regex_ready {
+            return (true, None);
+        }
+
+        // Tier 2: LLM analysis (only if orchestrator available)
+        let handle = match &self.runtime_handle {
+            Some(h) => h.clone(),
+            None => return (regex_ready, None),
+        };
+
+        let orchestrator = match &mut self.orchestrator {
+            Some(o) => o,
+            None => return (regex_ready, None),
+        };
+
+        // Run async analysis synchronously
+        let adapter_type = "claude_code";
+        match handle.block_on(orchestrator.process_session_output(session_name, adapter_type, output)) {
+            Ok(analysis) => {
+                let is_ready = analysis.waiting_for_input || analysis.detected_completion;
+                let summary = if !analysis.summary.is_empty() {
+                    Some(analysis.summary)
+                } else {
+                    None
+                };
+                (is_ready, summary)
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "Orchestrator session analysis failed");
+                (regex_ready, None)
             }
         }
     }
