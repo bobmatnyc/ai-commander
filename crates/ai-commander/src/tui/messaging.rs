@@ -111,6 +111,9 @@ impl App {
     }
 
     /// Trigger async summarization of the response buffer.
+    ///
+    /// Uses the agent orchestrator for LLM-based analysis when available,
+    /// falling back to direct summarization otherwise.
     pub(super) fn trigger_summarization(&mut self) {
         let raw_response = self.response_buffer.join("\n");
         let query = self.pending_query.clone().unwrap_or_default();
@@ -122,11 +125,87 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.summarizer_rx = Some(rx);
 
-        // Spawn thread for blocking HTTP call
+        // Try to use orchestrator for LLM analysis (agents feature)
+        #[cfg(feature = "agents")]
+        {
+            if let Some(summary) = self.try_orchestrator_analysis(&raw_response) {
+                // Got synchronous result from orchestrator
+                let _ = tx.send(summary);
+                return;
+            }
+        }
+
+        // Fallback: Spawn thread for blocking HTTP call
         std::thread::spawn(move || {
             let summary = summarize_blocking_with_fallback(&query, &raw_response);
             let _ = tx.send(summary);
         });
+    }
+
+    /// Try to analyze output using the agent orchestrator.
+    ///
+    /// Returns Some(summary) if orchestrator analysis succeeded, None to fall back.
+    /// This runs synchronously using block_on since we need mutable access to orchestrator.
+    #[cfg(feature = "agents")]
+    fn try_orchestrator_analysis(&mut self, output: &str) -> Option<String> {
+        // Need runtime handle for async operation
+        let handle = self.runtime_handle.as_ref()?.clone();
+
+        // Need orchestrator
+        let orchestrator = self.orchestrator.as_mut()?;
+
+        // Get session info for the orchestrator
+        let session_name = self.project.as_ref()
+            .and_then(|p| self.sessions.get(p))?
+            .clone();
+
+        // Determine adapter type from project config (default to claude_code)
+        let adapter_type = "claude_code";
+
+        // Run async analysis synchronously
+        // This blocks briefly but provides LLM-based semantic understanding
+        let output = output.to_string();
+        match handle.block_on(orchestrator.process_session_output(&session_name, adapter_type, &output)) {
+            Ok(analysis) => {
+                // Build summary from OutputAnalysis
+                let mut summary = analysis.summary.clone();
+
+                // Add context about state
+                if analysis.waiting_for_input {
+                    if !summary.is_empty() {
+                        summary.push_str("\n\n");
+                    }
+                    summary.push_str("[Ready for input]");
+                }
+
+                if analysis.detected_completion {
+                    if !summary.is_empty() {
+                        summary.push_str("\n\n");
+                    }
+                    summary.push_str("[Task completed]");
+                }
+
+                if let Some(error) = &analysis.error_detected {
+                    if !summary.is_empty() {
+                        summary.push_str("\n\n");
+                    }
+                    summary.push_str(&format!("[Error: {}]", error));
+                }
+
+                if !analysis.files_changed.is_empty() {
+                    if !summary.is_empty() {
+                        summary.push_str("\n\n");
+                    }
+                    summary.push_str(&format!("Files changed: {}", analysis.files_changed.join(", ")));
+                }
+
+                Some(summary)
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "Orchestrator analysis failed, falling back");
+                None
+            }
+        }
     }
 
     /// Stop the working indicator.

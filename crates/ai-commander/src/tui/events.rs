@@ -12,6 +12,9 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
+#[cfg(feature = "agents")]
+use tokio::runtime::Runtime as TokioRuntime;
+
 use super::app::{App, ViewMode};
 use super::ui;
 
@@ -86,6 +89,10 @@ pub fn run(state_dir: &std::path::Path, connect_to: Option<String>) -> Result<()
     // Create app
     let mut app = App::new(state_dir);
 
+    // Initialize tokio runtime for async operations (agents feature)
+    #[cfg(feature = "agents")]
+    let _runtime = init_agents_runtime(&mut app);
+
     // Auto-connect if project specified
     if let Some(project) = connect_to {
         if let Err(e) = app.connect(&project) {
@@ -105,6 +112,32 @@ pub fn run(state_dir: &std::path::Path, connect_to: Option<String>) -> Result<()
     }
 
     result
+}
+
+/// Initialize the tokio runtime and agent orchestrator.
+///
+/// Returns the runtime which must be kept alive for the duration of the TUI.
+#[cfg(feature = "agents")]
+fn init_agents_runtime(app: &mut App) -> Option<TokioRuntime> {
+    // Create a tokio runtime for async operations
+    let runtime = match TokioRuntime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            app.messages.push(super::app::Message::system(
+                format!("Failed to create async runtime: {}", e),
+            ));
+            return None;
+        }
+    };
+
+    // Store the runtime handle for later async operations
+    app.set_runtime_handle(Arc::new(runtime.handle().clone()));
+
+    // Initialize the agent orchestrator
+    // This happens synchronously during startup for better UX
+    app.init_orchestrator_sync();
+
+    Some(runtime)
 }
 
 /// Main event loop.

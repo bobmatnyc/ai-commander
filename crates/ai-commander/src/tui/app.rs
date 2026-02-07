@@ -11,6 +11,10 @@ use commander_tmux::TmuxOrchestrator;
 
 #[cfg(feature = "agents")]
 use commander_orchestrator::AgentOrchestrator;
+#[cfg(feature = "agents")]
+use std::sync::Arc;
+#[cfg(feature = "agents")]
+use tokio::runtime::Handle as TokioHandle;
 
 /// Direction of a message in the output area.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +192,9 @@ pub struct App {
     #[cfg(feature = "agents")]
     /// Agent orchestrator for multi-agent system integration.
     pub(super) orchestrator: Option<AgentOrchestrator>,
+    #[cfg(feature = "agents")]
+    /// Tokio runtime handle for async operations.
+    pub(super) runtime_handle: Option<Arc<TokioHandle>>,
 }
 
 impl App {
@@ -246,6 +253,8 @@ impl App {
 
             #[cfg(feature = "agents")]
             orchestrator: None,
+            #[cfg(feature = "agents")]
+            runtime_handle: None,
         };
 
         // Add welcome message
