@@ -173,48 +173,6 @@ impl TelegramState {
         self.orchestrator.read().await.is_some()
     }
 
-    /// Generate an LLM-interpreted summary for a notification message.
-    ///
-    /// Uses the orchestrator's UserAgent to create a more human-readable
-    /// summary of session activity. Falls back to the original message
-    /// if orchestrator is unavailable or processing fails.
-    #[cfg(feature = "agents")]
-    pub async fn generate_notification_summary(&self, raw_message: &str, session_name: Option<&str>) -> String {
-        let mut orchestrator = self.orchestrator.write().await;
-        if let Some(ref mut orch) = *orchestrator {
-            // Create a prompt for summarization
-            let prompt = if let Some(session) = session_name {
-                format!(
-                    "Summarize this session activity notification in 1-2 sentences for Telegram. \
-                    Session: {}. Activity: {}",
-                    session, raw_message
-                )
-            } else {
-                format!(
-                    "Summarize this activity notification in 1-2 sentences for Telegram: {}",
-                    raw_message
-                )
-            };
-
-            match orch.process_user_input(&prompt).await {
-                Ok(summary) => {
-                    debug!(
-                        original = %raw_message,
-                        summary = %summary,
-                        "Generated LLM notification summary"
-                    );
-                    summary
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to generate notification summary");
-                    raw_message.to_string()
-                }
-            }
-        } else {
-            raw_message.to_string()
-        }
-    }
-
     /// Check if tmux is available.
     pub fn has_tmux(&self) -> bool {
         self.tmux.is_some()
