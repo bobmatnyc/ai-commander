@@ -248,9 +248,11 @@ impl App {
                             } else {
                                 let ready = commander_core::is_claude_ready(&output);
                                 if ready {
-                                    self.messages.push(Message::system("  Waiting for input"));
+                                    // Use LLM to interpret what Claude is waiting for
+                                    self.show_interpreted_status(&output, true);
                                 } else {
-                                    self.messages.push(Message::system("  Processing..."));
+                                    // Use LLM to interpret what Claude is doing
+                                    self.show_interpreted_status(&output, false);
                                 }
                             }
                         }
@@ -260,6 +262,22 @@ impl App {
             None => {
                 self.messages.push(Message::system("No project specified. Use /status <project> or connect first."));
             }
+        }
+    }
+
+    /// Show interpreted status using LLM analysis of screen content.
+    fn show_interpreted_status(&mut self, screen_content: &str, is_ready: bool) {
+        // Try LLM interpretation first
+        if let Some(interpretation) = commander_core::interpret_screen_context(screen_content, is_ready) {
+            self.messages.push(Message::system(format!("  {}", interpretation)));
+        } else {
+            // Fallback to simple status if LLM unavailable
+            let fallback = if is_ready {
+                "Waiting for input"
+            } else {
+                "Processing..."
+            };
+            self.messages.push(Message::system(format!("  {}", fallback)));
         }
     }
 
@@ -403,20 +421,23 @@ impl App {
         };
 
         // First check if Claude is ready for input
-        if commander_core::is_claude_ready(&output) {
-            // Try to get a preview of what was last done
-            let preview = super::helpers::extract_ready_preview(&output);
-            if !preview.is_empty() && preview.len() < 60 {
-                return format!("Waiting for input ({})", truncate_preview(&preview, 40));
-            }
-            return "Waiting for input".to_string();
-        }
+        let is_ready = commander_core::is_claude_ready(&output);
 
-        // Try to extract session summary from activity
+        // Try to extract session summary from deterministic patterns first
         let summary = crate::repl::extract_session_summary(&output);
         if !summary.is_empty() {
             // Use the first summary line, truncated
             return truncate_preview(&summary[0], 50);
+        }
+
+        // For session list, use a simpler fallback (LLM calls would be too slow for list)
+        // But if there's a clear ready preview, show it
+        if is_ready {
+            let preview = super::helpers::extract_ready_preview(&output);
+            if !preview.is_empty() && preview.len() < 60 {
+                return format!("Waiting ({})", truncate_preview(&preview, 40));
+            }
+            return "Waiting for input".to_string();
         }
 
         // Fallback: session is active but we can't determine specific activity
