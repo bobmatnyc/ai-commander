@@ -194,6 +194,77 @@ pub fn summarize_blocking_with_fallback(query: &str, raw_response: &str) -> Stri
     }
 }
 
+/// System prompt for screen context interpretation.
+const SCREEN_INTERPRET_PROMPT: &str = r#"You are analyzing a Claude Code session screen.
+The session is currently idle/waiting for user input.
+Analyze the screen and tell me in ONE sentence what Claude is asking or waiting for.
+
+Rules:
+- If Claude asked a question, quote it briefly (truncate if over 50 chars)
+- If Claude completed a task, summarize what was done in past tense
+- If Claude is showing an error, mention the error briefly
+- Be concise - respond with ONLY the interpretation, no preamble
+- Start with an appropriate prefix like "Claude is asking:", "Ready after:", "Waiting for:", "Error:"
+- Never mention "the screen shows" or similar meta-language"#;
+
+/// Interpret screen context from a Claude Code session.
+///
+/// Uses LLM to analyze what Claude is asking/waiting for based on screen content.
+/// Returns a human-readable interpretation like "Claude is asking: Should I deploy?"
+///
+/// # Arguments
+/// * `screen_content` - The captured screen content (last N lines)
+/// * `is_ready` - Whether the session is ready for input (idle)
+///
+/// # Returns
+/// An interpretation string, or None if LLM is unavailable or fails.
+pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<String> {
+    let api_key = get_api_key()?;
+    let model = get_model();
+
+    let state_hint = if is_ready {
+        "The session IS ready for input (showing prompt)."
+    } else {
+        "The session is NOT ready - Claude is still processing."
+    };
+
+    let user_prompt = format!(
+        "{}\n\nScreen content:\n```\n{}\n```",
+        state_hint,
+        // Limit screen content to avoid huge prompts
+        screen_content.chars().take(3000).collect::<String>()
+    );
+
+    let request_body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SCREEN_INTERPRET_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "max_tokens": 100
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let response = client
+        .post(OPENROUTER_API_URL)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send()
+        .ok()?;
+
+    let json: serde_json::Value = response.json().ok()?;
+
+    json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +287,13 @@ mod tests {
         std::env::remove_var("OPENROUTER_API_KEY");
         let result = summarize_blocking_with_fallback("test query", "raw response content");
         assert_eq!(result, "raw response content");
+    }
+
+    #[test]
+    fn test_interpret_screen_context_no_api_key() {
+        // Without API key, should return None
+        std::env::remove_var("OPENROUTER_API_KEY");
+        let result = interpret_screen_context("some screen content", true);
+        assert!(result.is_none());
     }
 }
