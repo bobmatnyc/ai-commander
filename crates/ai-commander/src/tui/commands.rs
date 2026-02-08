@@ -19,7 +19,7 @@ impl App {
                 self.messages.push(Message::system("  /connect <path> -a <adapter> -n <name>  Start new project"));
                 self.messages.push(Message::system("    Note: [C] = Commander-managed, [R] = Regular tmux session"));
                 self.messages.push(Message::system("  /disconnect                        Disconnect from project"));
-                self.messages.push(Message::system("  /list                              List projects"));
+                self.messages.push(Message::system("  /list                              List sessions with activity"));
                 self.messages.push(Message::system("  /status [name]                     Show project status"));
                 self.messages.push(Message::system("  /sessions                          Session picker (F3)"));
                 self.messages.push(Message::system("  /inspect                           Toggle inspect mode (F2)"));
@@ -92,47 +92,29 @@ impl App {
                 self.disconnect();
             }
             "list" | "ls" | "l" => {
-                let projects = self.store.load_all_projects().unwrap_or_default();
                 let tmux_sessions = self.tmux.as_ref().and_then(|t| t.list_sessions().ok());
 
-                if projects.is_empty() && tmux_sessions.as_ref().map_or(true, |s| s.is_empty()) {
-                    self.messages.push(Message::system("No projects or sessions found."));
-                } else {
-                    // Show projects if any
-                    if !projects.is_empty() {
-                        self.messages.push(Message::system("[folder] Projects:"));
-                        for project in projects.values() {
-                            let marker = if Some(&project.name) == self.project.as_ref() {
-                                "[check]"
-                            } else {
-                                "[folder]"
-                            };
-                            self.messages.push(Message::system(format!(
-                                "  {} {} ({:?})",
-                                marker, project.name, project.state
-                            )));
-                        }
-                    }
+                if tmux_sessions.as_ref().map_or(true, |s| s.is_empty()) {
+                    self.messages.push(Message::system("No sessions found."));
+                } else if let Some(sessions) = tmux_sessions {
+                    self.messages.push(Message::system("Sessions:"));
+                    for session in &sessions {
+                        let is_commander = session.name.starts_with("commander-");
+                        let is_connected = self.sessions.values().any(|n| n == &session.name);
+                        let type_indicator = if is_commander { "[C]" } else { "[R]" };
+                        let connected_marker = if is_connected { " (connected)" } else { "" };
 
-                    // Show tmux sessions if any
-                    if let Some(sessions) = tmux_sessions {
-                        if !sessions.is_empty() {
-                            if !projects.is_empty() {
-                                self.messages.push(Message::system(""));
-                            }
-                            self.messages.push(Message::system("[terminal] Tmux Sessions:"));
-                            self.messages.push(Message::system("  [C] = Commander-managed, [R] = Regular tmux"));
-                            for session in &sessions {
-                                let is_commander = session.name.starts_with("commander-");
-                                let is_connected = self.sessions.values().any(|n| n == &session.name);
-                                let type_indicator = if is_commander { "[C]" } else { "[R]" };
-                                let status = if is_connected { " (connected)" } else { "" };
-                                self.messages.push(Message::system(format!(
-                                    "  {} {}{}",
-                                    type_indicator, session.name, status
-                                )));
-                            }
-                        }
+                        // Get activity summary for this session
+                        let activity = self.get_session_activity(&session.name, is_commander);
+
+                        // Display name: strip commander- prefix for cleaner output
+                        let display_name = session.name.strip_prefix("commander-")
+                            .unwrap_or(&session.name);
+
+                        self.messages.push(Message::system(format!(
+                            "  {} {}{} - {}",
+                            type_indicator, display_name, connected_marker, activity
+                        )));
                     }
                 }
             }
@@ -399,5 +381,55 @@ impl App {
             }
         }
         self.scroll_to_bottom();
+    }
+
+    /// Get activity summary for a session.
+    ///
+    /// For Commander-managed sessions, captures output and extracts a brief status.
+    /// For regular tmux sessions, indicates no activity tracking.
+    fn get_session_activity(&self, session_name: &str, is_commander: bool) -> String {
+        if !is_commander {
+            return "(regular tmux, no activity tracking)".to_string();
+        }
+
+        let Some(tmux) = &self.tmux else {
+            return "Idle".to_string();
+        };
+
+        // Capture recent output from the session
+        let output = match tmux.capture_output(session_name, None, Some(100)) {
+            Ok(out) => out,
+            Err(_) => return "Unable to read session".to_string(),
+        };
+
+        // First check if Claude is ready for input
+        if commander_core::is_claude_ready(&output) {
+            // Try to get a preview of what was last done
+            let preview = super::helpers::extract_ready_preview(&output);
+            if !preview.is_empty() && preview.len() < 60 {
+                return format!("Waiting for input ({})", truncate_preview(&preview, 40));
+            }
+            return "Waiting for input".to_string();
+        }
+
+        // Try to extract session summary from activity
+        let summary = crate::repl::extract_session_summary(&output);
+        if !summary.is_empty() {
+            // Use the first summary line, truncated
+            return truncate_preview(&summary[0], 50);
+        }
+
+        // Fallback: session is active but we can't determine specific activity
+        "Processing...".to_string()
+    }
+}
+
+/// Truncate a preview string to fit in the list display.
+fn truncate_preview(s: &str, max_len: usize) -> String {
+    let s = s.trim();
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
     }
 }
