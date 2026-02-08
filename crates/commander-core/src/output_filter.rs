@@ -124,6 +124,20 @@ pub fn is_ui_noise(line: &str) -> bool {
         return true;
     }
 
+    // Model/framework/context stat line: [model|Claude MPM|69%]
+    // This pattern appears in session status and should not be shown raw
+    if line.contains("|") && line.contains("%]") {
+        return true;
+    }
+
+    // Partial stat fragments that may appear due to incomplete parsing
+    // e.g., "MPM|69%]" or "Claude MPM|70%]"
+    if (line.contains("MPM|") || line.contains("Opus|") || line.contains("Sonnet|"))
+        && line.contains("%")
+    {
+        return true;
+    }
+
     false
 }
 
@@ -343,5 +357,37 @@ mod tests {
         assert!(is_claude_ready("\u{276F}"));
         assert!(is_claude_ready("path/to/dir \u{276F}"));
         assert!(!is_claude_ready("Still processing..."));
+    }
+
+    #[test]
+    fn test_is_ui_noise_stat_line_full() {
+        // Full stat line pattern
+        assert!(is_ui_noise("[model|Claude MPM|69%]"));
+        assert!(is_ui_noise("[us.anthropic.claude-opus-4-5|Claude MPM|70%]"));
+    }
+
+    #[test]
+    fn test_is_ui_noise_stat_line_partial() {
+        // Partial fragments that may appear after incomplete parsing
+        assert!(is_ui_noise("MPM|69%]"));
+        assert!(is_ui_noise("Claude MPM|70%"));
+        assert!(is_ui_noise("Opus|95%]"));
+        assert!(is_ui_noise("Sonnet|50%]"));
+    }
+
+    #[test]
+    fn test_is_ui_noise_stat_with_text() {
+        // Lines containing stat patterns should be filtered
+        assert!(is_ui_noise("duetto-people - Waiting (MPM|69%]"));
+        assert!(is_ui_noise("Status [model|framework|50%]"));
+    }
+
+    #[test]
+    fn test_is_ui_noise_preserves_normal_percent() {
+        // Normal text with % should not be filtered
+        assert!(!is_ui_noise("Tests: 95% passed"));
+        assert!(!is_ui_noise("Progress: 50%"));
+        // But pattern with pipe and bracket should be
+        assert!(is_ui_noise("Something|50%]"));
     }
 }
