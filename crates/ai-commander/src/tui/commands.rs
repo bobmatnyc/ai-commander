@@ -259,16 +259,16 @@ impl App {
                         if let Ok(output) = tmux.capture_output(&session_name, None, Some(100)) {
                             let summary = crate::repl::extract_session_summary(&output);
                             if !summary.is_empty() {
-                                self.messages.push(Message::system("  Activity:"));
+                                // Display activity as narrative (no "Activity:" label)
                                 for line in summary {
-                                    self.messages.push(Message::system(format!("    {}", line)));
+                                    self.messages.push(Message::system(format!("  {}", line)));
                                 }
                             } else {
                                 let ready = commander_core::is_claude_ready(&output);
                                 if ready {
-                                    self.messages.push(Message::system("  Activity: Idle (waiting for input)"));
+                                    self.messages.push(Message::system("  Waiting for input"));
                                 } else {
-                                    self.messages.push(Message::system("  Activity: Processing..."));
+                                    self.messages.push(Message::system("  Processing..."));
                                 }
                             }
                         }
