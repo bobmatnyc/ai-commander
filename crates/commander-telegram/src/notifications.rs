@@ -167,43 +167,76 @@ pub fn mark_notifications_read(channel: &str, notification_ids: &[String]) -> Re
 }
 
 /// Convenience function to broadcast a session ready notification.
+///
+/// Uses conversational language instead of raw session output.
 pub fn notify_session_ready(session_name: &str, preview: Option<&str>) -> Result<(), std::io::Error> {
+    use commander_core::notification_parser::{parse_session_preview, strip_ansi};
+
     let display_name = session_name.strip_prefix("commander-").unwrap_or(session_name);
+
     let message = if let Some(prev) = preview {
-        if prev.is_empty() {
-            format!("[inbox] @{} is ready for input", display_name)
+        let clean_preview = strip_ansi(prev);
+        if clean_preview.is_empty() {
+            format!("Session \"{}\" is ready for input", display_name)
         } else {
-            format!("[inbox] @{} is ready: {}", display_name, prev)
+            // Parse and convert to conversational format
+            let status = parse_session_preview(display_name, &clean_preview);
+            let brief = status.to_brief();
+            if brief.is_empty() || brief == display_name {
+                format!("Session \"{}\" is ready for input", display_name)
+            } else {
+                format!("Session \"{}\" is ready: {}", display_name, brief)
+            }
         }
     } else {
-        format!("[inbox] @{} is ready for input", display_name)
+        format!("Session \"{}\" is ready for input", display_name)
     };
 
     push_notification(message, Some(session_name.to_string()))
 }
 
 /// Convenience function to broadcast a session resumed notification.
+///
+/// Uses conversational language.
 pub fn notify_session_resumed(session_name: &str) -> Result<(), std::io::Error> {
     let display_name = session_name.strip_prefix("commander-").unwrap_or(session_name);
-    let message = format!("[>] @{} resumed work", display_name);
+    let message = format!("Session \"{}\" resumed work", display_name);
 
     push_notification(message, Some(session_name.to_string()))
 }
 
 /// Convenience function to broadcast multiple new sessions waiting.
+///
+/// Uses conversational language with clean, human-readable summaries.
 pub fn notify_sessions_waiting(sessions: &[(String, String)]) -> Result<(), std::io::Error> {
+    use commander_core::notification_parser::{parse_session_preview, strip_ansi};
+
     if sessions.is_empty() {
         return Ok(());
     }
 
-    let mut message = format!("[timer] {} new session(s) waiting for input:", sessions.len());
+    // Conversational header
+    let mut message = if sessions.len() == 1 {
+        "A session is waiting for your input:".to_string()
+    } else {
+        format!("{} sessions are waiting for your input:", sessions.len())
+    };
+
     for (name, preview) in sessions.iter() {
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
-        if preview.is_empty() {
-            message.push_str(&format!("\n   @{}", display_name));
+        let clean_preview = strip_ansi(preview);
+
+        if clean_preview.is_empty() {
+            message.push_str(&format!("\n  - \"{}\"", display_name));
         } else {
-            // Show full preview, not truncated
-            message.push_str(&format!("\n   @{} - {}", display_name, preview));
+            // Parse and convert to conversational format
+            let status = parse_session_preview(display_name, &clean_preview);
+            let brief = status.to_brief();
+            if brief.is_empty() || brief == display_name {
+                message.push_str(&format!("\n  - \"{}\"", display_name));
+            } else {
+                message.push_str(&format!("\n  - \"{}\": {}", display_name, brief));
+            }
         }
     }
 
