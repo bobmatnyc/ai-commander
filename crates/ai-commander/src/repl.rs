@@ -681,7 +681,6 @@ impl Repl {
                                 if let Some(session) = self.sessions.get(&p.name) {
                                     if let Some(tmux) = &self.tmux {
                                         println!();
-                                        println!("Session Activity:");
                                         if let Ok(output) = tmux.capture_output(session, None, Some(100)) {
                                             let summary = extract_session_summary(&output);
                                             if !summary.is_empty() {
@@ -691,9 +690,9 @@ impl Repl {
                                             } else {
                                                 let ready = commander_core::is_claude_ready(&output);
                                                 if ready {
-                                                    println!("  Status: Idle (waiting for input)");
+                                                    println!("  Waiting for input");
                                                 } else {
-                                                    println!("  Status: Processing...");
+                                                    println!("  Processing...");
                                                 }
                                             }
                                         }
@@ -1478,23 +1477,89 @@ pub fn extract_session_summary(output: &str) -> Vec<String> {
         }
     }
 
-    // Build summary
+    // Build summary in narrative form
     if let Some(task) = current_task {
-        summary.push(format!("Current: {}", task));
+        // Convert to narrative: "Working on X" or "Currently doing X"
+        let narrative = make_narrative(&task);
+        summary.push(narrative);
     }
 
     for tool in recent_tools {
-        summary.push(format!("Recent: {}", tool));
-    }
-
-    if !pending_tasks.is_empty() {
-        summary.push(format!("Pending: {} task(s)", pending_tasks.len()));
-        for task in pending_tasks.iter().take(2) {
-            summary.push(format!("  - {}", task));
+        // Convert tool activity to narrative
+        let narrative = make_narrative(&tool);
+        if !summary.contains(&narrative) {
+            summary.push(narrative);
         }
     }
 
+    if !pending_tasks.is_empty() && summary.is_empty() {
+        // Only show pending if no current activity
+        summary.push(format!("{} task(s) queued", pending_tasks.len()));
+    }
+
     summary
+}
+
+/// Convert activity text to narrative form.
+fn make_narrative(activity: &str) -> String {
+    let activity = activity.trim();
+
+    // Already starts with narrative words
+    let narrative_starters = ["Currently", "Working on", "Running", "Editing", "Reading",
+                              "Writing", "Processing", "Waiting", "Building", "Testing"];
+    for starter in narrative_starters {
+        if activity.starts_with(starter) {
+            return activity.to_string();
+        }
+    }
+
+    // Strip common prefixes and convert
+    let cleaned = activity
+        .strip_prefix("Current: ")
+        .or_else(|| activity.strip_prefix("Recent: "))
+        .or_else(|| activity.strip_prefix("Task: "))
+        .or_else(|| activity.strip_prefix("Working on "))
+        .unwrap_or(activity);
+
+    // Handle common patterns
+    let lower = cleaned.to_lowercase();
+
+    // "X tests" → "Running X tests"
+    if lower.contains("test") && !lower.starts_with("running") && !lower.starts_with("testing") {
+        return format!("Running {}", cleaned);
+    }
+
+    // "Error X" → "Encountered an error: X"
+    if lower.starts_with("error") {
+        return format!("Encountered {}", cleaned.to_lowercase());
+    }
+
+    // "Writing X" already good
+    if lower.starts_with("writing") || lower.starts_with("editing") || lower.starts_with("reading") {
+        // Capitalize first letter
+        let mut chars = cleaned.chars();
+        return match chars.next() {
+            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            None => cleaned.to_string(),
+        };
+    }
+
+    // Default: "Currently X" or "Working on X"
+    // If it looks like a verb phrase (starts with -ing word), use "Currently"
+    if lower.ends_with("ing") || lower.split_whitespace().next().map(|w| w.ends_with("ing")).unwrap_or(false) {
+        format!("Currently {}", lowercase_first(cleaned))
+    } else {
+        format!("Working on {}", cleaned)
+    }
+}
+
+/// Lowercase the first character of a string.
+fn lowercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_lowercase().collect::<String>() + chars.as_str(),
+        None => s.to_string(),
+    }
 }
 
 /// Extract task description from a status line.
