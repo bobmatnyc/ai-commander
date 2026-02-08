@@ -302,22 +302,13 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
         }
 
         // Send each notification to all authorized chats
+        // Note: Notifications already have clean, conversational formatting from
+        // notify_session_ready/notify_session_resumed/notify_sessions_waiting.
+        // No LLM summarization needed - it only introduces preamble bleeding.
         let mut sent_ids = Vec::new();
         for notification in &notifications {
-            // Generate LLM summary when agents feature is enabled
-            #[cfg(feature = "agents")]
-            let message = state
-                .generate_notification_summary(
-                    &notification.message,
-                    notification.session.as_deref(),
-                )
-                .await;
-
-            #[cfg(not(feature = "agents"))]
-            let message = notification.message.clone();
-
             for &chat_id in &authorized_chats {
-                if let Err(e) = bot.send_message(ChatId(chat_id), &message).await {
+                if let Err(e) = bot.send_message(ChatId(chat_id), &notification.message).await {
                     warn!(chat_id = %chat_id, error = %e, "Failed to send notification");
                 } else {
                     info!(chat_id = %chat_id, notification_id = %notification.id, "Notification sent");
