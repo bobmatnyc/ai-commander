@@ -1,9 +1,16 @@
 //! Helper functions for TUI operations.
 
+use commander_core::notification_parser::strip_ansi;
+
 /// Extract a preview of the last meaningful line when session is ready.
+///
+/// Returns a clean, ANSI-stripped preview suitable for display.
 pub fn extract_ready_preview(output: &str) -> String {
+    // Strip ANSI codes first for clean analysis
+    let clean_output = strip_ansi(output);
+
     // Look for the last non-UI-noise line before the prompt
-    let lines: Vec<&str> = output.lines().rev()
+    let lines: Vec<&str> = clean_output.lines().rev()
         .filter(|l| {
             let trimmed = l.trim();
             let lower = trimmed.to_lowercase();
@@ -30,7 +37,7 @@ pub fn extract_ready_preview(output: &str) -> String {
             if trimmed.len() < 5 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
                 return String::new();
             }
-            // Don't truncate - show full preview for actionable context
+            // Return clean preview (already ANSI-stripped)
             trimmed.to_string()
         })
         .unwrap_or_default()

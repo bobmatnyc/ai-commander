@@ -6,11 +6,14 @@
 //! Uses a hybrid tiered approach for activity interpretation:
 //! - Tier 1 (Fast Path): Regex-based `is_claude_ready()` for quick checks
 //! - Tier 2 (Semantic): Optional LLM analysis via AgentOrchestrator
+//!
+//! All session output is converted to conversational text before display.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use commander_core::is_claude_ready;
+use commander_core::notification_parser::parse_session_preview;
 
 use super::app::{App, Message, SessionInfo, ViewMode};
 use super::helpers::extract_ready_preview;
@@ -66,21 +69,28 @@ impl App {
             }
         }
 
-        // Apply notifications
+        // Apply notifications with conversational output
         let mut should_scroll = false;
         for (name, is_connected, preview) in notifications {
+            // Parse preview to get structured status, then convert to conversational
+            let status = parse_session_preview(&name, &preview);
+            let brief = status.to_brief();
+
             let msg = if is_connected {
-                format!("[inbox] {} is ready", name)
+                if brief.is_empty() || brief == name {
+                    format!("Session \"{}\" is ready for input", name)
+                } else {
+                    format!("Session \"{}\" is ready: {}", name, brief)
+                }
             } else {
-                format!("[inbox] @{} is ready", name)
+                if brief.is_empty() || brief == name {
+                    format!("Session \"{}\" is waiting for input", name)
+                } else {
+                    format!("Session \"{}\" ready: {}", name, brief)
+                }
             };
-            // Only add preview if it's meaningful
-            let full_msg = if preview.is_empty() {
-                msg
-            } else {
-                format!("{}: {}", msg, preview)
-            };
-            self.messages.push(Message::system(full_msg.clone()));
+
+            self.messages.push(Message::system(msg));
             should_scroll = true;
 
             // Broadcast to all channels (Telegram, etc.)
@@ -162,20 +172,30 @@ impl App {
             .cloned()
             .collect();
 
-        // Report newly waiting sessions
+        // Report newly waiting sessions with conversational output
         if !newly_waiting.is_empty() {
-            self.messages.push(Message::system(format!(
-                "[clock] {} new session(s) waiting for input:",
-                newly_waiting.len()
-            )));
+            // Conversational summary header
+            let header = if newly_waiting.len() == 1 {
+                "A session is waiting for your input:".to_string()
+            } else {
+                format!("{} sessions are waiting for your input:", newly_waiting.len())
+            };
+            self.messages.push(Message::system(header));
+
             for name in &newly_waiting {
                 let display_name = name.strip_prefix("commander-").unwrap_or(name);
                 let preview = waiting_previews.get(name).map(|s| s.as_str()).unwrap_or("");
-                self.messages.push(Message::system(format!(
-                    "   @{}{}",
-                    display_name,
-                    if preview.is_empty() { String::new() } else { format!(" - {}", preview) }
-                )));
+
+                // Parse and convert to conversational format
+                let status = parse_session_preview(display_name, preview);
+                let brief = status.to_brief();
+
+                let msg = if brief.is_empty() || brief == display_name {
+                    format!("  - \"{}\" is ready", display_name)
+                } else {
+                    format!("  - \"{}\": {}", display_name, brief)
+                };
+                self.messages.push(Message::system(msg));
             }
             self.scroll_to_bottom();
 
@@ -191,12 +211,12 @@ impl App {
             }
         }
 
-        // Report sessions that resumed work (optional, can be noisy)
+        // Report sessions that resumed work (conversational)
         if !no_longer_waiting.is_empty() && no_longer_waiting.len() <= 3 {
             for name in &no_longer_waiting {
                 let display_name = name.strip_prefix("commander-").unwrap_or(name);
                 self.messages.push(Message::system(format!(
-                    "[play] @{} resumed work",
+                    "Session \"{}\" resumed work",
                     display_name
                 )));
 

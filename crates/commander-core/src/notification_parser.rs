@@ -51,6 +51,167 @@ pub struct ParsedSessionStatus {
     pub context_usage: Option<u8>,
 }
 
+impl ParsedSessionStatus {
+    /// Convert to human-readable conversational text.
+    ///
+    /// Transforms raw session data into natural language descriptions.
+    ///
+    /// # Example
+    /// ```
+    /// use commander_core::notification_parser::ParsedSessionStatus;
+    ///
+    /// let status = ParsedSessionStatus {
+    ///     name: "izzie-33".to_string(),
+    ///     path: Some("/Users/masa/Projects/izzie2".to_string()),
+    ///     branch: Some("main".to_string()),
+    ///     git_status: Some("*?".to_string()),
+    ///     model: Some("claude-opus-4-5".to_string()),
+    ///     framework: Some("Claude MPM".to_string()),
+    ///     context_usage: Some(68),
+    /// };
+    ///
+    /// let text = status.to_conversational();
+    /// assert!(text.contains("izzie-33"));
+    /// assert!(text.contains("izzie2"));
+    /// ```
+    pub fn to_conversational(&self) -> String {
+        let mut parts = Vec::new();
+
+        // Session name
+        parts.push(format!("\"{}\"", self.name));
+
+        // Project from path
+        if let Some(ref path) = self.path {
+            let project = path.rsplit('/').next().unwrap_or(path);
+            parts.push(format!("project {}", project));
+        }
+
+        // Branch with git status
+        if let Some(ref branch) = self.branch {
+            let status_desc = self.git_status.as_ref().map_or(String::new(), |s| {
+                describe_git_status(s)
+            });
+            if status_desc.is_empty() {
+                parts.push(format!("branch {}", branch));
+            } else {
+                parts.push(format!("branch {} ({})", branch, status_desc));
+            }
+        }
+
+        // Context usage
+        if let Some(usage) = self.context_usage {
+            let context_desc = if usage >= 90 {
+                format!("{}% context (critical)", usage)
+            } else if usage >= 70 {
+                format!("{}% context (getting full)", usage)
+            } else {
+                format!("{}% context", usage)
+            };
+            parts.push(context_desc);
+        }
+
+        // Model (simplified)
+        if let Some(ref model) = self.model {
+            let model_short = simplify_model_name(model);
+            if !model_short.is_empty() {
+                parts.push(model_short);
+            }
+        }
+
+        if parts.len() == 1 {
+            format!("Session {}", parts[0])
+        } else {
+            format!("Session {}: {}", parts[0], parts[1..].join(", "))
+        }
+    }
+
+    /// Convert to a brief status line for notifications.
+    ///
+    /// Returns project name, branch info, and context usage (not session name).
+    ///
+    /// # Example
+    /// ```
+    /// use commander_core::notification_parser::ParsedSessionStatus;
+    ///
+    /// let status = ParsedSessionStatus {
+    ///     name: "izzie-33".to_string(),
+    ///     path: Some("/Users/masa/Projects/izzie2".to_string()),
+    ///     branch: Some("main".to_string()),
+    ///     git_status: Some("*".to_string()),
+    ///     model: None,
+    ///     framework: None,
+    ///     context_usage: Some(68),
+    /// };
+    ///
+    /// let brief = status.to_brief();
+    /// assert!(brief.contains("izzie2"));  // Project name from path
+    /// assert!(brief.contains("main"));    // Branch name
+    /// ```
+    pub fn to_brief(&self) -> String {
+        let project = self.path.as_ref()
+            .map(|p| p.rsplit('/').next().unwrap_or(p))
+            .unwrap_or(&self.name);
+
+        let branch_info = self.branch.as_ref().map_or(String::new(), |b| {
+            let status = self.git_status.as_ref()
+                .map(|s| if s.contains('*') || s.contains('?') { " with changes" } else { "" })
+                .unwrap_or("");
+            format!(" on {}{}", b, status)
+        });
+
+        let context = self.context_usage
+            .map(|u| format!(" ({}% ctx)", u))
+            .unwrap_or_default();
+
+        format!("{}{}{}", project, branch_info, context)
+    }
+}
+
+/// Describe git status flags in human-readable terms.
+fn describe_git_status(flags: &str) -> String {
+    let mut descriptions = Vec::new();
+
+    if flags.contains('*') {
+        descriptions.push("modified");
+    }
+    if flags.contains('?') {
+        descriptions.push("untracked files");
+    }
+    if flags.contains('+') {
+        descriptions.push("staged");
+    }
+    if flags.contains('-') {
+        descriptions.push("deleted");
+    }
+    if flags.contains('!') {
+        descriptions.push("ignored");
+    }
+
+    descriptions.join(", ")
+}
+
+/// Simplify long model names to human-friendly versions.
+fn simplify_model_name(model: &str) -> String {
+    let lower = model.to_lowercase();
+
+    if lower.contains("opus") {
+        "Claude Opus".to_string()
+    } else if lower.contains("sonnet") {
+        "Claude Sonnet".to_string()
+    } else if lower.contains("haiku") {
+        "Claude Haiku".to_string()
+    } else if lower.contains("claude") {
+        "Claude".to_string()
+    } else if lower.contains("gpt-4") {
+        "GPT-4".to_string()
+    } else if lower.contains("gpt-3") {
+        "GPT-3.5".to_string()
+    } else {
+        // Return empty for unknown models to avoid clutter
+        String::new()
+    }
+}
+
 /// Strip ANSI escape codes from a string.
 ///
 /// # Example
@@ -416,5 +577,107 @@ mod tests {
 
         // Path parsing stops at whitespace
         assert_eq!(parsed.path, Some("/path".to_string()));
+    }
+
+    #[test]
+    fn test_to_conversational_full() {
+        let status = ParsedSessionStatus {
+            name: "izzie-33".to_string(),
+            path: Some("/Users/masa/Projects/izzie2".to_string()),
+            branch: Some("main".to_string()),
+            git_status: Some("*?".to_string()),
+            model: Some("claude-opus-4-5".to_string()),
+            framework: Some("Claude MPM".to_string()),
+            context_usage: Some(68),
+        };
+
+        let text = status.to_conversational();
+        assert!(text.contains("izzie-33"), "Should contain session name");
+        assert!(text.contains("izzie2"), "Should contain project name");
+        assert!(text.contains("main"), "Should contain branch");
+        assert!(text.contains("modified"), "Should describe git status");
+        assert!(text.contains("68%"), "Should contain context usage");
+        assert!(text.contains("Opus"), "Should contain model name");
+    }
+
+    #[test]
+    fn test_to_conversational_minimal() {
+        let status = ParsedSessionStatus {
+            name: "test".to_string(),
+            path: None,
+            branch: None,
+            git_status: None,
+            model: None,
+            framework: None,
+            context_usage: None,
+        };
+
+        let text = status.to_conversational();
+        assert_eq!(text, "Session \"test\"");
+    }
+
+    #[test]
+    fn test_to_brief() {
+        let status = ParsedSessionStatus {
+            name: "izzie-33".to_string(),
+            path: Some("/Users/masa/Projects/izzie2".to_string()),
+            branch: Some("main".to_string()),
+            git_status: Some("*".to_string()),
+            model: None,
+            framework: None,
+            context_usage: Some(68),
+        };
+
+        let brief = status.to_brief();
+        assert!(brief.contains("izzie2"), "Should contain project name");
+        assert!(brief.contains("main"), "Should contain branch");
+        assert!(brief.contains("68%"), "Should contain context");
+    }
+
+    #[test]
+    fn test_describe_git_status() {
+        assert!(describe_git_status("*").contains("modified"));
+        assert!(describe_git_status("?").contains("untracked"));
+        assert!(describe_git_status("*?").contains("modified"));
+        assert!(describe_git_status("*?").contains("untracked"));
+        assert!(describe_git_status("+").contains("staged"));
+    }
+
+    #[test]
+    fn test_simplify_model_name() {
+        assert_eq!(simplify_model_name("claude-opus-4-5-20251101"), "Claude Opus");
+        assert_eq!(simplify_model_name("claude-sonnet-4-20250514"), "Claude Sonnet");
+        assert_eq!(simplify_model_name("claude-3-haiku"), "Claude Haiku");
+        assert_eq!(simplify_model_name("gpt-4-turbo"), "GPT-4");
+        assert_eq!(simplify_model_name("unknown-model"), "");
+    }
+
+    #[test]
+    fn test_context_usage_descriptions() {
+        // High context usage
+        let status = ParsedSessionStatus {
+            name: "test".to_string(),
+            path: None,
+            branch: None,
+            git_status: None,
+            model: None,
+            framework: None,
+            context_usage: Some(95),
+        };
+        let text = status.to_conversational();
+        assert!(text.contains("critical"), "95% should be critical");
+
+        // Medium-high context usage
+        let status = ParsedSessionStatus {
+            name: "test".to_string(),
+            path: None,
+            branch: None,
+            git_status: None,
+            model: None,
+            framework: None,
+            context_usage: Some(75),
+        };
+        let text = status.to_conversational();
+        assert!(text.contains("getting full"), "75% should be getting full");
     }
 }
