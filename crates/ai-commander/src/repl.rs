@@ -1429,13 +1429,21 @@ impl Repl {
 /// - Tool invocations (Edit, Read, Bash, etc.)
 /// - Current working activity
 pub fn extract_session_summary(output: &str) -> Vec<String> {
+    // Strip ANSI codes first for clean analysis
+    let clean_output = commander_core::notification_parser::strip_ansi(output);
+
     let mut summary = Vec::new();
     let mut current_task: Option<String> = None;
     let mut pending_tasks: Vec<String> = Vec::new();
     let mut recent_tools: Vec<String> = Vec::new();
 
-    for line in output.lines() {
+    for line in clean_output.lines() {
         let trimmed = line.trim();
+
+        // Skip lines that are stat line noise
+        if commander_core::output_filter::is_ui_noise(trimmed) {
+            continue;
+        }
 
         // Look for in_progress task markers
         if trimmed.contains("in_progress") || trimmed.contains("🔄") || trimmed.contains("⏳") {
