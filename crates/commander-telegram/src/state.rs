@@ -321,76 +321,117 @@ impl TelegramState {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
 
+        // Strip commander- prefix if present for consistent lookup
+        let base_name = project_name
+            .strip_prefix("commander-")
+            .unwrap_or(project_name);
+
         // Load all projects
         let projects = self
             .store
             .load_all_projects()
             .map_err(|e| TelegramError::SessionError(format!("Failed to load projects: {}", e)))?;
 
-        // Find project by name
-        let project = projects
+        // Try 1: Find registered project by name
+        if let Some(project) = projects
             .values()
-            .find(|p| p.name == project_name || p.id.as_str() == project_name)
-            .ok_or_else(|| TelegramError::ProjectNotFound(project_name.to_string()))?;
+            .find(|p| p.name == base_name || p.id.as_str() == base_name)
+        {
+            // Validate project path still exists and is accessible
+            validate_project_path(&project.path)
+                .map_err(TelegramError::SessionError)?;
 
-        // Validate project path still exists and is accessible
-        validate_project_path(&project.path)
-            .map_err(TelegramError::SessionError)?;
+            let session_name = format!("commander-{}", project.name);
 
-        let session_name = format!("commander-{}", project.name);
+            // Get tool_id from project config
+            let tool_id = project
+                .config
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .unwrap_or("claude-code")
+                .to_string();
 
-        // Get tool_id from project config
-        let tool_id = project
-            .config
-            .get("tool")
-            .and_then(|v| v.as_str())
-            .unwrap_or("claude-code")
-            .to_string();
+            // Check if tmux session exists, create if not
+            if !tmux.session_exists(&session_name) {
+                if let Some(adapter) = self.adapters.get(&tool_id) {
+                    let (cmd, cmd_args) = adapter.launch_command(&project.path);
+                    let full_cmd = if cmd_args.is_empty() {
+                        cmd
+                    } else {
+                        format!("{} {}", cmd, cmd_args.join(" "))
+                    };
 
-        // Check if tmux session exists, create if not
-        if !tmux.session_exists(&session_name) {
-            if let Some(adapter) = self.adapters.get(&tool_id) {
-                let (cmd, cmd_args) = adapter.launch_command(&project.path);
-                let full_cmd = if cmd_args.is_empty() {
-                    cmd
+                    // Create tmux session in project directory
+                    tmux.create_session_in_dir(&session_name, Some(&project.path))
+                        .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+
+                    // Send launch command
+                    tmux.send_line(&session_name, None, &full_cmd)
+                        .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+
+                    info!(
+                        project = %project.name,
+                        session = %session_name,
+                        "Started new session"
+                    );
                 } else {
-                    format!("{} {}", cmd, cmd_args.join(" "))
-                };
+                    return Err(TelegramError::SessionError(format!(
+                        "Unknown adapter: {}",
+                        tool_id
+                    )));
+                }
+            }
 
-                // Create tmux session in project directory
-                tmux.create_session_in_dir(&session_name, Some(&project.path))
-                    .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            // Create user session
+            let session = UserSession::new(
+                chat_id,
+                project.path.clone(),
+                project.name.clone(),
+                session_name,
+            );
 
-                // Send launch command
-                tmux.send_line(&session_name, None, &full_cmd)
-                    .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(chat_id.0, session);
 
-                info!(
-                    project = %project.name,
-                    session = %session_name,
-                    "Started new session"
+            debug!(chat_id = %chat_id.0, project = %project.name, "User connected");
+            return Ok((project.name.clone(), tool_id));
+        }
+
+        // Try 2: Fallback to direct tmux session lookup (unregistered sessions)
+        let session_candidates = [
+            format!("commander-{}", base_name),
+            project_name.to_string(),
+            base_name.to_string(),
+        ];
+
+        for session_name in &session_candidates {
+            if tmux.session_exists(session_name) {
+                let display_name = session_name
+                    .strip_prefix("commander-")
+                    .unwrap_or(session_name)
+                    .to_string();
+
+                let session = UserSession::new(
+                    chat_id,
+                    "unknown".to_string(), // No project path for unregistered sessions
+                    display_name.clone(),
+                    session_name.clone(),
                 );
-            } else {
-                return Err(TelegramError::SessionError(format!(
-                    "Unknown adapter: {}",
-                    tool_id
-                )));
+
+                let mut sessions = self.sessions.write().await;
+                sessions.insert(chat_id.0, session);
+
+                debug!(
+                    chat_id = %chat_id.0,
+                    session = %session_name,
+                    "User connected to unregistered tmux session"
+                );
+                return Ok((display_name, "unknown".to_string()));
             }
         }
 
-        // Create user session
-        let session = UserSession::new(
-            chat_id,
-            project.path.clone(),
-            project.name.clone(),
-            session_name,
-        );
-
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(chat_id.0, session);
-
-        debug!(chat_id = %chat_id.0, project = %project.name, "User connected");
-        Ok((project.name.clone(), tool_id))
+        // Neither registered project nor tmux session found
+        Err(TelegramError::ProjectNotFound(project_name.to_string()))
     }
 
     /// Disconnect a user from their current project.
