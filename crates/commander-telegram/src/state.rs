@@ -635,54 +635,6 @@ impl TelegramState {
     }
 
     /// Attach to an existing tmux session.
-    pub async fn attach_session(
-        &self,
-        chat_id: ChatId,
-        session_name: &str,
-    ) -> Result<String> {
-        let tmux = self.tmux.as_ref().ok_or_else(|| {
-            TelegramError::TmuxError("tmux not available".to_string())
-        })?;
-
-        // Check if session exists
-        if !tmux.session_exists(session_name) {
-            return Err(TelegramError::SessionError(
-                format!("Session '{}' not found. Use /sessions to list available sessions.", session_name)
-            ));
-        }
-
-        // Try to determine project info from session name
-        let (project_name, project_path) = if session_name.starts_with("commander-") {
-            let name = session_name.strip_prefix("commander-").unwrap_or(session_name);
-            // Try to find project in store
-            if let Ok(projects) = self.store.load_all_projects() {
-                if let Some(project) = projects.values().find(|p| p.name == name) {
-                    (project.name.clone(), project.path.clone())
-                } else {
-                    (name.to_string(), format!("~/{}", name))
-                }
-            } else {
-                (name.to_string(), format!("~/{}", name))
-            }
-        } else {
-            (session_name.to_string(), "unknown".to_string())
-        };
-
-        // Create user session
-        let session = UserSession::new(
-            chat_id,
-            project_path,
-            project_name.clone(),
-            session_name.to_string(),
-        );
-
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(chat_id.0, session);
-
-        debug!(chat_id = %chat_id.0, session = %session_name, "User attached to session");
-        Ok(session_name.to_string())
-    }
-
     /// Create and connect to a new project.
     pub async fn connect_new(
         &self,

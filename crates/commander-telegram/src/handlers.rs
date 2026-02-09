@@ -22,11 +22,8 @@ pub enum Command {
     #[command(description = "Pair with CLI using code: /pair <CODE>")]
     Pair(String),
 
-    #[command(description = "Connect to a project: /connect <name> or /connect <path> -a <adapter> -n <name>")]
+    #[command(description = "Connect to project, tmux session, or create new: /connect <name> or /connect <path> -a <adapter> -n <name>")]
     Connect(String),
-
-    #[command(description = "Attach to tmux session: /session <session_name>")]
-    Session(String),
 
     #[command(description = "List tmux sessions")]
     Sessions,
@@ -282,12 +279,13 @@ pub async fn handle_connect(
     if args.is_empty() {
         bot.send_message(
             msg.chat.id,
-            "Please specify a project.\n\n\
-            <b>Connect to existing project:</b>\n<code>/connect &lt;name&gt;</code>\n\n\
+            "Please specify a target.\n\n\
+            <b>Connect to registered project:</b>\n<code>/connect &lt;name&gt;</code>\n\n\
+            <b>Connect to tmux session:</b>\n<code>/connect &lt;session-name&gt;</code>\n\n\
             <b>Create new project:</b>\n<code>/connect &lt;path&gt; -a &lt;adapter&gt; -n &lt;name&gt;</code>\n\n\
-            <b>Attach to tmux session:</b>\nIf <code>-n</code> matches an existing tmux session, attaches to it.\n\n\
+            The command automatically detects whether the name refers to a registered project or an existing tmux session.\n\n\
             Adapters: <code>cc</code> (Claude Code), <code>mpm</code>\n\n\
-            Use /list for projects, /sessions for tmux sessions.",
+            Use /list for projects and /sessions for tmux sessions.",
         )
         .parse_mode(teloxide::types::ParseMode::Html)
         .await?;
@@ -346,26 +344,27 @@ pub async fn handle_connect(
             }
         }
         ConnectArgs::New { path, adapter, name } => {
-            // Check if name matches an existing tmux session - if so, attach to it instead
+            // Check if name matches an existing tmux session - if so, use connect() which handles fallback
             let sessions = state.list_tmux_sessions();
             if sessions.iter().any(|(s, _)| s == &name) {
-                bot.send_message(msg.chat.id, format!("Found existing session '{}', attaching...", name))
+                bot.send_message(msg.chat.id, format!("Found existing session '{}', connecting...", name))
                     .await?;
 
-                match state.attach_session(msg.chat.id, &name).await {
-                    Ok(attached_name) => {
+                match state.connect(msg.chat.id, &name).await {
+                    Ok((connected_name, tool_id)) => {
+                        let adapter_name = adapter_display_name(&tool_id);
                         bot.send_message(
                             msg.chat.id,
-                            format!("✅ Attached to existing session <code>{}</code>\n\nYou can now send messages.", attached_name),
+                            format!("✅ Connected to existing session <b>{}</b>\n\nYou can now send messages to interact with {}.", connected_name, adapter_name),
                         )
                         .parse_mode(teloxide::types::ParseMode::Html)
                         .await?;
-                        info!(chat_id = %msg.chat.id, session = %attached_name, "User attached to existing session");
+                        info!(chat_id = %msg.chat.id, session = %name, "User connected to existing session");
                     }
                     Err(e) => {
-                        bot.send_message(msg.chat.id, format!("❌ Failed to attach: {}", e))
+                        bot.send_message(msg.chat.id, format!("❌ Failed to connect: {}", e))
                             .await?;
-                        error!(chat_id = %msg.chat.id, error = %e, "Session attach failed");
+                        error!(chat_id = %msg.chat.id, error = %e, "Session connection failed");
                     }
                 }
             } else {
@@ -596,11 +595,8 @@ pub async fn handle_list(
 
     // Add usage hints
     text.push_str("\n<b>Commands:</b>\n");
-    if !projects.is_empty() {
-        text.push_str("• <code>/connect &lt;name&gt;</code> - Connect to project\n");
-    }
-    if !tmux_sessions.is_empty() {
-        text.push_str("• <code>/session &lt;name&gt;</code> - Attach to tmux session\n");
+    if !projects.is_empty() || !tmux_sessions.is_empty() {
+        text.push_str("• <code>/connect &lt;name&gt;</code> - Connect to project or session\n");
     }
 
     bot.send_message(msg.chat.id, text)
@@ -725,70 +721,11 @@ pub async fn handle_sessions(
         };
         text.push_str(&format!("{} <code>{}</code>\n", marker, name));
     }
-    text.push_str("\nUse <code>/session &lt;name&gt;</code> to attach");
+    text.push_str("\nUse <code>/connect &lt;name&gt;</code> to attach");
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(teloxide::types::ParseMode::Html)
         .await?;
-
-    Ok(())
-}
-
-/// Handle the /session command - attach to a tmux session.
-pub async fn handle_session(
-    bot: Bot,
-    msg: Message,
-    state: Arc<TelegramState>,
-    session_name: String,
-) -> ResponseResult<()> {
-    // Check authorization first
-    if !state.is_authorized(msg.chat.id.0).await {
-        bot.send_message(
-            msg.chat.id,
-            "Not authorized. Use /pair <code> first.\n\n\
-            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
-        )
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .await?;
-        return Ok(());
-    }
-
-    let session_name = session_name.trim();
-
-    if session_name.is_empty() {
-        bot.send_message(
-            msg.chat.id,
-            "Please specify a session name.\n\nUsage: <code>/session &lt;name&gt;</code>\n\nUse /sessions to list available sessions.",
-        )
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .await?;
-        return Ok(());
-    }
-
-    // Disconnect from current if connected
-    if state.has_session(msg.chat.id).await {
-        let _ = state.disconnect(msg.chat.id).await;
-    }
-
-    bot.send_message(msg.chat.id, format!("Attaching to session {}...", session_name))
-        .await?;
-
-    match state.attach_session(msg.chat.id, session_name).await {
-        Ok(attached_name) => {
-            bot.send_message(
-                msg.chat.id,
-                format!("✅ Attached to <code>{}</code>\n\nYou can now send messages.", attached_name),
-            )
-            .parse_mode(teloxide::types::ParseMode::Html)
-            .await?;
-            info!(chat_id = %msg.chat.id, session = %attached_name, "User attached to session");
-        }
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("❌ Failed to attach: {}", e))
-                .await?;
-            error!(chat_id = %msg.chat.id, error = %e, "Session attach failed");
-        }
-    }
 
     Ok(())
 }
@@ -1071,7 +1008,6 @@ pub async fn handle_command(
         Command::Help => handle_help(bot, msg).await,
         Command::Pair(code) => handle_pair(bot, msg, state, code).await,
         Command::Connect(project) => handle_connect(bot, msg, state, project).await,
-        Command::Session(session) => handle_session(bot, msg, state, session).await,
         Command::Sessions => handle_sessions(bot, msg, state).await,
         Command::Disconnect => handle_disconnect(bot, msg, state).await,
         Command::Stop(session) => handle_stop(bot, msg, state, session).await,
