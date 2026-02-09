@@ -41,10 +41,14 @@ impl App {
             // Check if tmux session exists
             if let Some(ref tmux) = self.tmux {
                 if tmux.session_exists(&session_name) {
-                    self.sessions.insert(project.name.clone(), session_name);
+                    self.sessions.insert(project.name.clone(), session_name.clone());
                     self.project = Some(project.name.clone());
                     self.project_path = Some(project.path.clone());
-                    self.messages.push(Message::system(format!("[C] Connected to '{}'", project.name)));
+                    // Detect adapter type for display
+                    let adapter = tmux.capture_output(&session_name, None, Some(50))
+                        .map(|output| commander_core::detect_adapter(&output))
+                        .unwrap_or(commander_core::Adapter::Unknown);
+                    self.messages.push(Message::system(format!("{} Connected to '{}'", adapter.indicator(), project.name)));
                     return Ok(());
                 }
 
@@ -71,10 +75,11 @@ impl App {
                         return Err(format!("Failed to start adapter: {}", e));
                     }
 
-                    self.sessions.insert(project.name.clone(), session_name);
+                    self.sessions.insert(project.name.clone(), session_name.clone());
                     self.project = Some(project.name.clone());
                     self.project_path = Some(project.path.clone());
-                    self.messages.push(Message::system(format!("[C] Started and connected to '{}'", project.name)));
+                    // New session likely Claude adapter (just started an adapter)
+                    self.messages.push(Message::system(format!("[Claude] Started and connected to '{}'", project.name)));
                     return Ok(());
                 }
             }
@@ -93,28 +98,21 @@ impl App {
 
             for session_name in session_candidates {
                 if tmux.session_exists(&session_name) {
-                    // Connect to regular/unregistered tmux session
-                    let is_commander = session_name.starts_with("commander-");
-                    let display_name = if is_commander {
-                        session_name.strip_prefix("commander-").unwrap_or(&session_name)
-                    } else {
-                        &session_name
-                    };
+                    // Connect to tmux session (registered or not)
+                    let display_name = session_name.strip_prefix("commander-")
+                        .unwrap_or(&session_name);
+
+                    // Detect adapter type from screen content
+                    let adapter = tmux.capture_output(&session_name, None, Some(50))
+                        .map(|output| commander_core::detect_adapter(&output))
+                        .unwrap_or(commander_core::Adapter::Unknown);
+
                     self.sessions.insert(display_name.to_string(), session_name.clone());
                     self.project = Some(display_name.to_string());
                     self.project_path = None;
-                    if is_commander {
-                        self.messages.push(Message::system(
-                            format!("[C] Connected to session '{}' (unregistered project)", display_name)
-                        ));
-                    } else {
-                        self.messages.push(Message::system(
-                            format!("[R] Connected to regular session '{}'", session_name)
-                        ));
-                        self.messages.push(Message::system(
-                            "    Note: This session is not managed by Commander. Some features may be limited."
-                        ));
-                    }
+                    self.messages.push(Message::system(
+                        format!("{} Connected to '{}'", adapter.indicator(), display_name)
+                    ));
                     return Ok(());
                 }
             }
