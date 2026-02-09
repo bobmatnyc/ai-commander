@@ -116,13 +116,9 @@ impl App {
                         // Get activity summary for this session (now works for all types)
                         let activity = self.get_session_activity(&session.name, &adapter);
 
-                        // Display name: strip commander- prefix for cleaner output
-                        let display_name = session.name.strip_prefix("commander-")
-                            .unwrap_or(&session.name);
-
                         self.messages.push(Message::system(format!(
                             "  {} {}{} - {}",
-                            indicator, display_name, connected_marker, activity
+                            indicator, session.name, connected_marker, activity
                         )));
                     }
                 }
