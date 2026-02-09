@@ -94,8 +94,8 @@ pub enum ViewMode {
 pub struct SessionInfo {
     /// Session name
     pub name: String,
-    /// Whether this is a commander-managed session
-    pub is_commander: bool,
+    /// Detected adapter type from screen content
+    pub adapter: commander_core::Adapter,
     /// Whether this session is currently connected
     pub is_connected: bool,
 }
@@ -322,10 +322,10 @@ mod tests {
     fn test_session_info() {
         let session = SessionInfo {
             name: "commander-test".to_string(),
-            is_commander: true,
+            adapter: commander_core::Adapter::Claude,
             is_connected: false,
         };
-        assert!(session.is_commander);
+        assert_eq!(session.adapter, commander_core::Adapter::Claude);
         assert!(!session.is_connected);
     }
 
@@ -338,17 +338,17 @@ mod tests {
         app.session_list = vec![
             SessionInfo {
                 name: "commander-proj1".to_string(),
-                is_commander: true,
+                adapter: commander_core::Adapter::Claude,
                 is_connected: false,
             },
             SessionInfo {
                 name: "commander-proj2".to_string(),
-                is_commander: true,
+                adapter: commander_core::Adapter::Claude,
                 is_connected: true,
             },
             SessionInfo {
                 name: "other-session".to_string(),
-                is_commander: false,
+                adapter: commander_core::Adapter::Shell,
                 is_connected: false,
             },
         ];

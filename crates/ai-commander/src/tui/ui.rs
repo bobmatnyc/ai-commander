@@ -131,12 +131,12 @@ fn draw_sessions(frame: &mut Frame, app: &App) {
 }
 
 /// Format a session list item.
-/// Uses [C] for Commander-managed sessions and [R] for regular tmux sessions.
+/// Uses [Claude], [Shell], or [?] based on detected adapter type.
 fn format_session_item(index: usize, session: &SessionInfo, selected: usize) -> ListItem<'static> {
     let marker = if index == selected { ">" } else { " " };
 
-    // Type indicator: [C] = Commander-managed, [R] = Regular tmux
-    let type_indicator = if session.is_commander { "[C]" } else { "[R]" };
+    // Type indicator based on detected adapter
+    let type_indicator = session.adapter.indicator();
 
     // Status indicator
     let status = if session.is_connected {
@@ -145,20 +145,27 @@ fn format_session_item(index: usize, session: &SessionInfo, selected: usize) -> 
         ""
     };
 
+    // Display name: strip commander- prefix for cleaner output
+    let display_name = session.name.strip_prefix("commander-")
+        .unwrap_or(&session.name);
+
     let style = if index == selected {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else if session.is_connected {
         Style::default().fg(Color::Green)
-    } else if !session.is_commander {
-        Style::default().fg(Color::DarkGray)
     } else {
-        Style::default()
+        // Color by adapter type
+        match session.adapter {
+            commander_core::Adapter::Claude => Style::default().fg(Color::Cyan),
+            commander_core::Adapter::Shell => Style::default(),
+            commander_core::Adapter::Unknown => Style::default().fg(Color::DarkGray),
+        }
     };
 
     let text = if status.is_empty() {
-        format!("  {} {} {}", marker, type_indicator, session.name)
+        format!("  {} {} {}", marker, type_indicator, display_name)
     } else {
-        format!("  {} {} {:<30} {}", marker, type_indicator, session.name, status)
+        format!("  {} {} {:<30} {}", marker, type_indicator, display_name, status)
     };
 
     ListItem::new(text).style(style)

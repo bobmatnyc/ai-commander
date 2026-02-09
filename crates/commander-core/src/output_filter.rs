@@ -1,9 +1,33 @@
 //! Output filtering utilities for Claude Code and other adapters.
 //!
 //! Provides functions to filter UI noise from terminal output, detect when
-//! Claude Code is ready for input, and find new lines in output.
+//! Claude Code is ready for input, find new lines in output, and detect
+//! adapter type from screen content.
 
 use std::collections::HashSet;
+
+/// Type of adapter detected from screen content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Adapter {
+    /// Claude Code or similar AI assistant
+    Claude,
+    /// Plain shell (bash, zsh, etc.)
+    Shell,
+    /// Unable to determine
+    #[default]
+    Unknown,
+}
+
+impl Adapter {
+    /// Returns the display indicator for this adapter type.
+    pub fn indicator(&self) -> &'static str {
+        match self {
+            Adapter::Claude => "[Claude]",
+            Adapter::Shell => "[Shell]",
+            Adapter::Unknown => "[?]",
+        }
+    }
+}
 
 /// Spinner characters that indicate processing activity.
 const SPINNER_CHARS: [char; 13] = [
@@ -212,6 +236,113 @@ pub fn is_claude_ready(output: &str) -> bool {
     has_ready_indicator || has_bypass_hint
 }
 
+/// Detect the adapter type from screen content.
+///
+/// Examines the output to determine if this is a Claude Code session,
+/// a plain shell, or unknown.
+///
+/// Claude Code indicators:
+/// - Prompt character ❯
+/// - Model info patterns (opus, sonnet, claude)
+/// - Claude Code UI elements (box drawing, branding)
+/// - MCP tool invocations
+///
+/// Shell indicators:
+/// - Common shell prompts ($, %, #)
+/// - Shell-specific patterns (PS1, command output)
+pub fn detect_adapter(output: &str) -> Adapter {
+    // Get the last several non-empty lines for analysis
+    let lines: Vec<&str> = output
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(20)
+        .collect();
+
+    if lines.is_empty() {
+        return Adapter::Unknown;
+    }
+
+    // Score-based detection
+    let mut claude_score = 0;
+    let mut shell_score = 0;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        let lower = trimmed.to_lowercase();
+
+        // Claude Code indicators (strong)
+        if trimmed.contains('\u{276F}') {  // ❯ prompt
+            claude_score += 3;
+        }
+        if lower.contains("claude") || lower.contains("opus") || lower.contains("sonnet") {
+            claude_score += 2;
+        }
+        if trimmed.contains("(MCP)") || trimmed.contains("(Bash)") && trimmed.contains("⏺") {
+            claude_score += 2;
+        }
+        if trimmed.contains("bypass permissions") {
+            claude_score += 3;
+        }
+
+        // Claude Code UI elements
+        if trimmed.starts_with('\u{256D}') || trimmed.starts_with('\u{2570}')  // ╭ ╰
+            || trimmed.starts_with('\u{2502}')  // │
+        {
+            claude_score += 1;
+        }
+
+        // Claude branding patterns
+        if trimmed.contains("\u{2590}\u{259B}") || trimmed.contains("\u{259C}\u{258C}") {
+            claude_score += 3;
+        }
+
+        // Shell indicators (strong)
+        // Look for typical shell prompts at end of line
+        if trimmed.ends_with("$ ") || trimmed.ends_with("$") {
+            shell_score += 3;
+        }
+        if trimmed.ends_with("% ") || trimmed.ends_with("%") {
+            shell_score += 3;
+        }
+        if trimmed.ends_with("# ") || trimmed.ends_with("#") {
+            // Root prompt - strong shell indicator
+            shell_score += 3;
+        }
+
+        // Common shell prompt patterns
+        // user@host:path$ or user@host:path%
+        if (trimmed.contains("@") && trimmed.contains(":"))
+            && (trimmed.ends_with("$") || trimmed.ends_with("%") || trimmed.ends_with("$ ") || trimmed.ends_with("% "))
+        {
+            shell_score += 2;
+        }
+
+        // Shell command output patterns
+        if lower.starts_with("total ") && lower.contains("drwx") {
+            // ls -l output
+            shell_score += 2;
+        }
+        if trimmed.starts_with("-rw") || trimmed.starts_with("drwx") {
+            shell_score += 1;
+        }
+    }
+
+    // Determine winner
+    if claude_score > shell_score && claude_score >= 2 {
+        Adapter::Claude
+    } else if shell_score > claude_score && shell_score >= 2 {
+        Adapter::Shell
+    } else if claude_score > 0 {
+        // Slight preference for Claude if any indicators found
+        Adapter::Claude
+    } else if shell_score > 0 {
+        Adapter::Shell
+    } else {
+        Adapter::Unknown
+    }
+}
+
 /// Find new lines in tmux output by comparing previous and current captures.
 ///
 /// Returns lines that appear in `current` but not in `prev`, filtering out
@@ -389,5 +520,54 @@ mod tests {
         assert!(!is_ui_noise("Progress: 50%"));
         // But pattern with pipe and bracket should be
         assert!(is_ui_noise("Something|50%]"));
+    }
+
+    #[test]
+    fn test_detect_adapter_claude() {
+        // Claude Code prompt
+        assert_eq!(detect_adapter("\u{276F}"), Adapter::Claude);
+        assert_eq!(detect_adapter("path/to/dir \u{276F}"), Adapter::Claude);
+
+        // Claude Code with model info
+        assert_eq!(detect_adapter("Using Claude Opus 4.5\n\u{276F}"), Adapter::Claude);
+
+        // Claude Code UI elements
+        assert_eq!(detect_adapter("\u{256D}\u{2500}\u{2500}\u{2500}\n\u{2502} \u{276F}\n\u{2570}\u{2500}\u{2500}\u{2500}"), Adapter::Claude);
+    }
+
+    #[test]
+    fn test_detect_adapter_shell() {
+        // Bash prompt
+        assert_eq!(detect_adapter("user@host:~$ "), Adapter::Shell);
+        assert_eq!(detect_adapter("$ "), Adapter::Shell);
+
+        // Zsh prompt
+        assert_eq!(detect_adapter("user@host % "), Adapter::Shell);
+        assert_eq!(detect_adapter("% "), Adapter::Shell);
+
+        // Root prompt
+        assert_eq!(detect_adapter("root@host:~# "), Adapter::Shell);
+
+        // ls output
+        assert_eq!(detect_adapter("total 48\ndrwxr-xr-x  2 user user 4096 Jan  1 00:00 dir\nuser@host:~$ "), Adapter::Shell);
+    }
+
+    #[test]
+    fn test_detect_adapter_unknown() {
+        // Empty output
+        assert_eq!(detect_adapter(""), Adapter::Unknown);
+
+        // Just whitespace
+        assert_eq!(detect_adapter("   \n   \n"), Adapter::Unknown);
+
+        // Generic text
+        assert_eq!(detect_adapter("Hello world"), Adapter::Unknown);
+    }
+
+    #[test]
+    fn test_adapter_indicator() {
+        assert_eq!(Adapter::Claude.indicator(), "[Claude]");
+        assert_eq!(Adapter::Shell.indicator(), "[Shell]");
+        assert_eq!(Adapter::Unknown.indicator(), "[?]");
     }
 }

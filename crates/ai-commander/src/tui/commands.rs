@@ -17,9 +17,9 @@ impl App {
                 self.messages.push(Message::system("=== TUI Commands ==="));
                 self.messages.push(Message::system("  /connect <name>                    Connect to project or tmux session"));
                 self.messages.push(Message::system("  /connect <path> -a <adapter> -n <name>  Start new project"));
-                self.messages.push(Message::system("    Note: [C] = Commander-managed, [R] = Regular tmux session"));
                 self.messages.push(Message::system("  /disconnect                        Disconnect from project"));
                 self.messages.push(Message::system("  /list                              List sessions with activity"));
+                self.messages.push(Message::system("    Indicators: [Claude] AI session, [Shell] plain shell, [?] unknown"));
                 self.messages.push(Message::system("  /status [name]                     Show project status"));
                 self.messages.push(Message::system("  /sessions                          Session picker (F3)"));
                 self.messages.push(Message::system("  /inspect                           Toggle inspect mode (F2)"));
@@ -92,20 +92,29 @@ impl App {
                 self.disconnect();
             }
             "list" | "ls" | "l" => {
-                let tmux_sessions = self.tmux.as_ref().and_then(|t| t.list_sessions().ok());
+                let Some(tmux) = &self.tmux else {
+                    self.messages.push(Message::system("Tmux not available."));
+                    return;
+                };
+
+                let tmux_sessions = tmux.list_sessions().ok();
 
                 if tmux_sessions.as_ref().map_or(true, |s| s.is_empty()) {
                     self.messages.push(Message::system("No sessions found."));
                 } else if let Some(sessions) = tmux_sessions {
                     self.messages.push(Message::system("Sessions:"));
                     for session in &sessions {
-                        let is_commander = session.name.starts_with("commander-");
                         let is_connected = self.sessions.values().any(|n| n == &session.name);
-                        let type_indicator = if is_commander { "[C]" } else { "[R]" };
                         let connected_marker = if is_connected { " (connected)" } else { "" };
 
-                        // Get activity summary for this session
-                        let activity = self.get_session_activity(&session.name, is_commander);
+                        // Detect adapter type from screen content
+                        let adapter = tmux.capture_output(&session.name, None, Some(50))
+                            .map(|output| commander_core::detect_adapter(&output))
+                            .unwrap_or(commander_core::Adapter::Unknown);
+                        let indicator = adapter.indicator();
+
+                        // Get activity summary for this session (now works for all types)
+                        let activity = self.get_session_activity(&session.name, &adapter);
 
                         // Display name: strip commander- prefix for cleaner output
                         let display_name = session.name.strip_prefix("commander-")
@@ -113,7 +122,7 @@ impl App {
 
                         self.messages.push(Message::system(format!(
                             "  {} {}{} - {}",
-                            type_indicator, display_name, connected_marker, activity
+                            indicator, display_name, connected_marker, activity
                         )));
                     }
                 }
@@ -403,13 +412,10 @@ impl App {
 
     /// Get activity summary for a session.
     ///
-    /// For Commander-managed sessions, captures output and extracts a brief status.
-    /// For regular tmux sessions, indicates no activity tracking.
-    fn get_session_activity(&self, session_name: &str, is_commander: bool) -> String {
-        if !is_commander {
-            return "(regular tmux, no activity tracking)".to_string();
-        }
-
+    /// Works for all session types:
+    /// - Claude sessions: extracts task status, waiting state, etc.
+    /// - Shell sessions: shows current directory, last command, or running process
+    fn get_session_activity(&self, session_name: &str, adapter: &commander_core::Adapter) -> String {
         let Some(tmux) = &self.tmux else {
             return "Idle".to_string();
         };
@@ -420,29 +426,99 @@ impl App {
             Err(_) => return "Unable to read session".to_string(),
         };
 
-        // First check if Claude is ready for input
-        let is_ready = commander_core::is_claude_ready(&output);
+        match adapter {
+            commander_core::Adapter::Claude => {
+                // Claude Code session - use existing logic
+                let is_ready = commander_core::is_claude_ready(&output);
 
-        // Try to extract session summary from deterministic patterns first
-        let summary = crate::repl::extract_session_summary(&output);
-        if !summary.is_empty() {
-            // Use the first summary line, truncated
-            return truncate_preview(&summary[0], 50);
-        }
+                // Try to extract session summary from deterministic patterns first
+                let summary = crate::repl::extract_session_summary(&output);
+                if !summary.is_empty() {
+                    return truncate_preview(&summary[0], 50);
+                }
 
-        // For session list, use a simpler fallback (LLM calls would be too slow for list)
-        // But if there's a clear ready preview, show it
-        if is_ready {
-            let preview = super::helpers::extract_ready_preview(&output);
-            if !preview.is_empty() && preview.len() < 60 {
-                return format!("Waiting ({})", truncate_preview(&preview, 40));
+                if is_ready {
+                    let preview = super::helpers::extract_ready_preview(&output);
+                    if !preview.is_empty() && preview.len() < 60 {
+                        return format!("Waiting ({})", truncate_preview(&preview, 40));
+                    }
+                    return "Waiting for input".to_string();
+                }
+
+                "Processing...".to_string()
             }
-            return "Waiting for input".to_string();
+            commander_core::Adapter::Shell => {
+                // Shell session - extract useful info from output
+                extract_shell_activity(&output)
+            }
+            commander_core::Adapter::Unknown => {
+                "Active".to_string()
+            }
+        }
+    }
+}
+
+/// Extract activity summary for a shell session.
+///
+/// Looks for:
+/// - Current directory from prompt
+/// - Last command if visible
+/// - Running process indicators
+fn extract_shell_activity(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(10)
+        .collect();
+
+    if lines.is_empty() {
+        return "Idle".to_string();
+    }
+
+    // Look for prompt line to extract current directory
+    for line in &lines {
+        let trimmed = line.trim();
+
+        // Pattern: user@host:~/path$
+        if let Some(colon_pos) = trimmed.find(':') {
+            if trimmed.ends_with('$') || trimmed.ends_with("$ ") {
+                let path_part = &trimmed[colon_pos + 1..];
+                let path = path_part.trim_end_matches('$').trim_end_matches("$ ").trim();
+                if !path.is_empty() && path.len() < 50 {
+                    return format!("In: {}", path);
+                }
+            }
         }
 
-        // Fallback: session is active but we can't determine specific activity
-        "Processing...".to_string()
+        // Pattern: ~/path $ or /path $
+        if (trimmed.starts_with('~') || trimmed.starts_with('/'))
+            && (trimmed.ends_with('$') || trimmed.ends_with("$ "))
+        {
+            let path = trimmed.trim_end_matches('$').trim_end_matches("$ ").trim();
+            if !path.is_empty() && path.len() < 50 {
+                return format!("In: {}", path);
+            }
+        }
     }
+
+    // Look for running commands (common patterns)
+    for line in &lines {
+        let lower = line.to_lowercase();
+
+        // Common running process indicators
+        if lower.contains("running") || lower.contains("installing") {
+            return truncate_preview(line.trim(), 50);
+        }
+
+        // npm/yarn/cargo/git operations
+        if lower.starts_with("npm ") || lower.starts_with("yarn ") {
+            return format!("Running: {}", truncate_preview(line.trim(), 40));
+        }
+        if lower.starts_with("cargo ") || lower.starts_with("git ") {
+            return format!("Running: {}", truncate_preview(line.trim(), 40));
+        }
+    }
+
+    "Active".to_string()
 }
 
 /// Truncate a preview string to fit in the list display.

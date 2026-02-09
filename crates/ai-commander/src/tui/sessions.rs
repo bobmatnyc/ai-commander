@@ -246,11 +246,14 @@ impl App {
         if let Some(tmux) = &self.tmux {
             if let Ok(sessions) = tmux.list_sessions() {
                 self.session_list = sessions.iter().map(|s| {
-                    let is_commander = s.name.starts_with("commander-");
                     let is_connected = self.sessions.values().any(|n| n == &s.name);
+                    // Detect adapter type from screen content
+                    let adapter = tmux.capture_output(&s.name, None, Some(50))
+                        .map(|output| commander_core::detect_adapter(&output))
+                        .unwrap_or(commander_core::Adapter::Unknown);
                     SessionInfo {
                         name: s.name.clone(),
-                        is_commander,
+                        adapter,
                         is_connected,
                     }
                 }).collect();
@@ -275,34 +278,26 @@ impl App {
     /// Connect to the currently selected session.
     pub fn connect_selected_session(&mut self) {
         if let Some(session) = self.session_list.get(self.session_selected) {
-            if session.is_commander {
-                // Extract project name from "commander-{name}"
-                let project_name = session.name.strip_prefix("commander-")
-                    .unwrap_or(&session.name).to_string();
+            // Extract display name (strip commander- prefix if present)
+            let display_name = session.name.strip_prefix("commander-")
+                .unwrap_or(&session.name).to_string();
 
-                // Look up project path
-                let path = self.store.load_all_projects().ok()
-                    .and_then(|projects| {
-                        projects.values()
-                            .find(|p| p.name == project_name)
-                            .map(|p| p.path.clone())
-                    });
+            // Look up project path if this is a registered project
+            let path = self.store.load_all_projects().ok()
+                .and_then(|projects| {
+                    projects.values()
+                        .find(|p| p.name == display_name)
+                        .map(|p| p.path.clone())
+                });
 
-                self.sessions.insert(project_name.clone(), session.name.clone());
-                self.project = Some(project_name.clone());
-                self.project_path = path;
-                self.messages.push(Message::system(format!("[C] Connected to '{}'", project_name)));
-                self.view_mode = ViewMode::Normal;
-            } else {
-                // Connect to regular tmux session (use session name as project name)
-                let project_name = session.name.clone();
-                self.sessions.insert(project_name.clone(), session.name.clone());
-                self.project = Some(project_name.clone());
-                self.project_path = None;  // No project path for regular sessions
-                self.messages.push(Message::system(format!("[R] Connected to regular session '{}'", project_name)));
-                self.messages.push(Message::system("    Note: This session is not managed by Commander. Some features may be limited."));
-                self.view_mode = ViewMode::Normal;
-            }
+            self.sessions.insert(display_name.clone(), session.name.clone());
+            self.project = Some(display_name.clone());
+            self.project_path = path;
+
+            // Show connection message with adapter type
+            let indicator = session.adapter.indicator();
+            self.messages.push(Message::system(format!("{} Connected to '{}'", indicator, display_name)));
+            self.view_mode = ViewMode::Normal;
         }
     }
 
