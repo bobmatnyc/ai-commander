@@ -508,6 +508,42 @@ impl TelegramState {
         Ok(())
     }
 
+    /// Send a message directly to the session without LLM interpretation.
+    ///
+    /// This bypasses the orchestrator and sends the message exactly as provided,
+    /// useful for sending commands that shouldn't be interpreted by the AI.
+    pub async fn send_message_direct(&self, chat_id: ChatId, message: &str, message_id: Option<MessageId>) -> Result<()> {
+        let tmux = self.tmux.as_ref().ok_or_else(|| {
+            TelegramError::TmuxError("tmux not available".to_string())
+        })?;
+
+        let mut sessions = self.sessions.write().await;
+        let session = sessions
+            .get_mut(&chat_id.0)
+            .ok_or(TelegramError::NotConnected)?;
+
+        // Capture initial output for comparison
+        let last_output = tmux
+            .capture_output(&session.tmux_session, None, Some(200))
+            .unwrap_or_default();
+
+        // Send message directly without orchestrator processing
+        tmux.send_line(&session.tmux_session, None, message)
+            .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+
+        // Start response collection with message ID for reply threading
+        session.start_response_collection(message, last_output, message_id);
+
+        debug!(
+            chat_id = %chat_id.0,
+            project = %session.project_name,
+            message = %message,
+            "Message sent directly to project (bypassing LLM)"
+        );
+
+        Ok(())
+    }
+
     /// Poll for new output from a user's project.
     /// Returns Some((response, message_id)) when idle and response is ready, None otherwise.
     pub async fn poll_output(&self, chat_id: ChatId) -> Result<Option<(String, Option<MessageId>)>> {
