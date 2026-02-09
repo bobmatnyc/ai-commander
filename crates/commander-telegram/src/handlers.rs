@@ -446,7 +446,7 @@ pub async fn handle_status(
     {
         let adapter_name = adapter_display_name(&tool_id);
 
-        // Build activity section
+        // Build activity section with LLM interpretation
         let activity = if is_waiting {
             if let Some(query) = pending_query {
                 // Truncate long queries
@@ -463,18 +463,38 @@ pub async fn handle_status(
                 "🔄 Activity: Processing...".to_string()
             }
         } else {
-            "💤 Activity: Idle (ready for commands)".to_string()
+            // Session is idle - try to interpret what it's showing
+            if let Some(ref preview) = screen_preview {
+                if !preview.is_empty() {
+                    // Use LLM to interpret screen context
+                    if let Some(interpretation) = commander_core::interpret_screen_context(preview, true) {
+                        format!("💤 Activity: {}", html_escape(&interpretation))
+                    } else {
+                        "💤 Activity: Idle (ready for commands)".to_string()
+                    }
+                } else {
+                    "💤 Activity: Idle (ready for commands)".to_string()
+                }
+            } else {
+                "💤 Activity: Idle (ready for commands)".to_string()
+            }
         };
 
-        // Build screen preview section
+        // Build screen preview section (only if LLM interpretation failed or is disabled)
         let screen_section = if let Some(preview) = screen_preview {
             if preview.is_empty() {
                 String::new()
             } else {
-                format!(
-                    "\n\n📺 Screen:\n<pre>{}</pre>",
-                    html_escape(&preview)
-                )
+                // Only show raw screen if LLM interpretation is not available
+                if !commander_core::is_summarization_available() {
+                    format!(
+                        "\n\n📺 Screen:\n<pre>{}</pre>",
+                        html_escape(&preview)
+                    )
+                } else {
+                    // LLM available - interpretation is in activity section
+                    String::new()
+                }
             }
         } else {
             String::new()
