@@ -145,10 +145,6 @@ fn format_session_item(index: usize, session: &SessionInfo, selected: usize) -> 
         ""
     };
 
-    // Display name: strip commander- prefix for cleaner output
-    let display_name = session.name.strip_prefix("commander-")
-        .unwrap_or(&session.name);
-
     let style = if index == selected {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else if session.is_connected {
@@ -163,9 +159,9 @@ fn format_session_item(index: usize, session: &SessionInfo, selected: usize) -> 
     };
 
     let text = if status.is_empty() {
-        format!("  {} {} {}", marker, type_indicator, display_name)
+        format!("  {} {} {}", marker, type_indicator, session.name)
     } else {
-        format!("  {} {} {:<30} {}", marker, type_indicator, display_name, status)
+        format!("  {} {} {:<30} {}", marker, type_indicator, session.name, status)
     };
 
     ListItem::new(text).style(style)
