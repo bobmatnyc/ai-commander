@@ -37,7 +37,7 @@ pub enum Command {
     #[command(description = "Stop session (commits changes, ends tmux): /stop [session]")]
     Stop(String),
 
-    #[command(description = "Send message to session (for messages starting with /): /send <message>")]
+    #[command(description = "Send message directly to session (bypasses AI interpretation): /send <message>")]
     Send(String),
 
     #[command(description = "Show current connection status")]
@@ -984,7 +984,7 @@ async fn check_and_commit_changes(
     Ok(Some(commit_msg))
 }
 
-/// Handle the /send command - explicitly send a message to the session.
+/// Handle the /send command - send a message directly to the session without LLM interpretation.
 pub async fn handle_send(
     bot: Bot,
     msg: Message,
@@ -998,8 +998,12 @@ pub async fn handle_send(
             msg.chat.id,
             "Please provide a message to send.\n\n\
             <b>Usage:</b> <code>/send &lt;message&gt;</code>\n\n\
-            Use this to send messages that start with / to the session\n\
-            (e.g., <code>/send /help</code> sends \"/help\" to Claude Code).",
+            <b>What's the difference?</b>\n\
+            • Regular messages are interpreted by the commander AI\n\
+            • <code>/send</code> bypasses AI and sends directly to the session\n\n\
+            <b>Examples:</b>\n\
+            • <code>/send /help</code> - Send \"/help\" to Claude Code\n\
+            • <code>/send cd ..</code> - Navigate without AI interpretation",
         )
         .parse_mode(teloxide::types::ParseMode::Html)
         .await?;
@@ -1020,10 +1024,10 @@ pub async fn handle_send(
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await?;
 
-    // Send the message
-    match state.send_message(msg.chat.id, message, Some(msg.id)).await {
+    // Send the message directly without LLM interpretation
+    match state.send_message_direct(msg.chat.id, message, Some(msg.id)).await {
         Ok(()) => {
-            debug!(chat_id = %msg.chat.id, message = %message, "Message sent via /send");
+            debug!(chat_id = %msg.chat.id, message = %message, "Message sent via /send (direct, no LLM)");
         }
         Err(e) => {
             bot.send_message(msg.chat.id, format!("Failed to send: {}", e))

@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use teloxide::types::ChatId;
+use teloxide::types::{ChatId, MessageId};
 
 /// A user's session with a connected project.
 #[derive(Debug)]
@@ -25,6 +25,8 @@ pub struct UserSession {
     pub pending_query: Option<String>,
     /// Whether we're currently waiting for a response.
     pub is_waiting: bool,
+    /// Message ID of the user's pending query (for reply threading).
+    pub pending_message_id: Option<MessageId>,
 }
 
 impl UserSession {
@@ -45,6 +47,7 @@ impl UserSession {
             last_output: String::new(),
             pending_query: None,
             is_waiting: false,
+            pending_message_id: None,
         }
     }
 
@@ -54,15 +57,17 @@ impl UserSession {
         self.last_output_time = None;
         self.pending_query = None;
         self.is_waiting = false;
+        self.pending_message_id = None;
     }
 
     /// Start collecting a response for a query.
-    pub fn start_response_collection(&mut self, query: &str, current_output: String) {
+    pub fn start_response_collection(&mut self, query: &str, current_output: String, message_id: Option<MessageId>) {
         self.response_buffer.clear();
         self.last_output = current_output;
         self.last_output_time = Some(Instant::now());
         self.pending_query = Some(query.to_string());
         self.is_waiting = true;
+        self.pending_message_id = message_id;
     }
 
     /// Add new lines to the response buffer.
@@ -119,9 +124,10 @@ mod tests {
             "session".to_string(),
         );
 
-        session.start_response_collection("hello", "initial output".to_string());
+        session.start_response_collection("hello", "initial output".to_string(), Some(MessageId(42)));
         assert!(session.is_waiting);
         assert_eq!(session.pending_query, Some("hello".to_string()));
+        assert_eq!(session.pending_message_id, Some(MessageId(42)));
 
         session.add_response_lines(vec!["line 1".to_string(), "line 2".to_string()]);
         assert_eq!(session.response_buffer.len(), 2);
