@@ -27,6 +27,18 @@ Rules:
 - Use natural language, not bullet points unless listing multiple items
 - Never say "Claude Code" or mention the underlying tool"#;
 
+/// System prompt for incremental summaries (briefer than final summaries).
+const INCREMENTAL_SYSTEM_PROMPT: &str = r#"You are providing a brief progress summary for Commander.
+Your job is to summarize what has been done SO FAR in the current output stream.
+
+Rules:
+- Be VERY concise (2-3 sentences maximum)
+- Focus on key findings, progress, and notable patterns
+- Say "Found X..." or "Analyzed Y..." or "Completed Z..."
+- Skip details - just highlight what's happening
+- Use natural language, no bullet points
+- Never mention "Claude Code" or the underlying tool"#;
+
 /// Errors that can occur during summarization.
 #[derive(Error, Debug)]
 pub enum SummarizerError {
@@ -192,6 +204,65 @@ pub fn summarize_blocking_with_fallback(query: &str, raw_response: &str) -> Stri
         Ok(summary) => summary,
         Err(_) => clean_response(raw_response),
     }
+}
+
+/// Generate an incremental summary of output collected so far.
+///
+/// This is briefer than a full summary and focuses on progress/findings.
+/// Used for sending periodic updates during long-running operations.
+///
+/// # Arguments
+/// * `content` - The content collected so far
+/// * `line_count` - Number of lines collected (for the summary header)
+///
+/// # Returns
+/// A brief summary prefixed with "📊 Incremental Summary (N lines):"
+pub async fn summarize_incremental(content: &str, line_count: usize) -> Result<String, SummarizerError> {
+    let Some(api_key) = get_api_key() else {
+        // Fallback when no API key available
+        return Ok(format!(
+            "📊 Incremental Summary ({} lines):\nCollecting output... {} lines captured so far.",
+            line_count, line_count
+        ));
+    };
+
+    let model = get_model();
+
+    let user_prompt = format!(
+        "Output collected so far ({} lines):\n{}\n\nProvide a brief summary of progress and key findings:",
+        line_count, content
+    );
+
+    let request_body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": INCREMENTAL_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "max_tokens": 150
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(OPENROUTER_API_URL)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| SummarizerError::RequestFailed(e.to_string()))?;
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| SummarizerError::ParseError(e.to_string()))?;
+
+    let summary = json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| SummarizerError::ParseError("No content in response".to_string()))?;
+
+    Ok(format!("📊 Incremental Summary ({} lines):\n{}", line_count, summary))
 }
 
 /// System prompt for screen context interpretation.

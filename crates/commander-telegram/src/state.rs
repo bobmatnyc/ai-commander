@@ -7,7 +7,7 @@ use std::sync::Arc;
 use commander_adapters::AdapterRegistry;
 use commander_core::{
     clean_response, clean_screen_preview, config::authorized_chats_file, find_new_lines,
-    is_claude_ready, is_summarization_available, summarize_with_fallback,
+    is_claude_ready, is_summarization_available, summarize_incremental, summarize_with_fallback,
 };
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
@@ -27,6 +27,8 @@ use crate::session::UserSession;
 pub enum PollResult {
     /// Progress update during output collection (line count increased).
     Progress(String),
+    /// Incremental summary of content collected so far (every 50 lines).
+    IncrementalSummary(String),
     /// Output collection complete, starting summarization.
     Summarizing,
     /// Complete response ready to send (summarization done or no summarization needed).
@@ -583,6 +585,24 @@ impl TelegramState {
             let new_lines = find_new_lines(&session.last_output, &current_output);
             session.add_response_lines(new_lines);
             session.last_output = current_output.clone();
+
+            // Check if we should emit an incremental summary (every 50 lines)
+            if session.should_emit_incremental_summary() {
+                let content_so_far = session.get_response();
+                let line_count = session.response_buffer.len();
+
+                // Generate incremental summary asynchronously
+                match summarize_incremental(&content_so_far, line_count).await {
+                    Ok(summary) => {
+                        session.mark_incremental_summary_sent();
+                        return Ok(PollResult::IncrementalSummary(summary));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to generate incremental summary, continuing");
+                        // Don't block on failure, just log and continue
+                    }
+                }
+            }
 
             // Check if we should emit a progress update
             if session.should_emit_progress() {

@@ -268,6 +268,16 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                         }
                     }
                 }
+                Ok(PollResult::IncrementalSummary(summary)) => {
+                    // Send incremental summary as a separate message (not an edit)
+                    // This allows user to see progression over time
+                    if let Err(e) = bot.send_message(ChatId(chat_id), &summary).await {
+                        warn!(chat_id = %chat_id, error = %e, "Failed to send incremental summary");
+                    } else {
+                        info!(chat_id = %chat_id, "Incremental summary sent");
+                    }
+                    // Continue polling - don't stop collection
+                }
                 Ok(PollResult::Summarizing) => {
                     // Update progress message to show summarization
                     let summarizing_msg = "🤖 Summarizing output...";
