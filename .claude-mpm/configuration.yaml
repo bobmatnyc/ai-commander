@@ -20,6 +20,7 @@ skills:
   - langchain
   - langgraph
   - mcp
+  - mpm-agent-update-workflow
   - mpm-bug-reporting
   - mpm-circuit-breaker-enforcement
   - mpm-delegation-patterns

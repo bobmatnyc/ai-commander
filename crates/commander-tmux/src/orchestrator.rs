@@ -80,9 +80,28 @@ impl TmuxOrchestrator {
     ///
     /// Returns error if session already exists or tmux command fails.
     pub fn create_session(&self, name: &str) -> Result<TmuxSession> {
-        debug!(name = %name, "creating tmux session");
+        self.create_session_in_dir(name, None)
+    }
 
-        self.run_tmux_checked(&["new-session", "-d", "-s", name])?;
+    /// Create a new detached tmux session in a specific directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Session name
+    /// * `dir` - Optional working directory for the session
+    ///
+    /// # Errors
+    ///
+    /// Returns error if session already exists or tmux command fails.
+    pub fn create_session_in_dir(&self, name: &str, dir: Option<&str>) -> Result<TmuxSession> {
+        debug!(name = %name, dir = ?dir, "creating tmux session");
+
+        let mut args = vec!["new-session", "-d", "-s", name];
+        if let Some(d) = dir {
+            args.push("-c");
+            args.push(d);
+        }
+        self.run_tmux_checked(&args)?;
 
         // Verify session was created and get details
         let sessions = self.list_sessions()?;

@@ -21,14 +21,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 /// Draw normal chat mode.
 fn draw_normal(frame: &mut Frame, app: &App) {
+    // Check if we need extra space for command hint
+    let hint_height = if app.get_command_hint().is_some() { 1 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Header
-            Constraint::Min(5),     // Output area
-            Constraint::Length(1),  // Status/Progress bar
-            Constraint::Length(5),  // Input area (increased for wrapping)
-            Constraint::Length(1),  // Footer
+            Constraint::Length(1),                       // Header
+            Constraint::Min(5),                          // Output area
+            Constraint::Length(1),                       // Status/Progress bar
+            Constraint::Length(5 + hint_height),         // Input area + hint (increased for wrapping)
+            Constraint::Length(1),                       // Footer
         ])
         .split(frame.area());
 
@@ -275,7 +278,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Draw the input area with text wrapping support.
+/// Draw the input area with text wrapping support and optional hint.
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let input_style = match app.input_mode {
         InputMode::Normal => Style::default(),
@@ -286,6 +289,31 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         Some(name) => format!("[{}]> ", name),
         None => "commander> ".to_string(),
     };
+
+    // Check if we need to show a hint
+    let hint = app.get_command_hint();
+    let input_area = if hint.is_some() {
+        // Split area for input and hint
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),      // Input area (at least 3 lines)
+                Constraint::Length(1),   // Hint area
+            ])
+            .split(area);
+
+        // Render hint
+        if let Some(hint_text) = hint {
+            let hint_widget = Paragraph::new(format!("  {}", hint_text))
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(hint_widget, chunks[1]);
+        }
+
+        chunks[0]
+    } else {
+        area
+    };
+
     let input_text = format!("{}{}", prompt, app.input);
 
     let input = Paragraph::new(input_text.clone())
@@ -293,26 +321,26 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(" Input "))
         .wrap(Wrap { trim: false });
 
-    frame.render_widget(input, area);
+    frame.render_widget(input, input_area);
 
     // Calculate cursor position accounting for wrapping
-    let inner_width = area.width.saturating_sub(2) as usize; // Account for borders
+    let inner_width = input_area.width.saturating_sub(2) as usize; // Account for borders
     let cursor_offset = prompt.len() + app.cursor_pos;
 
     if inner_width > 0 {
         let cursor_line = cursor_offset / inner_width;
         let cursor_col = cursor_offset % inner_width;
 
-        let cursor_x = area.x + 1 + cursor_col as u16;
-        let cursor_y = area.y + 1 + cursor_line as u16;
+        let cursor_x = input_area.x + 1 + cursor_col as u16;
+        let cursor_y = input_area.y + 1 + cursor_line as u16;
 
         // Only set cursor if it's within the visible area
-        let max_y = area.y + area.height.saturating_sub(1);
+        let max_y = input_area.y + input_area.height.saturating_sub(1);
         if cursor_y <= max_y {
             frame.set_cursor_position((cursor_x, cursor_y));
         }
     } else {
-        frame.set_cursor_position((area.x + 1, area.y + 1));
+        frame.set_cursor_position((input_area.x + 1, input_area.y + 1));
     }
 }
 

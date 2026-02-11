@@ -16,6 +16,6 @@ git:
   commit_prefix: '[ai-trackdown]'
 plugins: {}
 epics:
-  counter: 3
+  counter: 6
 issues:
-  counter: 13
+  counter: 23
