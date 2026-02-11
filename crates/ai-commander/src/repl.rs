@@ -169,8 +169,14 @@ static COMMAND_HELP: &[CommandHelp] = &[
     },
 ];
 
-/// Tab completion for slash commands.
-struct CommandCompleter;
+/// Tab completion for slash commands with context-aware suggestions.
+struct CommandCompleter {
+    state_dir: PathBuf,
+    /// Cached projects for completion (timestamp, names)
+    cached_projects: std::sync::Arc<std::sync::Mutex<Option<(std::time::SystemTime, Vec<String>)>>>,
+    /// Cached sessions for completion (timestamp, names)
+    cached_sessions: std::sync::Arc<std::sync::Mutex<Option<(std::time::SystemTime, Vec<String>)>>>,
+}
 
 impl CommandCompleter {
     const COMMANDS: &'static [&'static str] = &[
@@ -178,6 +184,260 @@ impl CommandCompleter {
         "/list", "/quit", "/send", "/sessions", "/status", "/stop",
         "/telegram",
     ];
+
+    fn new(state_dir: PathBuf) -> Self {
+        Self {
+            state_dir,
+            cached_projects: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cached_sessions: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Generate completions based on input.
+    fn generate_completions(&self, line: &str, pos: usize) -> (usize, Vec<Pair>) {
+        let input = &line[..pos];
+
+        // Handle alias routing (@session_name)
+        if input.contains('@') {
+            return self.complete_alias_routing(input);
+        }
+
+        // Handle slash commands
+        if input.starts_with('/') {
+            // Check if we're completing arguments after a command
+            if input.contains(' ') {
+                return self.complete_arguments(input);
+            } else {
+                // Complete command name (fuzzy matching)
+                return self.complete_command_name(input);
+            }
+        }
+
+        (0, vec![])
+    }
+
+    /// Complete command names using fuzzy matching.
+    fn complete_command_name(&self, input: &str) -> (usize, Vec<Pair>) {
+        use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
+
+        let matcher = SkimMatcherV2::default();
+
+        // Try fuzzy matching first
+        let mut scored: Vec<(i64, &str)> = Self::COMMANDS
+            .iter()
+            .filter_map(|cmd| {
+                matcher.fuzzy_match(cmd, input)
+                    .map(|score| (score, *cmd))
+            })
+            .collect();
+
+        // Sort by score (highest first)
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let matches: Vec<&str> = if !scored.is_empty() {
+            scored.into_iter().map(|(_, cmd)| cmd).collect()
+        } else {
+            // Fallback to prefix matching if no fuzzy matches
+            Self::COMMANDS
+                .iter()
+                .filter(|cmd| cmd.starts_with(input))
+                .copied()
+                .collect()
+        };
+
+        let pairs: Vec<Pair> = matches.into_iter()
+            .map(|cmd| Pair {
+                display: cmd.to_string(),
+                replacement: cmd.to_string(),
+            })
+            .collect();
+
+        (0, pairs)
+    }
+
+    /// Complete arguments after a command.
+    fn complete_arguments(&self, input: &str) -> (usize, Vec<Pair>) {
+        let parts: Vec<&str> = input.split_whitespace().collect();
+
+        if parts.is_empty() {
+            return (0, vec![]);
+        }
+
+        let command = parts[0];
+        let start_pos = input.rfind(' ').map(|i| i + 1).unwrap_or(0);
+
+        // Check for flag completion
+        if let Some(last) = parts.last() {
+            // Complete -a flag values
+            if parts.len() > 1 && parts[parts.len() - 2] == "-a" {
+                let matches: Vec<Pair> = vec!["cc", "mpm"]
+                    .into_iter()
+                    .filter(|adapter| adapter.starts_with(last))
+                    .map(|adapter| Pair {
+                        display: adapter.to_string(),
+                        replacement: adapter.to_string(),
+                    })
+                    .collect();
+                return (start_pos, matches);
+            }
+
+            // Complete flags
+            if last.starts_with("-") {
+                if command == "/connect" || command == "/c" {
+                    let matches: Vec<Pair> = vec!["-a", "-n"]
+                        .into_iter()
+                        .filter(|flag| flag.starts_with(last))
+                        .map(|flag| Pair {
+                            display: flag.to_string(),
+                            replacement: flag.to_string(),
+                        })
+                        .collect();
+                    return (start_pos, matches);
+                }
+            }
+        }
+
+        // Context-aware completion based on command
+        match command {
+            "/connect" | "/c" => {
+                // Don't complete project names if we're likely adding flags
+                if input.ends_with(' ') && (input.contains("-a") || input.contains("-n")) {
+                    return (start_pos, vec![]);
+                }
+                self.complete_project_names(start_pos, parts.get(1).unwrap_or(&""))
+            }
+            "/status" | "/s" => {
+                self.complete_project_names(start_pos, parts.get(1).unwrap_or(&""))
+            }
+            "/stop" => {
+                self.complete_session_names(start_pos, parts.get(1).unwrap_or(&""))
+            }
+            _ => (start_pos, vec![])
+        }
+    }
+
+    /// Complete project names from state store.
+    fn complete_project_names(&self, start_pos: usize, prefix: &str) -> (usize, Vec<Pair>) {
+        let projects = self.load_projects_cached();
+
+        let matches: Vec<Pair> = projects
+            .into_iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| Pair {
+                display: name.clone(),
+                replacement: name,
+            })
+            .collect();
+
+        (start_pos, matches)
+    }
+
+    /// Complete session names from tmux.
+    fn complete_session_names(&self, start_pos: usize, prefix: &str) -> (usize, Vec<Pair>) {
+        let sessions = self.load_sessions_cached();
+
+        let matches: Vec<Pair> = sessions
+            .into_iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| Pair {
+                display: name.clone(),
+                replacement: name,
+            })
+            .collect();
+
+        (start_pos, matches)
+    }
+
+    /// Complete alias routing (@session_name).
+    fn complete_alias_routing(&self, input: &str) -> (usize, Vec<Pair>) {
+        // Find the last @symbol position
+        let at_pos = input.rfind('@');
+        if at_pos.is_none() {
+            return (0, vec![]);
+        }
+
+        let at_pos = at_pos.unwrap();
+        let after_at = &input[at_pos + 1..];
+
+        // Get session names
+        let sessions = self.load_sessions_cached();
+
+        let matches: Vec<Pair> = sessions
+            .into_iter()
+            .filter(|name| name.starts_with(after_at))
+            .map(|name| Pair {
+                display: name.clone(),
+                replacement: name,
+            })
+            .collect();
+
+        (at_pos + 1, matches)
+    }
+
+    /// Load projects with caching (5 second TTL).
+    fn load_projects_cached(&self) -> Vec<String> {
+        use std::time::{Duration, SystemTime};
+
+        let mut cache = self.cached_projects.lock().unwrap();
+
+        // Check if we need to refresh the cache
+        let needs_refresh = cache.as_ref()
+            .map(|(cached_time, _)| {
+                cached_time.elapsed().unwrap_or(Duration::from_secs(10)) > Duration::from_secs(5)
+            })
+            .unwrap_or(true);
+
+        if needs_refresh {
+            let store = StateStore::new(&self.state_dir);
+            let projects = store.load_all_projects()
+                .ok()
+                .map(|map| {
+                    map.into_values()
+                        .map(|p| p.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            *cache = Some((SystemTime::now(), projects.clone()));
+            projects
+        } else {
+            cache.as_ref()
+                .map(|(_, projects)| projects.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    /// Load tmux sessions with caching (5 second TTL).
+    fn load_sessions_cached(&self) -> Vec<String> {
+        use std::time::{Duration, SystemTime};
+
+        let mut cache = self.cached_sessions.lock().unwrap();
+
+        // Check if we need to refresh the cache
+        let needs_refresh = cache.as_ref()
+            .map(|(cached_time, _)| {
+                cached_time.elapsed().unwrap_or(Duration::from_secs(10)) > Duration::from_secs(5)
+            })
+            .unwrap_or(true);
+
+        if needs_refresh {
+            let sessions = TmuxOrchestrator::new()
+                .ok()
+                .and_then(|tmux| tmux.list_sessions().ok())
+                .unwrap_or_default();
+
+            let session_names: Vec<String> = sessions.into_iter()
+                .map(|s| s.name)
+                .collect();
+
+            *cache = Some((SystemTime::now(), session_names.clone()));
+            session_names
+        } else {
+            cache.as_ref()
+                .map(|(_, sessions)| sessions.clone())
+                .unwrap_or_default()
+        }
+    }
 }
 
 impl Completer for CommandCompleter {
@@ -189,26 +449,41 @@ impl Completer for CommandCompleter {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        if !line.starts_with('/') {
-            return Ok((0, vec![]));
-        }
-
-        let prefix = &line[..pos];
-        let matches: Vec<Pair> = Self::COMMANDS
-            .iter()
-            .filter(|cmd| cmd.starts_with(prefix))
-            .map(|cmd| Pair {
-                display: cmd.to_string(),
-                replacement: cmd.to_string(),
-            })
-            .collect();
-
-        Ok((0, matches))
+        Ok(self.generate_completions(line, pos))
     }
 }
 
 impl Hinter for CommandCompleter {
     type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
+        // Only show hints if cursor is at end of line
+        if pos != line.len() {
+            return None;
+        }
+
+        let input = line.trim();
+
+        if input == "/connect" || input == "/c" {
+            Some(" <path> -a <adapter> -n <name>  OR  <project-name>".to_string())
+        } else if input.starts_with("/connect ") || input.starts_with("/c ") {
+            if !input.contains("-a") && !input.contains("-n") {
+                Some(" [-a cc|mpm] [-n name]".to_string())
+            } else {
+                None
+            }
+        } else if input == "/status" || input == "/s" {
+            Some(" [project_name]".to_string())
+        } else if input == "/stop" {
+            Some(" <session_name>".to_string())
+        } else if input == "/send" {
+            Some(" <message>".to_string())
+        } else if input.starts_with("@") {
+            Some(" Route message to specific session(s)".to_string())
+        } else {
+            None
+        }
+    }
 }
 
 impl Highlighter for CommandCompleter {}
@@ -521,7 +796,7 @@ impl Repl {
             .completion_type(rustyline::CompletionType::List)
             .build();
         let mut editor = Editor::with_config(config)?;
-        editor.set_helper(Some(CommandCompleter));
+        editor.set_helper(Some(CommandCompleter::new(state_dir.to_path_buf())));
         let store = StateStore::new(state_dir);
         let registry = AdapterRegistry::new();
         let chat_client = ChatClient::new();

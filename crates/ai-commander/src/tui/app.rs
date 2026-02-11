@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 use commander_adapters::AdapterRegistry;
@@ -177,6 +177,10 @@ pub struct App {
     pub(super) completions: Vec<String>,
     /// Current completion index (None = not in completion mode)
     pub(super) completion_index: Option<usize>,
+    /// Cached projects for completion (timestamp, names)
+    pub(super) cached_projects: Option<(SystemTime, Vec<String>)>,
+    /// Cached sessions for completion (timestamp, names)
+    pub(super) cached_sessions: Option<(SystemTime, Vec<String>)>,
 
     // Session status monitoring
     /// Last known ready state for each session (true = waiting for input)
@@ -245,6 +249,8 @@ impl App {
 
             completions: Vec::new(),
             completion_index: None,
+            cached_projects: None,
+            cached_sessions: None,
 
             session_ready_state: HashMap::new(),
             last_status_check: None,
