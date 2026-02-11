@@ -31,6 +31,8 @@ pub struct UserSession {
     pub last_progress_line_count: usize,
     /// Whether we've signaled that summarization is starting.
     pub is_summarizing: bool,
+    /// Line count at last incremental summary (to detect 50-line thresholds).
+    pub last_incremental_summary_line_count: usize,
 }
 
 impl UserSession {
@@ -54,6 +56,7 @@ impl UserSession {
             pending_message_id: None,
             last_progress_line_count: 0,
             is_summarizing: false,
+            last_incremental_summary_line_count: 0,
         }
     }
 
@@ -66,6 +69,7 @@ impl UserSession {
         self.pending_message_id = None;
         self.last_progress_line_count = 0;
         self.is_summarizing = false;
+        self.last_incremental_summary_line_count = 0;
     }
 
     /// Start collecting a response for a query.
@@ -78,6 +82,7 @@ impl UserSession {
         self.pending_message_id = message_id;
         self.last_progress_line_count = 0;
         self.is_summarizing = false;
+        self.last_incremental_summary_line_count = 0;
     }
 
     /// Add new lines to the response buffer.
@@ -116,6 +121,19 @@ impl UserSession {
         self.last_progress_line_count = line_count;
         format!("📥 Receiving...{} lines captured", line_count)
     }
+
+    /// Check if an incremental summary should be emitted.
+    /// Emits every 50 lines (at 50, 100, 150, etc.).
+    pub fn should_emit_incremental_summary(&self) -> bool {
+        let current_lines = self.response_buffer.len();
+        current_lines > 0 &&
+        current_lines >= self.last_incremental_summary_line_count + 50
+    }
+
+    /// Mark that an incremental summary was sent at the current line count.
+    pub fn mark_incremental_summary_sent(&mut self) {
+        self.last_incremental_summary_line_count = self.response_buffer.len();
+    }
 }
 
 #[cfg(test)]
@@ -139,6 +157,7 @@ mod tests {
         assert!(!session.is_waiting);
         assert_eq!(session.last_progress_line_count, 0);
         assert!(!session.is_summarizing);
+        assert_eq!(session.last_incremental_summary_line_count, 0);
     }
 
     #[test]
@@ -165,6 +184,7 @@ mod tests {
         assert!(session.response_buffer.is_empty());
         assert_eq!(session.last_progress_line_count, 0);
         assert!(!session.is_summarizing);
+        assert_eq!(session.last_incremental_summary_line_count, 0);
     }
 
     #[test]
@@ -201,5 +221,44 @@ mod tests {
 
         let progress2 = session.get_progress_message();
         assert_eq!(progress2, "📥 Receiving...10 lines captured");
+    }
+
+    #[test]
+    fn test_incremental_summaries() {
+        let mut session = UserSession::new(
+            ChatId(12345),
+            "/path".to_string(),
+            "proj".to_string(),
+            "session".to_string(),
+        );
+
+        // No incremental summary initially
+        assert!(!session.should_emit_incremental_summary());
+
+        // Add 49 lines - should not emit yet
+        for i in 1..=49 {
+            session.add_response_lines(vec![format!("line {}", i)]);
+        }
+        assert!(!session.should_emit_incremental_summary());
+
+        // Add 1 more line to reach 50 - should emit
+        session.add_response_lines(vec!["line 50".to_string()]);
+        assert!(session.should_emit_incremental_summary());
+        assert_eq!(session.response_buffer.len(), 50);
+
+        // Mark as sent
+        session.mark_incremental_summary_sent();
+        assert_eq!(session.last_incremental_summary_line_count, 50);
+
+        // Add 49 more lines - should not emit yet
+        for i in 51..=99 {
+            session.add_response_lines(vec![format!("line {}", i)]);
+        }
+        assert!(!session.should_emit_incremental_summary());
+
+        // Add 1 more line to reach 100 - should emit again
+        session.add_response_lines(vec!["line 100".to_string()]);
+        assert!(session.should_emit_incremental_summary());
+        assert_eq!(session.response_buffer.len(), 100);
     }
 }

@@ -31,7 +31,7 @@ pub use onboarding::{load_config, needs_onboarding, run_onboarding};
 pub use output_filter::{clean_response, clean_screen_preview, detect_adapter, find_new_lines, is_claude_ready, is_ui_noise, Adapter};
 pub use summarizer::{
     interpret_screen_context, is_available as is_summarization_available, summarize_async,
-    summarize_blocking, summarize_blocking_with_fallback, summarize_with_fallback, SummarizerError,
+    summarize_blocking, summarize_blocking_with_fallback, summarize_incremental, summarize_with_fallback, SummarizerError,
 };
 
 // Re-export change detection types
