@@ -27,6 +27,10 @@ pub struct UserSession {
     pub is_waiting: bool,
     /// Message ID of the user's pending query (for reply threading).
     pub pending_message_id: Option<MessageId>,
+    /// Line count at last progress update (to avoid spamming updates).
+    pub last_progress_line_count: usize,
+    /// Whether we've signaled that summarization is starting.
+    pub is_summarizing: bool,
 }
 
 impl UserSession {
@@ -48,6 +52,8 @@ impl UserSession {
             pending_query: None,
             is_waiting: false,
             pending_message_id: None,
+            last_progress_line_count: 0,
+            is_summarizing: false,
         }
     }
 
@@ -58,6 +64,8 @@ impl UserSession {
         self.pending_query = None;
         self.is_waiting = false;
         self.pending_message_id = None;
+        self.last_progress_line_count = 0;
+        self.is_summarizing = false;
     }
 
     /// Start collecting a response for a query.
@@ -68,6 +76,8 @@ impl UserSession {
         self.pending_query = Some(query.to_string());
         self.is_waiting = true;
         self.pending_message_id = message_id;
+        self.last_progress_line_count = 0;
+        self.is_summarizing = false;
     }
 
     /// Add new lines to the response buffer.
@@ -92,6 +102,20 @@ impl UserSession {
     pub fn get_response(&self) -> String {
         self.response_buffer.join("\n")
     }
+
+    /// Check if a progress update should be emitted.
+    /// Updates every 5 lines to prevent rate limiting.
+    pub fn should_emit_progress(&self) -> bool {
+        let current_lines = self.response_buffer.len();
+        current_lines > 0 && current_lines >= self.last_progress_line_count + 5
+    }
+
+    /// Generate a progress message and update the tracking counter.
+    pub fn get_progress_message(&mut self) -> String {
+        let line_count = self.response_buffer.len();
+        self.last_progress_line_count = line_count;
+        format!("📥 Receiving...{} lines captured", line_count)
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +137,8 @@ mod tests {
         assert_eq!(session.tmux_session, "commander-my-project");
         assert!(session.response_buffer.is_empty());
         assert!(!session.is_waiting);
+        assert_eq!(session.last_progress_line_count, 0);
+        assert!(!session.is_summarizing);
     }
 
     #[test]
@@ -128,6 +154,7 @@ mod tests {
         assert!(session.is_waiting);
         assert_eq!(session.pending_query, Some("hello".to_string()));
         assert_eq!(session.pending_message_id, Some(MessageId(42)));
+        assert!(!session.is_summarizing);
 
         session.add_response_lines(vec!["line 1".to_string(), "line 2".to_string()]);
         assert_eq!(session.response_buffer.len(), 2);
@@ -136,5 +163,43 @@ mod tests {
         session.reset_response_state();
         assert!(!session.is_waiting);
         assert!(session.response_buffer.is_empty());
+        assert_eq!(session.last_progress_line_count, 0);
+        assert!(!session.is_summarizing);
+    }
+
+    #[test]
+    fn test_progress_messages() {
+        let mut session = UserSession::new(
+            ChatId(12345),
+            "/path".to_string(),
+            "proj".to_string(),
+            "session".to_string(),
+        );
+
+        // No progress initially
+        assert!(!session.should_emit_progress());
+
+        // Add 5 lines - should emit progress
+        for i in 1..=5 {
+            session.add_response_lines(vec![format!("line {}", i)]);
+        }
+        assert!(session.should_emit_progress());
+
+        let progress = session.get_progress_message();
+        assert_eq!(progress, "📥 Receiving...5 lines captured");
+        assert_eq!(session.last_progress_line_count, 5);
+
+        // Add 4 more lines - should not emit yet (need 5 more)
+        for i in 6..=9 {
+            session.add_response_lines(vec![format!("line {}", i)]);
+        }
+        assert!(!session.should_emit_progress());
+
+        // Add 1 more line to reach threshold
+        session.add_response_lines(vec!["line 10".to_string()]);
+        assert!(session.should_emit_progress());
+
+        let progress2 = session.get_progress_message();
+        assert_eq!(progress2, "📥 Receiving...10 lines captured");
     }
 }

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use commander_adapters::AdapterRegistry;
 use commander_core::{
-    clean_screen_preview, config::authorized_chats_file, find_new_lines, is_claude_ready,
-    summarize_with_fallback,
+    clean_response, clean_screen_preview, config::authorized_chats_file, find_new_lines,
+    is_claude_ready, is_summarization_available, summarize_with_fallback,
 };
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
@@ -21,6 +21,19 @@ use commander_orchestrator::AgentOrchestrator;
 use crate::error::{Result, TelegramError};
 use crate::pairing;
 use crate::session::UserSession;
+
+/// Result from polling output - represents different stages of output collection.
+#[derive(Debug)]
+pub enum PollResult {
+    /// Progress update during output collection (line count increased).
+    Progress(String),
+    /// Output collection complete, starting summarization.
+    Summarizing,
+    /// Complete response ready to send (summarization done or no summarization needed).
+    Complete(String, Option<MessageId>),
+    /// No new output or not ready yet.
+    NoOutput,
+}
 
 /// Load authorized chat IDs from disk.
 fn load_authorized_chats() -> HashSet<i64> {
@@ -545,8 +558,8 @@ impl TelegramState {
     }
 
     /// Poll for new output from a user's project.
-    /// Returns Some((response, message_id)) when idle and response is ready, None otherwise.
-    pub async fn poll_output(&self, chat_id: ChatId) -> Result<Option<(String, Option<MessageId>)>> {
+    /// Returns PollResult indicating progress, summarizing, complete, or no output.
+    pub async fn poll_output(&self, chat_id: ChatId) -> Result<PollResult> {
         let tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
@@ -557,7 +570,7 @@ impl TelegramState {
             .ok_or(TelegramError::NotConnected)?;
 
         if !session.is_waiting {
-            return Ok(None);
+            return Ok(PollResult::NoOutput);
         }
 
         // Capture current output
@@ -570,6 +583,12 @@ impl TelegramState {
             let new_lines = find_new_lines(&session.last_output, &current_output);
             session.add_response_lines(new_lines);
             session.last_output = current_output.clone();
+
+            // Check if we should emit a progress update
+            if session.should_emit_progress() {
+                let progress_msg = session.get_progress_message();
+                return Ok(PollResult::Progress(progress_msg));
+            }
         }
 
         // Check if Claude Code is idle (prompt visible and no activity for 1.5s)
@@ -577,18 +596,32 @@ impl TelegramState {
         let has_prompt = is_claude_ready(&current_output);
 
         if is_idle && has_prompt && !session.response_buffer.is_empty() {
+            // Check if we need to summarize (only if API key available)
+            let needs_summarization = is_summarization_available();
+
+            if needs_summarization && !session.is_summarizing {
+                // First time we detect completion - signal "Summarizing" state
+                session.is_summarizing = true;
+                return Ok(PollResult::Summarizing);
+            }
+
+            // If we already signaled Summarizing or don't need it, do the actual work
             let raw_response = session.get_response();
             let query = session.pending_query.clone().unwrap_or_default();
             let message_id = session.pending_message_id;
             session.reset_response_state();
 
             // Summarize or clean the response using commander-core
-            let response = summarize_with_fallback(&query, &raw_response).await;
+            let response = if needs_summarization {
+                summarize_with_fallback(&query, &raw_response).await
+            } else {
+                clean_response(&raw_response)
+            };
 
-            return Ok(Some((response, message_id)));
+            return Ok(PollResult::Complete(response, message_id));
         }
 
-        Ok(None)
+        Ok(PollResult::NoOutput)
     }
 
     /// List all available projects.

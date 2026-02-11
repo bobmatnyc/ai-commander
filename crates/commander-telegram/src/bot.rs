@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use crate::error::{Result, TelegramError};
 use crate::handlers::{handle_command, handle_message, Command};
 use crate::ngrok::NgrokTunnel;
-use crate::state::{create_shared_state, TelegramState};
+use crate::state::{create_shared_state, PollResult, TelegramState};
 
 /// Default webhook port.
 const DEFAULT_WEBHOOK_PORT: u16 = 8443;
@@ -231,9 +231,13 @@ impl TelegramBot {
 
 /// Background task to poll for output from connected sessions and send responses.
 async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
-    use teloxide::types::{ChatId, ChatAction, ReplyParameters};
+    use teloxide::types::{ChatId, ChatAction, MessageId, ReplyParameters};
+    use std::collections::HashMap;
 
     let mut poll_interval = interval(Duration::from_millis(POLL_INTERVAL_MS));
+
+    // Track progress message IDs per chat
+    let mut progress_messages: HashMap<i64, MessageId> = HashMap::new();
 
     loop {
         poll_interval.tick().await;
@@ -247,8 +251,47 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
 
             // Poll for output from this session
             match state.poll_output(ChatId(chat_id)).await {
-                Ok(Some((response, message_id))) => {
-                    // Send the response back to the user, as a reply if we have a message ID
+                Ok(PollResult::Progress(progress_msg)) => {
+                    // Send or update progress message
+                    if let Some(&msg_id) = progress_messages.get(&chat_id) {
+                        // Update existing progress message (ignore errors - may have been deleted)
+                        let _ = bot.edit_message_text(ChatId(chat_id), msg_id, &progress_msg).await;
+                    } else {
+                        // Send new progress message
+                        match bot.send_message(ChatId(chat_id), &progress_msg).await {
+                            Ok(sent) => {
+                                progress_messages.insert(chat_id, sent.id);
+                            }
+                            Err(e) => {
+                                warn!(chat_id = %chat_id, error = %e, "Failed to send progress message");
+                            }
+                        }
+                    }
+                }
+                Ok(PollResult::Summarizing) => {
+                    // Update progress message to show summarization
+                    let summarizing_msg = "🤖 Summarizing output...";
+                    if let Some(&msg_id) = progress_messages.get(&chat_id) {
+                        let _ = bot.edit_message_text(ChatId(chat_id), msg_id, summarizing_msg).await;
+                    } else {
+                        // Send new summarizing message if no progress message exists
+                        match bot.send_message(ChatId(chat_id), summarizing_msg).await {
+                            Ok(sent) => {
+                                progress_messages.insert(chat_id, sent.id);
+                            }
+                            Err(e) => {
+                                warn!(chat_id = %chat_id, error = %e, "Failed to send summarizing message");
+                            }
+                        }
+                    }
+                }
+                Ok(PollResult::Complete(response, message_id)) => {
+                    // Delete progress message if it exists
+                    if let Some(prog_msg_id) = progress_messages.remove(&chat_id) {
+                        let _ = bot.delete_message(ChatId(chat_id), prog_msg_id).await;
+                    }
+
+                    // Send the final response, as a reply if we have a message ID
                     let send_result = if let Some(msg_id) = message_id {
                         bot.send_message(ChatId(chat_id), &response)
                             .reply_parameters(ReplyParameters::new(msg_id))
@@ -263,11 +306,16 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                         info!(chat_id = %chat_id, "Response sent to user");
                     }
                 }
-                Ok(None) => {
+                Ok(PollResult::NoOutput) => {
                     // No response ready yet, continue polling
                 }
                 Err(e) => {
                     warn!(chat_id = %chat_id, error = %e, "Error polling output");
+
+                    // Clean up progress message on error
+                    if let Some(prog_msg_id) = progress_messages.remove(&chat_id) {
+                        let _ = bot.delete_message(ChatId(chat_id), prog_msg_id).await;
+                    }
                 }
             }
         }
