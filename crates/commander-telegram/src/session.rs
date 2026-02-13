@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use teloxide::types::{ChatId, MessageId};
+use teloxide::types::{ChatId, MessageId, ThreadId};
 
 /// A user's session with a connected project.
 #[derive(Debug)]
@@ -33,6 +33,8 @@ pub struct UserSession {
     pub is_summarizing: bool,
     /// Line count at last incremental summary (to detect 50-line thresholds).
     pub last_incremental_summary_line_count: usize,
+    /// Forum topic thread ID (for group mode).
+    pub thread_id: Option<ThreadId>,
 }
 
 impl UserSession {
@@ -57,6 +59,33 @@ impl UserSession {
             last_progress_line_count: 0,
             is_summarizing: false,
             last_incremental_summary_line_count: 0,
+            thread_id: None,
+        }
+    }
+
+    /// Create a new user session with forum topic thread ID.
+    pub fn with_thread_id(
+        chat_id: ChatId,
+        project_path: String,
+        project_name: String,
+        tmux_session: String,
+        thread_id: ThreadId,
+    ) -> Self {
+        Self {
+            chat_id,
+            project_path,
+            project_name,
+            tmux_session,
+            response_buffer: Vec::new(),
+            last_output_time: None,
+            last_output: String::new(),
+            pending_query: None,
+            is_waiting: false,
+            pending_message_id: None,
+            last_progress_line_count: 0,
+            is_summarizing: false,
+            last_incremental_summary_line_count: 0,
+            thread_id: Some(thread_id),
         }
     }
 
@@ -260,5 +289,39 @@ mod tests {
         session.add_response_lines(vec!["line 100".to_string()]);
         assert!(session.should_emit_incremental_summary());
         assert_eq!(session.response_buffer.len(), 100);
+    }
+
+    #[test]
+    fn test_session_with_thread_id() {
+        use teloxide::types::MessageId;
+
+        let thread_id = ThreadId(MessageId(999));
+        let session = UserSession::with_thread_id(
+            ChatId(12345),
+            "/path/to/project".to_string(),
+            "my-project".to_string(),
+            "commander-my-project".to_string(),
+            thread_id,
+        );
+
+        assert_eq!(session.chat_id.0, 12345);
+        assert_eq!(session.project_path, "/path/to/project");
+        assert_eq!(session.project_name, "my-project");
+        assert_eq!(session.tmux_session, "commander-my-project");
+        assert_eq!(session.thread_id, Some(thread_id));
+        assert!(session.response_buffer.is_empty());
+        assert!(!session.is_waiting);
+    }
+
+    #[test]
+    fn test_session_without_thread_id() {
+        let session = UserSession::new(
+            ChatId(12345),
+            "/path/to/project".to_string(),
+            "my-project".to_string(),
+            "commander-my-project".to_string(),
+        );
+
+        assert!(session.thread_id.is_none());
     }
 }

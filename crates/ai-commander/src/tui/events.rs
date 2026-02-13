@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -25,7 +28,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -34,7 +37,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 /// Restore the terminal to normal mode.
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -154,103 +157,113 @@ fn run_loop(
 
         // Poll for events with timeout
         if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                // Only handle key press events (not release)
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-
-                // Handle Ctrl+C to quit
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    app.should_quit = true;
-                }
-
-                // Handle F2 to toggle inspect mode
-                if key.code == KeyCode::F(2) {
-                    app.toggle_inspect_mode();
-                    continue;
-                }
-
-                // Handle F3 to show sessions view
-                if key.code == KeyCode::F(3) {
-                    if app.view_mode == ViewMode::Sessions {
-                        app.view_mode = ViewMode::Normal;
-                    } else if app.tmux.is_some() {
-                        app.show_sessions();
-                    } else {
-                        app.messages.push(super::app::Message::system("Tmux not available"));
+            match event::read()? {
+                Event::Mouse(mouse) => {
+                    // Handle left mouse button clicks
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        app.handle_click(mouse.column, mouse.row);
                     }
                     continue;
                 }
+                Event::Key(key) => {
+                    // Only handle key press events (not release)
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
 
-                // Handle keys based on view mode
-                match app.view_mode {
-                    ViewMode::Sessions => {
-                        // In sessions mode, handle selection and actions
-                        match key.code {
-                            KeyCode::Up | KeyCode::Char('k') => app.session_select_up(),
-                            KeyCode::Down | KeyCode::Char('j') => app.session_select_down(),
-                            KeyCode::Enter => app.connect_selected_session(),
-                            KeyCode::Char('d') => app.delete_selected_session(),
-                            KeyCode::Esc | KeyCode::Char('q') => {
-                                app.view_mode = ViewMode::Normal;
-                            }
-                            _ => {}
+                    // Handle Ctrl+C to quit
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                        app.should_quit = true;
+                    }
+
+                    // Handle F2 to toggle inspect mode
+                    if key.code == KeyCode::F(2) {
+                        app.toggle_inspect_mode();
+                        continue;
+                    }
+
+                    // Handle F3 to show sessions view
+                    if key.code == KeyCode::F(3) {
+                        if app.view_mode == ViewMode::Sessions {
+                            app.view_mode = ViewMode::Normal;
+                        } else if app.tmux.is_some() {
+                            app.show_sessions();
+                        } else {
+                            app.messages.push(super::app::Message::system("Tmux not available"));
                         }
+                        continue;
                     }
-                    ViewMode::Inspect => {
-                        // In inspect mode, handle scroll and exit
-                        match key.code {
-                            KeyCode::Up | KeyCode::Char('k') => app.inspect_scroll_up(),
-                            KeyCode::Down | KeyCode::Char('j') => app.inspect_scroll_down(),
-                            KeyCode::PageUp => app.inspect_scroll_page_up(10),
-                            KeyCode::PageDown => app.inspect_scroll_page_down(10),
-                            KeyCode::Esc | KeyCode::Char('q') => app.toggle_inspect_mode(),
-                            _ => {}
-                        }
-                    }
-                    ViewMode::Normal => {
-                        // Normal mode key handling
-                        match key.code {
-                            KeyCode::Enter => app.submit(),
-                            KeyCode::Tab => app.complete_command(),
-                            KeyCode::Char(c) => {
-                                app.reset_completions();
-                                app.enter_char(c);
-                            }
-                            KeyCode::Backspace => {
-                                app.reset_completions();
-                                app.delete_char();
-                            }
-                            KeyCode::Left => app.move_cursor_left(),
-                            KeyCode::Right => app.move_cursor_right(),
-                            KeyCode::Up => app.history_prev(),
-                            KeyCode::Down => app.history_next(),
-                            KeyCode::PageUp => app.scroll_page_up(10),
-                            KeyCode::PageDown => app.scroll_page_down(10),
-                            KeyCode::Esc => {
-                                if app.is_working {
-                                    app.stop_working();
-                                } else {
-                                    app.should_quit = true;
+
+                    // Handle keys based on view mode
+                    match app.view_mode {
+                        ViewMode::Sessions => {
+                            // In sessions mode, handle selection and actions
+                            match key.code {
+                                KeyCode::Up | KeyCode::Char('k') => app.session_select_up(),
+                                KeyCode::Down | KeyCode::Char('j') => app.session_select_down(),
+                                KeyCode::Enter => app.connect_selected_session(),
+                                KeyCode::Char('d') => app.delete_selected_session(),
+                                KeyCode::Esc | KeyCode::Char('q') => {
+                                    app.view_mode = ViewMode::Normal;
                                 }
+                                _ => {}
                             }
-                            KeyCode::Home => {
-                                app.cursor_pos = 0;
+                        }
+                        ViewMode::Inspect => {
+                            // In inspect mode, handle scroll and exit
+                            match key.code {
+                                KeyCode::Up | KeyCode::Char('k') => app.inspect_scroll_up(),
+                                KeyCode::Down | KeyCode::Char('j') => app.inspect_scroll_down(),
+                                KeyCode::PageUp => app.inspect_scroll_page_up(10),
+                                KeyCode::PageDown => app.inspect_scroll_page_down(10),
+                                KeyCode::Esc | KeyCode::Char('q') => app.toggle_inspect_mode(),
+                                _ => {}
                             }
-                            KeyCode::End => {
-                                app.cursor_pos = app.input.len();
+                        }
+                        ViewMode::Normal => {
+                            // Normal mode key handling
+                            match key.code {
+                                KeyCode::Enter => app.submit(),
+                                KeyCode::Tab => app.complete_command(),
+                                KeyCode::Char(c) => {
+                                    app.reset_completions();
+                                    app.enter_char(c);
+                                }
+                                KeyCode::Backspace => {
+                                    app.reset_completions();
+                                    app.delete_char();
+                                }
+                                KeyCode::Left => app.move_cursor_left(),
+                                KeyCode::Right => app.move_cursor_right(),
+                                KeyCode::Up => app.history_prev(),
+                                KeyCode::Down => app.history_next(),
+                                KeyCode::PageUp => app.scroll_page_up(10),
+                                KeyCode::PageDown => app.scroll_page_down(10),
+                                KeyCode::Esc => {
+                                    if app.is_working {
+                                        app.stop_working();
+                                    } else {
+                                        app.should_quit = true;
+                                    }
+                                }
+                                KeyCode::Home => {
+                                    app.cursor_pos = 0;
+                                }
+                                KeyCode::End => {
+                                    app.cursor_pos = app.input.len();
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
-                }
 
-                // Handle Ctrl+L to clear
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
-                    app.messages.clear();
-                    app.messages.push(super::app::Message::system("Output cleared"));
+                    // Handle Ctrl+L to clear
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+                        app.messages.clear();
+                        app.messages.push(super::app::Message::system("Output cleared"));
+                    }
                 }
+                _ => {}
             }
         }
 

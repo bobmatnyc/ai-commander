@@ -22,6 +22,6 @@ mod scroll;
 mod sessions;
 mod ui;
 
-pub use app::{App, Message, MessageDirection, SessionInfo, ViewMode};
+pub use app::{App, ClickAction, ClickableItem, Message, MessageDirection, SessionInfo, ViewMode};
 pub use events::run;
 pub use helpers::extract_ready_preview;
