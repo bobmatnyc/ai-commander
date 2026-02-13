@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use teloxide::prelude::*;
+use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, ThreadId};
 use teloxide::utils::command::BotCommands;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::error::TelegramError;
 use crate::state::TelegramState;
@@ -42,6 +43,15 @@ pub enum Command {
 
     #[command(description = "List available projects")]
     List,
+
+    #[command(description = "Enable group mode for this supergroup")]
+    GroupMode,
+
+    #[command(description = "Create topic for session: /topic <session>")]
+    Topic(String),
+
+    #[command(description = "List topics and their sessions")]
+    Topics,
 }
 
 /// Handle the /start command.
@@ -554,6 +564,7 @@ pub async fn handle_list(
         .map(|(name, _)| name);
 
     let mut text = String::new();
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
 
     // Show projects if any
     if !projects.is_empty() {
@@ -565,13 +576,18 @@ pub async fn handle_list(
                 "📁"
             };
             text.push_str(&format!("{} <b>{}</b>\n   <code>{}</code>\n\n", marker, name, path));
+            // Add button for each project
+            buttons.push(vec![InlineKeyboardButton::callback(
+                format!("➡️ {}", name),
+                format!("connect:{}", name),
+            )]);
         }
     }
 
     // Show tmux sessions if any
     if !tmux_sessions.is_empty() {
         if !text.is_empty() {
-            text.push_str("\n");
+            text.push('\n');
         }
         text.push_str("<b>📟 Tmux Sessions:</b>\n\n");
 
@@ -590,17 +606,22 @@ pub async fn handle_list(
                 "📟"
             };
             text.push_str(&format!("{} <code>{}</code>\n", marker, name));
+            // Add button for each session
+            let display = name.strip_prefix("commander-").unwrap_or(name);
+            buttons.push(vec![InlineKeyboardButton::callback(
+                format!("➡️ {}", display),
+                format!("connect:{}", name),
+            )]);
         }
     }
 
-    // Add usage hints
-    text.push_str("\n<b>Commands:</b>\n");
-    if !projects.is_empty() || !tmux_sessions.is_empty() {
-        text.push_str("• <code>/connect &lt;name&gt;</code> - Connect to project or session\n");
-    }
+    text.push_str("\nClick a button to connect:");
+
+    let keyboard = InlineKeyboardMarkup::new(buttons);
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(teloxide::types::ParseMode::Html)
+        .reply_markup(keyboard)
         .await?;
 
     Ok(())
@@ -612,9 +633,17 @@ pub async fn handle_message(
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
-    let Some(text) = msg.text() else {
-        return Ok(());
+    // Extract text and thread_id early to avoid borrow issues
+    let text = match msg.text() {
+        Some(t) => t.to_string(),
+        None => return Ok(()),
     };
+    let thread_id = msg.thread_id;
+
+    // Check if this is a message in a forum topic (group mode)
+    if let Some(tid) = thread_id {
+        return handle_topic_message(bot, msg, state, &text, tid).await;
+    }
 
     // Check for @alias prefix to route to specific project
     if let Some(rest) = text.strip_prefix('@') {
@@ -676,7 +705,7 @@ pub async fn handle_message(
         .await?;
 
     // Send message to the project with message ID for reply threading
-    match state.send_message(msg.chat.id, text, Some(msg.id)).await {
+    match state.send_message(msg.chat.id, &text, Some(msg.id)).await {
         Ok(()) => {
             debug!(chat_id = %msg.chat.id, message = %text, "Message sent to project");
             // Response will be polled and sent back by the polling task
@@ -685,6 +714,101 @@ pub async fn handle_message(
             bot.send_message(msg.chat.id, format!("❌ Error: {}", e))
                 .await?;
             error!(chat_id = %msg.chat.id, error = %e, "Failed to send message");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle messages sent in forum topics (group mode).
+async fn handle_topic_message(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    text: &str,
+    thread_id: ThreadId,
+) -> ResponseResult<()> {
+    // Check if group mode is enabled for this chat
+    if !state.is_group_mode(msg.chat.id.0).await {
+        // Not in group mode - ignore topic messages or send help
+        debug!(
+            chat_id = %msg.chat.id,
+            thread_id = ?thread_id,
+            "Topic message received but group mode not enabled"
+        );
+        return Ok(());
+    }
+
+    // Check if this topic has a session mapping
+    if !state.has_topic_session(msg.chat.id, thread_id).await {
+        // Topic not configured - could be General topic or unlinked topic
+        // Check if there's a topic config (for topics created outside of /topic command)
+        if let Some(topic_config) = state.get_topic_session(msg.chat.id.0, thread_id.0.0).await {
+            // Topic exists in config but session not active - reconnect
+            match state.connect_topic(msg.chat.id, thread_id, &topic_config.session_name).await {
+                Ok(_) => {
+                    debug!(
+                        chat_id = %msg.chat.id,
+                        thread_id = ?thread_id,
+                        session = %topic_config.session_name,
+                        "Reconnected topic session"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        chat_id = %msg.chat.id,
+                        thread_id = ?thread_id,
+                        error = %e,
+                        "Failed to reconnect topic session"
+                    );
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("Failed to connect to session: {}", e),
+                    )
+                    .message_thread_id(thread_id)
+                    .await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            // Topic has no session mapping - ignore or send help
+            bot.send_message(
+                msg.chat.id,
+                "This topic is not linked to a session.\n\n\
+                Use <code>/topic &lt;session&gt;</code> in the main chat to create a linked topic.",
+            )
+            .message_thread_id(thread_id)
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+            return Ok(());
+        }
+    }
+
+    // Send typing indicator to the topic
+    let _ = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+        .message_thread_id(thread_id)
+        .await;
+
+    // Send message to the topic's session
+    match state.send_message_to_topic(msg.chat.id, thread_id, text, Some(msg.id)).await {
+        Ok(()) => {
+            debug!(
+                chat_id = %msg.chat.id,
+                thread_id = ?thread_id,
+                message = %text,
+                "Message sent to topic session"
+            );
+        }
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("❌ Error: {}", e))
+                .message_thread_id(thread_id)
+                .await?;
+            error!(
+                chat_id = %msg.chat.id,
+                thread_id = ?thread_id,
+                error = %e,
+                "Failed to send topic message"
+            );
         }
     }
 
@@ -711,20 +835,31 @@ pub async fn handle_sessions(
         .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
 
     let mut text = String::from("<b>Tmux Sessions:</b>\n\n");
-    for (name, is_commander) in sessions {
-        let marker = if current_session.as_ref().map(|s| s == &name).unwrap_or(false) {
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+
+    for (name, is_commander) in &sessions {
+        let marker = if current_session.as_ref().map(|s| s == name).unwrap_or(false) {
             "✅"
-        } else if is_commander {
+        } else if *is_commander {
             "🤖"
         } else {
             "📟"
         };
         text.push_str(&format!("{} <code>{}</code>\n", marker, name));
+        // Add button for each session
+        let display = name.strip_prefix("commander-").unwrap_or(name);
+        buttons.push(vec![InlineKeyboardButton::callback(
+            format!("➡️ {}", display),
+            format!("connect:{}", name),
+        )]);
     }
-    text.push_str("\nUse <code>/connect &lt;name&gt;</code> to attach");
+    text.push_str("\nClick a button to connect:");
+
+    let keyboard = InlineKeyboardMarkup::new(buttons);
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(teloxide::types::ParseMode::Html)
+        .reply_markup(keyboard)
         .await?;
 
     Ok(())
@@ -996,6 +1131,312 @@ pub async fn handle_send(
     Ok(())
 }
 
+/// Handle callback queries from inline keyboard buttons.
+pub async fn handle_callback(
+    bot: Bot,
+    q: CallbackQuery,
+    state: Arc<TelegramState>,
+) -> ResponseResult<()> {
+    let Some(data) = &q.data else {
+        return Ok(());
+    };
+
+    // Acknowledge callback immediately to remove loading state
+    bot.answer_callback_query(&q.id).await?;
+
+    // Parse callback data
+    if let Some(session) = data.strip_prefix("connect:") {
+        let Some(msg) = q.message.as_ref() else {
+            return Ok(());
+        };
+        let chat_id = msg.chat().id;
+
+        // Check authorization
+        if !state.is_authorized(chat_id.0).await {
+            bot.send_message(
+                chat_id,
+                "Not authorized. Use /pair <code> first.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // Disconnect from current session if connected
+        if let Some((current_project, _)) = state.get_session_info(chat_id).await {
+            if current_project == session {
+                bot.send_message(chat_id, format!("Already connected to <b>{}</b>", current_project))
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await?;
+                return Ok(());
+            }
+            let _ = state.disconnect(chat_id).await;
+        }
+
+        // Connect to the selected session
+        match state.connect(chat_id, session).await {
+            Ok((name, tool_id)) => {
+                let adapter = adapter_display_name(&tool_id);
+                bot.send_message(
+                    chat_id,
+                    format!(
+                        "✅ Connected to <b>{}</b>\n\nSend messages to interact with {}.",
+                        name, adapter
+                    ),
+                )
+                .parse_mode(teloxide::types::ParseMode::Html)
+                .await?;
+                info!(chat_id = %chat_id, project = %name, "User connected via inline button");
+            }
+            Err(e) => {
+                bot.send_message(chat_id, format!("❌ Failed to connect: {}", e))
+                    .await?;
+                error!(chat_id = %chat_id, error = %e, "Connection via button failed");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle the /groupmode command - enable group mode for a supergroup.
+pub async fn handle_groupmode(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use /pair <code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Check if this is a supergroup with forums enabled
+    let chat = bot.get_chat(msg.chat.id).await?;
+
+    // Extract is_forum from the supergroup struct
+    let is_forum = match &chat.kind {
+        teloxide::types::ChatKind::Public(public) => {
+            match &public.kind {
+                teloxide::types::PublicChatKind::Supergroup(sg) => sg.is_forum,
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+
+    let is_supergroup = matches!(&chat.kind, teloxide::types::ChatKind::Public(ref p)
+        if matches!(p.kind, teloxide::types::PublicChatKind::Supergroup(_)));
+
+    if !is_supergroup {
+        bot.send_message(
+            msg.chat.id,
+            "Group mode is only available in supergroups.\n\n\
+            To use group mode:\n\
+            1. Convert this group to a supergroup (add a username or enable topics)\n\
+            2. Enable Forum Topics in group settings\n\
+            3. Run /groupmode again",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Check if forums are enabled
+    if !is_forum {
+        bot.send_message(
+            msg.chat.id,
+            "Forum Topics are not enabled for this supergroup.\n\n\
+            To enable:\n\
+            1. Go to Group Settings\n\
+            2. Enable \"Topics\"\n\
+            3. Run /groupmode again",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Enable group mode
+    if let Err(e) = state.enable_group_mode(msg.chat.id.0).await {
+        bot.send_message(msg.chat.id, format!("Failed to enable group mode: {}", e))
+            .await?;
+        return Ok(());
+    }
+
+    bot.send_message(
+        msg.chat.id,
+        "Group mode enabled!\n\n\
+        You can now create topics for different sessions:\n\
+        • <code>/topic &lt;session&gt;</code> - Create a topic for a session\n\
+        • <code>/topics</code> - List all topics and their sessions\n\n\
+        Messages in each topic will route to that topic's session.",
+    )
+    .parse_mode(teloxide::types::ParseMode::Html)
+    .await?;
+
+    info!(chat_id = %msg.chat.id, "Group mode enabled");
+    Ok(())
+}
+
+/// Handle the /topic command - create a topic for a session.
+pub async fn handle_topic(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    session_name: String,
+) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use /pair <code> first.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let session_name = session_name.trim();
+
+    if session_name.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "Please specify a session name.\n\n\
+            <b>Usage:</b> <code>/topic &lt;session&gt;</code>\n\n\
+            Use /list to see available projects and sessions.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Check if group mode is enabled
+    if !state.is_group_mode(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Group mode is not enabled.\n\n\
+            Run /groupmode first to enable it.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Create the forum topic
+    // Default icon color: 0x6FB9F0 (blue) = 7322096
+    let icon_color: u32 = 7322096;
+
+    // teloxide 0.13 create_forum_topic requires icon_custom_emoji_id
+    // We'll use an empty string to get the default icon
+    let topic_result = bot.create_forum_topic(msg.chat.id, session_name, icon_color, "")
+        .await;
+
+    match topic_result {
+        Ok(topic) => {
+            let thread_id = topic.thread_id;
+
+            // Connect the topic to the session
+            match state.connect_topic(msg.chat.id, thread_id, session_name).await {
+                Ok((connected_name, tool_id)) => {
+                    let adapter_name = adapter_display_name(&tool_id);
+
+                    // Send confirmation to the topic
+                    bot.send_message(msg.chat.id, format!(
+                        "Topic created and connected to <b>{}</b>!\n\n\
+                        Send messages in this topic to interact with {}.",
+                        connected_name, adapter_name
+                    ))
+                    .message_thread_id(thread_id)
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await?;
+
+                    info!(
+                        chat_id = %msg.chat.id,
+                        thread_id = ?thread_id,
+                        session = %session_name,
+                        "Topic created for session"
+                    );
+                }
+                Err(e) => {
+                    // Topic was created but connection failed
+                    bot.send_message(msg.chat.id, format!(
+                        "Topic created but failed to connect to session: {}\n\n\
+                        The topic exists but is not linked to a session.",
+                        e
+                    ))
+                    .message_thread_id(thread_id)
+                    .await?;
+                    error!(
+                        chat_id = %msg.chat.id,
+                        error = %e,
+                        "Failed to connect topic to session"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!(
+                "Failed to create topic: {}\n\n\
+                Make sure the bot has 'Manage Topics' permission.",
+                e
+            ))
+            .await?;
+            error!(chat_id = %msg.chat.id, error = %e, "Failed to create forum topic");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle the /topics command - list all topics and their sessions.
+pub async fn handle_topics(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+) -> ResponseResult<()> {
+    // Check if group mode is enabled
+    if !state.is_group_mode(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Group mode is not enabled.\n\n\
+            Run /groupmode first to enable it, then use /topic to create topics.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let topics = state.list_topics(msg.chat.id.0).await;
+
+    if topics.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "No topics configured.\n\n\
+            Use <code>/topic &lt;session&gt;</code> to create a topic for a session.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    let mut text = String::from("<b>Forum Topics:</b>\n\n");
+    for topic in &topics {
+        text.push_str(&format!(
+            "• <b>{}</b> (thread {})\n   tmux: <code>{}</code>\n\n",
+            html_escape(&topic.session_name),
+            topic.thread_id,
+            html_escape(&topic.tmux_session)
+        ));
+    }
+
+    bot.send_message(msg.chat.id, text)
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+
+    Ok(())
+}
+
 /// Dispatch commands to appropriate handlers.
 pub async fn handle_command(
     bot: Bot,
@@ -1014,5 +1455,8 @@ pub async fn handle_command(
         Command::Send(message) => handle_send(bot, msg, state, message).await,
         Command::Status => handle_status(bot, msg, state).await,
         Command::List => handle_list(bot, msg, state).await,
+        Command::GroupMode => handle_groupmode(bot, msg, state).await,
+        Command::Topic(session) => handle_topic(bot, msg, state, session).await,
+        Command::Topics => handle_topics(bot, msg, state).await,
     }
 }

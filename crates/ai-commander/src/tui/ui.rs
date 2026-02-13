@@ -8,10 +8,13 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, InputMode, MessageDirection, SessionInfo, ViewMode};
+use super::app::{App, ClickAction, InputMode, MessageDirection, SessionInfo, ViewMode};
 
 /// Draw the TUI.
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
+    // Clear clickable items before each render cycle
+    app.clear_clickable_items();
+
     match app.view_mode {
         ViewMode::Normal => draw_normal(frame, app),
         ViewMode::Inspect => draw_inspect(frame, app),
@@ -20,7 +23,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 /// Draw normal chat mode.
-fn draw_normal(frame: &mut Frame, app: &App) {
+fn draw_normal(frame: &mut Frame, app: &mut App) {
     // Check if we need extra space for command hint
     let hint_height = if app.get_command_hint().is_some() { 1 } else { 0 };
 
@@ -40,6 +43,9 @@ fn draw_normal(frame: &mut Frame, app: &App) {
     draw_status(frame, app, chunks[2]);
     draw_input(frame, app, chunks[3]);
     draw_footer(frame, app, chunks[4]);
+
+    // Store output area rect for click detection
+    app.output_area = Some(chunks[1]);
 }
 
 /// Draw inspect mode (live tmux view).
@@ -185,18 +191,21 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Draw the scrollable output area.
-fn draw_output(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_output(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = if app.scroll_offset > 0 {
         format!(" Output [scroll: {}] ", app.scroll_offset)
     } else {
         " Output ".to_string()
     };
 
-    // Build lines from messages
+    // Build lines from messages and track session names for clickable regions
+    let mut session_line_info: Vec<(usize, String)> = Vec::new(); // (line_index, session_name)
+
     let lines: Vec<Line> = app
         .messages
         .iter()
-        .map(|msg| {
+        .enumerate()
+        .map(|(idx, msg)| {
             let style = match msg.direction {
                 MessageDirection::Sent => Style::default().fg(Color::Cyan),
                 MessageDirection::Received => Style::default().fg(Color::Green),
@@ -210,6 +219,14 @@ fn draw_output(frame: &mut Frame, app: &App, area: Rect) {
             };
 
             let content = format!("{}{}", prefix, msg.content);
+
+            // Detect session names in /list output (format: "  [Claude|Shell|?] session-name ...")
+            if msg.direction == MessageDirection::System {
+                if let Some(session_name) = extract_clickable_session(&msg.content) {
+                    session_line_info.push((idx, session_name));
+                }
+            }
+
             Line::from(vec![Span::styled(content, style)])
         })
         .collect();
@@ -218,34 +235,97 @@ fn draw_output(frame: &mut Frame, app: &App, area: Rect) {
     let inner_height = area.height.saturating_sub(2) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;
 
-    // Estimate total lines after wrapping
-    let total_wrapped_lines: usize = lines
-        .iter()
-        .map(|line| {
-            let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
-            if inner_width > 0 {
-                ((line_len + inner_width - 1) / inner_width).max(1)
-            } else {
-                1
-            }
-        })
-        .sum();
+    // Build cumulative line positions for click tracking
+    let mut cumulative_lines: Vec<usize> = Vec::with_capacity(lines.len() + 1);
+    cumulative_lines.push(0);
+    let mut total = 0usize;
+    for line in &lines {
+        let line_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
+        let wrapped_count = if inner_width > 0 {
+            ((line_len + inner_width - 1) / inner_width).max(1)
+        } else {
+            1
+        };
+        total += wrapped_count;
+        cumulative_lines.push(total);
+    }
+    let total_wrapped_lines = total;
 
     // Calculate scroll offset to show latest content, adjusted by user scroll
     let scroll_offset = if total_wrapped_lines > inner_height {
-        (total_wrapped_lines - inner_height).saturating_sub(app.scroll_offset) as u16
+        (total_wrapped_lines - inner_height).saturating_sub(app.scroll_offset)
     } else {
         0
     };
+
+    // Register clickable items for visible session lines
+    let inner_area = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    for (line_idx, session_name) in session_line_info {
+        // Get the screen row for this line (after wrapping and scroll)
+        let line_start = cumulative_lines.get(line_idx).copied().unwrap_or(0);
+
+        // Calculate visible row (0-indexed from top of inner area)
+        if line_start >= scroll_offset {
+            let visible_row = line_start - scroll_offset;
+            if visible_row < inner_height {
+                // Create clickable region for this session line
+                let click_rect = Rect {
+                    x: inner_area.x,
+                    y: inner_area.y + visible_row as u16,
+                    width: inner_area.width,
+                    height: 1,
+                };
+                app.add_clickable_item(click_rect, ClickAction::Connect(session_name));
+            }
+        }
+    }
 
     let text = Text::from(lines);
 
     let output = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
-        .scroll((scroll_offset, 0));
+        .scroll((scroll_offset as u16, 0));
 
     frame.render_widget(output, area);
+}
+
+/// Extract session name from a /list output line.
+///
+/// Format: "  [Claude|Shell|?] session-name (connected)? - activity"
+fn extract_clickable_session(content: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+
+    // Check for session indicator pattern
+    let after_indicator = if trimmed.starts_with("[Claude]") {
+        trimmed.strip_prefix("[Claude]")
+    } else if trimmed.starts_with("[Shell]") {
+        trimmed.strip_prefix("[Shell]")
+    } else if trimmed.starts_with("[?]") {
+        trimmed.strip_prefix("[?]")
+    } else {
+        None
+    }?;
+
+    // Session name follows, separated by space
+    let session_part = after_indicator.trim_start();
+
+    // Extract session name (up to space, "(connected)", or " - ")
+    let session_name = session_part
+        .split(|c: char| c.is_whitespace() || c == '(')
+        .next()?;
+
+    if session_name.is_empty() {
+        return None;
+    }
+
+    Some(session_name.to_string())
 }
 
 /// Draw the status/progress bar.
@@ -363,4 +443,58 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
     frame.render_widget(footer, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_clickable_session_claude() {
+        let result = extract_clickable_session("  [Claude] commander-myproject (connected) - Waiting for input");
+        assert_eq!(result, Some("commander-myproject".to_string()));
+    }
+
+    #[test]
+    fn test_extract_clickable_session_shell() {
+        let result = extract_clickable_session("  [Shell] my-shell-session - Active");
+        assert_eq!(result, Some("my-shell-session".to_string()));
+    }
+
+    #[test]
+    fn test_extract_clickable_session_unknown() {
+        let result = extract_clickable_session("  [?] unknown-session - Idle");
+        assert_eq!(result, Some("unknown-session".to_string()));
+    }
+
+    #[test]
+    fn test_extract_clickable_session_no_indicator() {
+        let result = extract_clickable_session("Sessions:");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_clickable_session_not_session_line() {
+        let result = extract_clickable_session("Welcome to Commander TUI");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_clickable_item_contains() {
+        let item = super::super::app::ClickableItem {
+            rect: Rect { x: 10, y: 5, width: 20, height: 1 },
+            action: super::super::app::ClickAction::Connect("test".to_string()),
+        };
+
+        // Inside region
+        assert!(item.contains(10, 5));
+        assert!(item.contains(15, 5));
+        assert!(item.contains(29, 5)); // x + width - 1
+
+        // Outside region
+        assert!(!item.contains(9, 5));   // Before x
+        assert!(!item.contains(30, 5));  // After x + width
+        assert!(!item.contains(15, 4));  // Before y
+        assert!(!item.contains(15, 6));  // After y + height
+    }
 }

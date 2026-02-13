@@ -10,7 +10,7 @@ use tokio::time::interval;
 use tracing::{info, warn};
 
 use crate::error::{Result, TelegramError};
-use crate::handlers::{handle_command, handle_message, Command};
+use crate::handlers::{handle_callback, handle_command, handle_message, Command};
 use crate::ngrok::NgrokTunnel;
 use crate::state::{create_shared_state, PollResult, TelegramState};
 
@@ -140,8 +140,16 @@ impl TelegramBot {
         // Set up the command and message handlers
         let state_for_commands = Arc::clone(&state);
         let state_for_messages = Arc::clone(&state);
+        let state_for_callbacks = Arc::clone(&state);
 
         let handler = dptree::entry()
+            .branch(
+                Update::filter_callback_query()
+                    .endpoint(move |bot: Bot, q: teloxide::types::CallbackQuery| {
+                        let state = Arc::clone(&state_for_callbacks);
+                        async move { handle_callback(bot, q, state).await }
+                    }),
+            )
             .branch(
                 Update::filter_message()
                     .filter_command::<Command>()
@@ -231,100 +239,127 @@ impl TelegramBot {
 
 /// Background task to poll for output from connected sessions and send responses.
 async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
-    use teloxide::types::{ChatId, ChatAction, MessageId, ReplyParameters};
+    use teloxide::types::{ChatAction, MessageId, ReplyParameters};
     use std::collections::HashMap;
 
     let mut poll_interval = interval(Duration::from_millis(POLL_INTERVAL_MS));
 
-    // Track progress message IDs per chat
+    // Track progress message IDs per session key
     let mut progress_messages: HashMap<i64, MessageId> = HashMap::new();
 
     loop {
         poll_interval.tick().await;
 
-        // Get all chat IDs that are waiting for responses
-        let waiting_ids = state.get_waiting_chat_ids().await;
+        // Get all sessions that are waiting for responses (includes topic sessions)
+        let waiting_sessions = state.get_waiting_sessions().await;
 
-        for chat_id in waiting_ids {
+        for (session_key, chat_id, thread_id) in waiting_sessions {
             // Refresh typing indicator to show processing is ongoing
-            let _ = bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await;
+            if let Some(tid) = thread_id {
+                let _ = bot.send_chat_action(chat_id, ChatAction::Typing)
+                    .message_thread_id(tid)
+                    .await;
+            } else {
+                let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+            }
 
             // Poll for output from this session
-            match state.poll_output(ChatId(chat_id)).await {
+            let poll_result = if let Some(tid) = thread_id {
+                state.poll_topic_output(chat_id, tid).await
+            } else {
+                state.poll_output(chat_id).await
+            };
+
+            match poll_result {
                 Ok(PollResult::Progress(progress_msg)) => {
                     // Send or update progress message
-                    if let Some(&msg_id) = progress_messages.get(&chat_id) {
+                    if let Some(&msg_id) = progress_messages.get(&session_key) {
                         // Update existing progress message (ignore errors - may have been deleted)
-                        let _ = bot.edit_message_text(ChatId(chat_id), msg_id, &progress_msg).await;
+                        let _ = bot.edit_message_text(chat_id, msg_id, &progress_msg).await;
                     } else {
                         // Send new progress message
-                        match bot.send_message(ChatId(chat_id), &progress_msg).await {
+                        let mut req = bot.send_message(chat_id, &progress_msg);
+                        if let Some(tid) = thread_id {
+                            req = req.message_thread_id(tid);
+                        }
+                        match req.await {
                             Ok(sent) => {
-                                progress_messages.insert(chat_id, sent.id);
+                                progress_messages.insert(session_key, sent.id);
                             }
                             Err(e) => {
-                                warn!(chat_id = %chat_id, error = %e, "Failed to send progress message");
+                                warn!(chat_id = %chat_id.0, error = %e, "Failed to send progress message");
                             }
                         }
                     }
                 }
                 Ok(PollResult::IncrementalSummary(summary)) => {
                     // Send incremental summary as a separate message (not an edit)
-                    // This allows user to see progression over time
-                    if let Err(e) = bot.send_message(ChatId(chat_id), &summary).await {
-                        warn!(chat_id = %chat_id, error = %e, "Failed to send incremental summary");
-                    } else {
-                        info!(chat_id = %chat_id, "Incremental summary sent");
+                    let mut req = bot.send_message(chat_id, &summary);
+                    if let Some(tid) = thread_id {
+                        req = req.message_thread_id(tid);
                     }
-                    // Continue polling - don't stop collection
+                    if let Err(e) = req.await {
+                        warn!(chat_id = %chat_id.0, error = %e, "Failed to send incremental summary");
+                    } else {
+                        info!(chat_id = %chat_id.0, "Incremental summary sent");
+                    }
                 }
                 Ok(PollResult::Summarizing) => {
                     // Update progress message to show summarization
                     let summarizing_msg = "🤖 Summarizing output...";
-                    if let Some(&msg_id) = progress_messages.get(&chat_id) {
-                        let _ = bot.edit_message_text(ChatId(chat_id), msg_id, summarizing_msg).await;
+                    if let Some(&msg_id) = progress_messages.get(&session_key) {
+                        let _ = bot.edit_message_text(chat_id, msg_id, summarizing_msg).await;
                     } else {
                         // Send new summarizing message if no progress message exists
-                        match bot.send_message(ChatId(chat_id), summarizing_msg).await {
+                        let mut req = bot.send_message(chat_id, summarizing_msg);
+                        if let Some(tid) = thread_id {
+                            req = req.message_thread_id(tid);
+                        }
+                        match req.await {
                             Ok(sent) => {
-                                progress_messages.insert(chat_id, sent.id);
+                                progress_messages.insert(session_key, sent.id);
                             }
                             Err(e) => {
-                                warn!(chat_id = %chat_id, error = %e, "Failed to send summarizing message");
+                                warn!(chat_id = %chat_id.0, error = %e, "Failed to send summarizing message");
                             }
                         }
                     }
                 }
-                Ok(PollResult::Complete(response, message_id)) => {
+                Ok(PollResult::Complete(response, message_id, response_thread_id)) => {
                     // Delete progress message if it exists
-                    if let Some(prog_msg_id) = progress_messages.remove(&chat_id) {
-                        let _ = bot.delete_message(ChatId(chat_id), prog_msg_id).await;
+                    if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
+                        let _ = bot.delete_message(chat_id, prog_msg_id).await;
                     }
 
-                    // Send the final response, as a reply if we have a message ID
-                    let send_result = if let Some(msg_id) = message_id {
-                        bot.send_message(ChatId(chat_id), &response)
-                            .reply_parameters(ReplyParameters::new(msg_id))
-                            .await
-                    } else {
-                        bot.send_message(ChatId(chat_id), &response).await
-                    };
+                    // Determine which thread to send to (prefer response's thread_id)
+                    let target_thread_id = response_thread_id.or(thread_id);
 
-                    if let Err(e) = send_result {
-                        warn!(chat_id = %chat_id, error = %e, "Failed to send response");
+                    // Send the final response, as a reply if we have a message ID
+                    let mut req = bot.send_message(chat_id, &response);
+
+                    if let Some(tid) = target_thread_id {
+                        req = req.message_thread_id(tid);
+                    }
+
+                    if let Some(msg_id) = message_id {
+                        req = req.reply_parameters(ReplyParameters::new(msg_id));
+                    }
+
+                    if let Err(e) = req.await {
+                        warn!(chat_id = %chat_id.0, error = %e, "Failed to send response");
                     } else {
-                        info!(chat_id = %chat_id, "Response sent to user");
+                        info!(chat_id = %chat_id.0, thread_id = ?target_thread_id, "Response sent to user");
                     }
                 }
                 Ok(PollResult::NoOutput) => {
                     // No response ready yet, continue polling
                 }
                 Err(e) => {
-                    warn!(chat_id = %chat_id, error = %e, "Error polling output");
+                    warn!(chat_id = %chat_id.0, error = %e, "Error polling output");
 
                     // Clean up progress message on error
-                    if let Some(prog_msg_id) = progress_messages.remove(&chat_id) {
-                        let _ = bot.delete_message(ChatId(chat_id), prog_msg_id).await;
+                    if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
+                        let _ = bot.delete_message(chat_id, prog_msg_id).await;
                     }
                 }
             }

@@ -2440,7 +2440,7 @@ mod tests {
     fn test_completer_matches_prefix() {
         use rustyline::completion::Completer;
 
-        let completer = CommandCompleter;
+        let completer = CommandCompleter::new(std::env::temp_dir());
         let history = rustyline::history::DefaultHistory::new();
         let ctx = rustyline::Context::new(&history);
 
@@ -2455,7 +2455,7 @@ mod tests {
     fn test_completer_multiple_matches() {
         use rustyline::completion::Completer;
 
-        let completer = CommandCompleter;
+        let completer = CommandCompleter::new(std::env::temp_dir());
         let history = rustyline::history::DefaultHistory::new();
         let ctx = rustyline::Context::new(&history);
 
@@ -2474,7 +2474,7 @@ mod tests {
     fn test_completer_no_match() {
         use rustyline::completion::Completer;
 
-        let completer = CommandCompleter;
+        let completer = CommandCompleter::new(std::env::temp_dir());
         let history = rustyline::history::DefaultHistory::new();
         let ctx = rustyline::Context::new(&history);
 
@@ -2487,7 +2487,7 @@ mod tests {
     fn test_completer_non_slash_ignored() {
         use rustyline::completion::Completer;
 
-        let completer = CommandCompleter;
+        let completer = CommandCompleter::new(std::env::temp_dir());
         let history = rustyline::history::DefaultHistory::new();
         let ctx = rustyline::Context::new(&history);
 

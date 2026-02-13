@@ -15,6 +15,31 @@ use commander_orchestrator::AgentOrchestrator;
 use std::sync::Arc;
 #[cfg(feature = "agents")]
 use tokio::runtime::Handle as TokioHandle;
+use ratatui::layout::Rect;
+
+/// Represents a clickable region in the TUI output.
+#[derive(Clone)]
+pub struct ClickableItem {
+    /// Screen region where this item is clickable.
+    pub rect: Rect,
+    /// Action to execute when clicked.
+    pub action: ClickAction,
+}
+
+/// Action to execute when a clickable item is clicked.
+#[derive(Clone)]
+pub enum ClickAction {
+    /// Connect to a session by name.
+    Connect(String),
+}
+
+impl ClickableItem {
+    /// Check if this clickable item contains the given screen coordinates.
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        self.rect.x <= x && x < self.rect.x + self.rect.width
+            && self.rect.y <= y && y < self.rect.y + self.rect.height
+    }
+}
 
 /// Direction of a message in the output area.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +224,12 @@ pub struct App {
     #[cfg(feature = "agents")]
     /// Tokio runtime handle for async operations.
     pub(super) runtime_handle: Option<Arc<TokioHandle>>,
+
+    // Mouse click support
+    /// Clickable items in the current frame (cleared on each render).
+    pub clickable_items: Vec<ClickableItem>,
+    /// Current output area rect (for coordinate translation).
+    pub output_area: Option<Rect>,
 }
 
 impl App {
@@ -261,6 +292,9 @@ impl App {
             orchestrator: None,
             #[cfg(feature = "agents")]
             runtime_handle: None,
+
+            clickable_items: Vec::new(),
+            output_area: None,
         };
 
         // Add welcome message
@@ -272,6 +306,37 @@ impl App {
         }
 
         app
+    }
+
+    /// Handle a mouse click at the given screen coordinates.
+    ///
+    /// Iterates through registered clickable items and executes the
+    /// corresponding action if the click falls within a clickable region.
+    pub fn handle_click(&mut self, x: u16, y: u16) {
+        // Find the first clickable item containing this point
+        let action = self.clickable_items.iter()
+            .find(|item| item.contains(x, y))
+            .map(|item| item.action.clone());
+
+        if let Some(action) = action {
+            match action {
+                ClickAction::Connect(session_name) => {
+                    if let Err(e) = self.connect(&session_name) {
+                        self.messages.push(Message::system(format!("Error: {}", e)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clear clickable items for the next render cycle.
+    pub fn clear_clickable_items(&mut self) {
+        self.clickable_items.clear();
+    }
+
+    /// Register a clickable item for the current frame.
+    pub fn add_clickable_item(&mut self, rect: Rect, action: ClickAction) {
+        self.clickable_items.push(ClickableItem { rect, action });
     }
 }
 
