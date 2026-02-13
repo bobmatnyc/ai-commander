@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2025-02-12
+
+### Added
+- TUI clickable session links with mouse support - click session names to connect
+- Telegram inline keyboard buttons for improved mobile interaction
+- Telegram Forum Topics support with /groupmode, /topic, and /topics commands
+- Comprehensive autocomplete enhancements for TUI and REPL
+- Incremental AI summaries every 50 lines of output
+- Real-time progress messages during output collection
+- LLM interpretation added to /status command
+- Consolidated /session into /connect command
+
+### Changed
+- Improved session management workflow with streamlined commands
+
 ## [0.1.0] - 2026-01-29
 
 ### Added
@@ -24,5 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 293 tests passing (8 ignored)
 - Rust 2021 edition
 
-[Unreleased]: https://github.com/owner/ai-commander/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/owner/ai-commander/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/owner/ai-commander/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/owner/ai-commander/releases/tag/v0.1.0
