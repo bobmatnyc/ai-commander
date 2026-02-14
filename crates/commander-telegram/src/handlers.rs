@@ -274,13 +274,17 @@ pub async fn handle_connect(
 ) -> ResponseResult<()> {
     // Check authorization first
     if !state.is_authorized(msg.chat.id.0).await {
-        bot.send_message(
-            msg.chat.id,
-            "Not authorized. Use /pair <code> first.\n\n\
-            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
-        )
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .await?;
+        if let Err(e) = bot
+            .send_message(
+                msg.chat.id,
+                "Not authorized. Use /pair <code> first.\n\n\
+                Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await
+        {
+            error!(chat_id = %msg.chat.id, error = %e, "Failed to send authorization error message");
+        }
         return Ok(());
     }
 
@@ -332,8 +336,9 @@ pub async fn handle_connect(
 
     match connect_args {
         ConnectArgs::Existing(project_name) => {
-            bot.send_message(msg.chat.id, format!("Connecting to {}...", project_name))
-                .await?;
+            let _ = bot
+                .send_message(msg.chat.id, format!("Connecting to {}...", project_name))
+                .await;
 
             match state.connect(msg.chat.id, &project_name).await {
                 Ok((connected_name, tool_id)) => {
@@ -347,8 +352,12 @@ pub async fn handle_connect(
                     info!(chat_id = %msg.chat.id, project = %connected_name, "User connected to project");
                 }
                 Err(e) => {
-                    bot.send_message(msg.chat.id, format!("❌ Failed to connect: {}", e))
-                        .await?;
+                    if let Err(send_err) = bot
+                        .send_message(msg.chat.id, format!("❌ Failed to connect: {}", e))
+                        .await
+                    {
+                        error!(chat_id = %msg.chat.id, send_error = %send_err, "Failed to send connection error message");
+                    }
                     error!(chat_id = %msg.chat.id, error = %e, "Connection failed");
                 }
             }
@@ -357,8 +366,12 @@ pub async fn handle_connect(
             // Check if name matches an existing tmux session - if so, use connect() which handles fallback
             let sessions = state.list_tmux_sessions();
             if sessions.iter().any(|(s, _)| s == &name) {
-                bot.send_message(msg.chat.id, format!("Found existing session '{}', connecting...", name))
-                    .await?;
+                let _ = bot
+                    .send_message(
+                        msg.chat.id,
+                        format!("Found existing session '{}', connecting...", name),
+                    )
+                    .await;
 
                 match state.connect(msg.chat.id, &name).await {
                     Ok((connected_name, tool_id)) => {
@@ -372,14 +385,19 @@ pub async fn handle_connect(
                         info!(chat_id = %msg.chat.id, session = %name, "User connected to existing session");
                     }
                     Err(e) => {
-                        bot.send_message(msg.chat.id, format!("❌ Failed to connect: {}", e))
-                            .await?;
+                        if let Err(send_err) = bot
+                            .send_message(msg.chat.id, format!("❌ Failed to connect: {}", e))
+                            .await
+                        {
+                            error!(chat_id = %msg.chat.id, send_error = %send_err, "Failed to send connection error message");
+                        }
                         error!(chat_id = %msg.chat.id, error = %e, "Session connection failed");
                     }
                 }
             } else {
-                bot.send_message(msg.chat.id, format!("Creating project {} at {}...", name, path))
-                    .await?;
+                let _ = bot
+                    .send_message(msg.chat.id, format!("Creating project {} at {}...", name, path))
+                    .await;
 
                 match state.connect_new(msg.chat.id, &path, &adapter, &name).await {
                     Ok((connected_name, tool_id)) => {
@@ -393,8 +411,12 @@ pub async fn handle_connect(
                         info!(chat_id = %msg.chat.id, project = %connected_name, path = %path, "User created and connected to project");
                     }
                     Err(e) => {
-                        bot.send_message(msg.chat.id, format!("❌ Failed to create project: {}", e))
-                            .await?;
+                        if let Err(send_err) = bot
+                            .send_message(msg.chat.id, format!("❌ Failed to create project: {}", e))
+                            .await
+                        {
+                            error!(chat_id = %msg.chat.id, send_error = %send_err, "Failed to send project creation error message");
+                        }
                         error!(chat_id = %msg.chat.id, error = %e, "Project creation failed");
                     }
                 }
