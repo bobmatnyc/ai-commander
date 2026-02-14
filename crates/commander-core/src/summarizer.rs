@@ -8,6 +8,35 @@ use tracing::warn;
 
 use crate::output_filter::clean_response;
 
+/// Default limits for fallback truncation when summarization is unavailable.
+const FALLBACK_MAX_LINES: usize = 10;
+const FALLBACK_MAX_CHARS: usize = 500;
+
+/// Truncate text for fallback when summarization is unavailable.
+///
+/// Prevents full AI responses from leaking to Telegram when OpenRouter API key
+/// is missing or fails. Returns a truncated preview with indication of remaining content.
+fn fallback_truncate(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let cleaned = clean_response(text);
+    let total_lines = cleaned.lines().count();
+    let lines: Vec<&str> = cleaned.lines().take(max_lines).collect();
+    let preview = lines.join("\n");
+
+    if preview.len() > max_chars {
+        let truncated = &preview[..max_chars];
+        // Find last complete word/line boundary
+        let boundary = truncated.rfind(|c: char| c.is_whitespace()).unwrap_or(max_chars);
+        let safe_truncated = &truncated[..boundary];
+        let remaining_chars = cleaned.len() - safe_truncated.len();
+        format!("{}...\n\n_({} more characters)_", safe_truncated, remaining_chars)
+    } else if total_lines > max_lines {
+        let remaining_lines = total_lines - max_lines;
+        format!("{}...\n\n_({} more lines)_", preview, remaining_lines)
+    } else {
+        preview
+    }
+}
+
 /// Default model to use for summarization.
 pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
 
@@ -170,13 +199,14 @@ pub fn summarize_blocking(
         .ok_or_else(|| SummarizerError::ParseError("No content in response".to_string()))
 }
 
-/// Summarize a response with automatic fallback to cleaned response.
+/// Summarize a response with automatic fallback to truncated response.
 ///
 /// This is a convenience function that handles API key lookup and fallback.
-/// If summarization fails or no API key is set, returns the cleaned raw response.
+/// If summarization fails or no API key is set, returns a truncated preview
+/// to prevent full AI responses from leaking to clients.
 pub async fn summarize_with_fallback(query: &str, raw_response: &str) -> String {
     let Some(api_key) = get_api_key() else {
-        return clean_response(raw_response);
+        return fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS);
     };
 
     let model = get_model();
@@ -184,8 +214,8 @@ pub async fn summarize_with_fallback(query: &str, raw_response: &str) -> String 
     match summarize_async(query, raw_response, &api_key, &model).await {
         Ok(summary) => summary,
         Err(e) => {
-            warn!(error = %e, "Summarization failed, using raw response");
-            clean_response(raw_response)
+            warn!(error = %e, "Summarization failed, using truncated fallback");
+            fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS)
         }
     }
 }
@@ -195,14 +225,14 @@ pub async fn summarize_with_fallback(query: &str, raw_response: &str) -> String 
 /// Blocking version of `summarize_with_fallback`.
 pub fn summarize_blocking_with_fallback(query: &str, raw_response: &str) -> String {
     let Some(api_key) = get_api_key() else {
-        return clean_response(raw_response);
+        return fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS);
     };
 
     let model = get_model();
 
     match summarize_blocking(query, raw_response, &api_key, &model) {
         Ok(summary) => summary,
-        Err(_) => clean_response(raw_response),
+        Err(_) => fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS),
     }
 }
 
@@ -356,8 +386,37 @@ mod tests {
     #[test]
     fn test_fallback_without_api_key() {
         std::env::remove_var("OPENROUTER_API_KEY");
+        // Short content should pass through unchanged
         let result = summarize_blocking_with_fallback("test query", "raw response content");
         assert_eq!(result, "raw response content");
+
+        // Long content should be truncated
+        let long_content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12";
+        let result = summarize_blocking_with_fallback("test query", long_content);
+        assert!(result.contains("line1"));
+        assert!(result.contains("more lines)_"));
+    }
+
+    #[test]
+    fn test_fallback_truncate() {
+        // Short content - no truncation
+        let short = "hello world";
+        let result = fallback_truncate(short, 10, 500);
+        assert_eq!(result, "hello world");
+
+        // More lines than limit
+        let many_lines = (1..=15).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n");
+        let result = fallback_truncate(&many_lines, 10, 500);
+        assert!(result.contains("line1"));
+        assert!(result.contains("line10"));
+        assert!(!result.contains("line11"));
+        assert!(result.contains("more lines)_"));
+
+        // More chars than limit
+        let long_line = "x".repeat(600);
+        let result = fallback_truncate(&long_line, 10, 500);
+        assert!(result.len() < 600);
+        assert!(result.contains("more characters)_"));
     }
 
     #[test]
