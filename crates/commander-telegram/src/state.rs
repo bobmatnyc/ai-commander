@@ -955,39 +955,13 @@ impl TelegramState {
 
     /// Send a message to the user's connected project.
     ///
-    /// When agents feature is enabled and orchestrator is available, messages are
-    /// processed through the UserAgent for interpretation before being sent to tmux.
+    /// Sends the user's message directly to the tmux session without LLM interpretation.
+    /// The orchestrator processing was removed as it caused the LLM response to be sent
+    /// to tmux instead of the user's actual message (output echo bug).
     pub async fn send_message(&self, chat_id: ChatId, message: &str, message_id: Option<MessageId>) -> Result<()> {
         let tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
-
-        // Try to process message through orchestrator first (agents feature)
-        #[cfg(feature = "agents")]
-        let processed_message = {
-            let mut orchestrator = self.orchestrator.write().await;
-            if let Some(ref mut orch) = *orchestrator {
-                match orch.process_user_input(message).await {
-                    Ok(processed) => {
-                        debug!(
-                            original = %message,
-                            processed = %processed,
-                            "Message processed through orchestrator"
-                        );
-                        processed
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Orchestrator processing failed, using original message");
-                        message.to_string()
-                    }
-                }
-            } else {
-                message.to_string()
-            }
-        };
-
-        #[cfg(not(feature = "agents"))]
-        let processed_message = message.to_string();
 
         let mut sessions = self.sessions.write().await;
         let session = sessions
@@ -999,17 +973,17 @@ impl TelegramState {
             .capture_output(&session.tmux_session, None, Some(200))
             .unwrap_or_default();
 
-        // Send the processed message
-        tmux.send_line(&session.tmux_session, None, &processed_message)
+        // Send the user's message directly without LLM processing
+        tmux.send_line(&session.tmux_session, None, message)
             .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
 
         // Start response collection with message ID for reply threading
-        session.start_response_collection(&processed_message, last_output, message_id);
+        session.start_response_collection(message, last_output, message_id);
 
         debug!(
             chat_id = %chat_id.0,
             project = %session.project_name,
-            message = %processed_message,
+            message = %message,
             "Message sent to project"
         );
 
@@ -1186,6 +1160,30 @@ impl TelegramState {
                     .map(|s| {
                         let is_commander = s.name.starts_with("commander-");
                         (s.name, is_commander)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// List all tmux sessions with extended status info.
+    /// Returns (session_name, is_commander_session, created_at, screen_preview) tuples.
+    pub fn list_tmux_sessions_with_status(&self) -> Vec<(String, bool, chrono::DateTime<chrono::Utc>, Option<String>)> {
+        let Some(tmux) = &self.tmux else {
+            return Vec::new();
+        };
+
+        tmux.list_sessions()
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .map(|s| {
+                        let is_commander = s.name.starts_with("commander-");
+                        // Capture a small screen preview to determine idle/active state
+                        let preview = tmux.capture_output(&s.name, None, Some(5))
+                            .ok()
+                            .map(|output| clean_screen_preview(&output, 3));
+                        (s.name, is_commander, s.created_at, preview)
                     })
                     .collect()
             })

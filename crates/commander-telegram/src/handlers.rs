@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, ThreadId};
+use teloxide::types::{CallbackQuery, ThreadId};
 use teloxide::utils::command::BotCommands;
 use tracing::{debug, error, info, warn};
 
@@ -41,7 +41,7 @@ pub enum Command {
     #[command(description = "Show current connection status")]
     Status,
 
-    #[command(description = "List available projects")]
+    #[command(description = "List available projects (alias for /sessions)")]
     List,
 
     #[command(description = "Enable group mode for this supergroup")]
@@ -563,91 +563,14 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Handle the /list command.
+/// Handle the /list command - alias for /sessions.
 pub async fn handle_list(
     bot: Bot,
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
-    let projects = state.list_projects();
-    let tmux_sessions = state.list_tmux_sessions();
-
-    if projects.is_empty() && tmux_sessions.is_empty() {
-        bot.send_message(
-            msg.chat.id,
-            "No projects or sessions found.\n\nCreate a project using the Commander CLI or start a tmux session.",
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let current_project = state
-        .get_session_info(msg.chat.id)
-        .await
-        .map(|(name, _)| name);
-
-    let mut text = String::new();
-    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-
-    // Show projects if any
-    if !projects.is_empty() {
-        text.push_str("<b>📁 Projects:</b>\n\n");
-        for (name, path) in &projects {
-            let marker = if current_project.as_ref() == Some(name) {
-                "✅"
-            } else {
-                "📁"
-            };
-            text.push_str(&format!("{} <b>{}</b>\n   <code>{}</code>\n\n", marker, name, path));
-            // Add button for each project
-            buttons.push(vec![InlineKeyboardButton::callback(
-                format!("➡️ {}", name),
-                format!("connect:{}", name),
-            )]);
-        }
-    }
-
-    // Show tmux sessions if any
-    if !tmux_sessions.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str("<b>📟 Tmux Sessions:</b>\n\n");
-
-        // Get current session for highlighting
-        let current_session = state
-            .get_session_info(msg.chat.id)
-            .await
-            .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
-
-        for (name, is_commander) in &tmux_sessions {
-            let marker = if current_session.as_ref().map(|s| s == name).unwrap_or(false) {
-                "✅"
-            } else if *is_commander {
-                "🤖"
-            } else {
-                "📟"
-            };
-            text.push_str(&format!("{} <code>{}</code>\n", marker, name));
-            // Add button for each session
-            let display = name.strip_prefix("commander-").unwrap_or(name);
-            buttons.push(vec![InlineKeyboardButton::callback(
-                format!("➡️ {}", display),
-                format!("connect:{}", name),
-            )]);
-        }
-    }
-
-    text.push_str("\nClick a button to connect:");
-
-    let keyboard = InlineKeyboardMarkup::new(buttons);
-
-    bot.send_message(msg.chat.id, text)
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(keyboard)
-        .await?;
-
-    Ok(())
+    // /list is now an alias for /sessions
+    handle_sessions(bot, msg, state).await
 }
 
 /// Handle regular text messages (forward to Claude Code).
@@ -838,13 +761,13 @@ async fn handle_topic_message(
     Ok(())
 }
 
-/// Handle the /sessions command - list tmux sessions.
+/// Handle the /sessions command - list tmux sessions with status info.
 pub async fn handle_sessions(
     bot: Bot,
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
-    let sessions = state.list_tmux_sessions();
+    let sessions = state.list_tmux_sessions_with_status();
 
     if sessions.is_empty() {
         bot.send_message(msg.chat.id, "No tmux sessions found.")
@@ -857,32 +780,56 @@ pub async fn handle_sessions(
         .await
         .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
 
-    let mut text = String::from("<b>Tmux Sessions:</b>\n\n");
-    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    let mut text = String::from("<b>Sessions:</b>\n\n");
 
-    for (name, is_commander) in &sessions {
-        let marker = if current_session.as_ref().map(|s| s == name).unwrap_or(false) {
+    for (name, is_commander, created_at, preview) in &sessions {
+        let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
+        let marker = if is_current {
             "✅"
         } else if *is_commander {
             "🤖"
         } else {
             "📟"
         };
-        text.push_str(&format!("{} <code>{}</code>\n", marker, name));
-        // Add button for each session
-        let display = name.strip_prefix("commander-").unwrap_or(name);
-        buttons.push(vec![InlineKeyboardButton::callback(
-            format!("➡️ {}", display),
-            format!("connect:{}", name),
-        )]);
-    }
-    text.push_str("\nClick a button to connect:");
 
-    let keyboard = InlineKeyboardMarkup::new(buttons);
+        // Determine status from screen preview
+        let status = if let Some(ref prev) = preview {
+            if prev.contains("Waiting") || prev.contains(">") || prev.contains("$") {
+                "💤 idle"
+            } else {
+                "🔄 running"
+            }
+        } else {
+            "❓ unknown"
+        };
+
+        // Format created time as relative
+        let age = chrono::Utc::now().signed_duration_since(*created_at);
+        let age_str = if age.num_days() > 0 {
+            format!("{}d ago", age.num_days())
+        } else if age.num_hours() > 0 {
+            format!("{}h ago", age.num_hours())
+        } else {
+            format!("{}m ago", age.num_minutes())
+        };
+
+        let display_name = name.strip_prefix("commander-").unwrap_or(name);
+
+        // Use clickable command link instead of inline button
+        text.push_str(&format!(
+            "{} <b>{}</b>\n   {} | started {}\n   /connect {}\n\n",
+            marker,
+            html_escape(display_name),
+            status,
+            age_str,
+            html_escape(name)
+        ));
+    }
+
+    text.push_str("Click a /connect command to connect.");
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(keyboard)
         .await?;
 
     Ok(())
