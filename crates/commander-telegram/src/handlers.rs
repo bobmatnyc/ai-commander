@@ -462,6 +462,7 @@ fn adapter_display_name(tool_id: &str) -> &str {
         "claude-code" | "cc" => "Claude Code",
         "mpm" => "Claude MPM",
         "aider" => "Aider",
+        "unknown" => "this session",
         _ => tool_id,
     }
 }
