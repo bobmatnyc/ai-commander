@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, ThreadId};
+use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, ThreadId};
 use teloxide::utils::command::BotCommands;
 use tracing::{debug, error, info, warn};
 
@@ -40,6 +40,9 @@ pub enum Command {
 
     #[command(description = "List available projects and sessions")]
     List,
+
+    #[command(description = "List available projects and sessions (alias for /list)")]
+    Ls,
 
     #[command(description = "Enable group mode for this supergroup")]
     GroupMode,
@@ -802,6 +805,7 @@ pub async fn handle_list(
         .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
 
     let mut text = String::from("<b>Sessions:</b>\n\n");
+    let mut keyboard_buttons = Vec::new();
 
     for (name, is_commander, created_at, preview) in &sessions {
         let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
@@ -836,25 +840,40 @@ pub async fn handle_list(
 
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
 
-        // Use clickable command link with full session name (what /connect expects)
-        // Note: Command must NOT be HTML-escaped for Telegram to recognize it as clickable
-        info!(session_name = %name, display_name = %display_name, "Formatting session for /list");
-        // Don't use <code> tags around commands - it breaks clickability
-        let connect_cmd = format!("/connect {}", name);
+        // Add session info to text
         text.push_str(&format!(
-            "{} <b>{}</b>\n   {} | started {}\n   {}\n\n",
+            "{} <b>{}</b>\n   {} | started {}\n\n",
             marker,
             html_escape(display_name),
             status,
-            age_str,
-            connect_cmd  // Full command without HTML tags for clickability
+            age_str
         ));
+
+        // Create inline keyboard button with stripped session name
+        // Strip "commander-" prefix for the callback data so /connect works correctly
+        let button_text = format!("{} {}", marker, display_name);
+        let callback_data = format!("connect:{}", display_name);
+
+        info!(
+            session_name = %name,
+            display_name = %display_name,
+            callback_data = %callback_data,
+            "Creating inline button for session"
+        );
+
+        keyboard_buttons.push(vec![InlineKeyboardButton::callback(
+            button_text,
+            callback_data,
+        )]);
     }
 
-    text.push_str("Click a /connect command to connect.");
+    text.push_str("Tap a button to connect:");
+
+    let keyboard = InlineKeyboardMarkup::new(keyboard_buttons);
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(teloxide::types::ParseMode::Html)
+        .reply_markup(keyboard)
         .await?;
 
     Ok(())
@@ -1638,6 +1657,7 @@ pub async fn handle_command(
         Command::Send(message) => handle_send(bot, msg, state, message).await,
         Command::Status => handle_status(bot, msg, state).await,
         Command::List => handle_list(bot, msg, state).await,
+        Command::Ls => handle_list(bot, msg, state).await,
         Command::GroupMode => handle_groupmode(bot, msg, state).await,
         Command::Topic(session) => handle_topic(bot, msg, state, session).await,
         Command::Topics => handle_topics(bot, msg, state).await,
