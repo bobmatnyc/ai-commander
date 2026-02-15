@@ -277,7 +277,7 @@ pub async fn handle_connect(
         if let Err(e) = bot
             .send_message(
                 msg.chat.id,
-                "Not authorized. Use /pair <code> first.\n\n\
+                "Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
                 Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
             )
             .parse_mode(teloxide::types::ParseMode::Html)
@@ -846,7 +846,7 @@ pub async fn handle_stop(
     if !state.is_authorized(msg.chat.id.0).await {
         bot.send_message(
             msg.chat.id,
-            "Not authorized. Use /pair <code> first.\n\n\
+            "Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
             Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
         )
         .parse_mode(teloxide::types::ParseMode::Html)
@@ -1125,7 +1125,7 @@ pub async fn handle_callback(
         if !state.is_authorized(chat_id.0).await {
             bot.send_message(
                 chat_id,
-                "Not authorized. Use /pair <code> first.",
+                "Not authorized. Use <code>/pair &lt;code&gt;</code> first.",
             )
             .await?;
             return Ok(());
@@ -1178,7 +1178,7 @@ pub async fn handle_groupmode(
     if !state.is_authorized(msg.chat.id.0).await {
         bot.send_message(
             msg.chat.id,
-            "Not authorized. Use /pair <code> first.\n\n\
+            "Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
             Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
         )
         .parse_mode(teloxide::types::ParseMode::Html)
@@ -1263,7 +1263,7 @@ pub async fn handle_topic(
     if !state.is_authorized(msg.chat.id.0).await {
         bot.send_message(
             msg.chat.id,
-            "Not authorized. Use /pair <code> first.",
+            "Not authorized. Use <code>/pair &lt;code&gt;</code> first.",
         )
         .await?;
         return Ok(());
