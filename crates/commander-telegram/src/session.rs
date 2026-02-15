@@ -35,6 +35,19 @@ pub struct UserSession {
     pub last_incremental_summary_line_count: usize,
     /// Forum topic thread ID (for group mode).
     pub thread_id: Option<ThreadId>,
+    /// Worktree info (if session uses git worktree).
+    pub worktree_info: Option<WorktreeInfo>,
+}
+
+/// Worktree information for sessions created with /connect-tree.
+#[derive(Debug, Clone)]
+pub struct WorktreeInfo {
+    /// Path to the worktree directory.
+    pub worktree_path: String,
+    /// Branch name for this worktree.
+    pub branch_name: String,
+    /// Original project path (parent repository).
+    pub parent_repo: String,
 }
 
 impl UserSession {
@@ -60,6 +73,7 @@ impl UserSession {
             is_summarizing: false,
             last_incremental_summary_line_count: 0,
             thread_id: None,
+            worktree_info: None,
         }
     }
 
@@ -86,6 +100,7 @@ impl UserSession {
             is_summarizing: false,
             last_incremental_summary_line_count: 0,
             thread_id: Some(thread_id),
+            worktree_info: None,
         }
     }
 

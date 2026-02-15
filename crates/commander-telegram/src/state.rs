@@ -454,6 +454,14 @@ impl TelegramState {
             .map(|s| (s.project_name.clone(), s.project_path.clone()))
     }
 
+    /// Get worktree info for a session if it exists.
+    pub async fn get_worktree_info(&self, chat_id: ChatId) -> Option<crate::session::WorktreeInfo> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(&chat_id.0)
+            .and_then(|s| s.worktree_info.clone())
+    }
+
     /// Get the tmux session name for a user's current session.
     pub async fn get_current_tmux_session(&self, chat_id: i64) -> Option<String> {
         let sessions = self.sessions.read().await;
@@ -1194,6 +1202,145 @@ impl TelegramState {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Connect with a git worktree in the current working directory.
+    /// Creates a worktree at .worktrees/<session_name>/ with branch session/<session_name>.
+    pub async fn connect_with_worktree(
+        &self,
+        chat_id: ChatId,
+        session_name: &str,
+    ) -> Result<(String, String)> {
+        use std::process::Command;
+
+        let tmux = self.tmux.as_ref().ok_or_else(|| {
+            TelegramError::TmuxError("tmux not available".to_string())
+        })?;
+
+        // Get current working directory
+        let cwd = std::env::current_dir()
+            .map_err(|e| TelegramError::SessionError(format!("Failed to get current directory: {}", e)))?;
+
+        let parent_repo = cwd.to_string_lossy().to_string();
+
+        // Check if we're in a git repository
+        let git_check = Command::new("git")
+            .args(["-C", &parent_repo, "rev-parse", "--git-dir"])
+            .output()
+            .map_err(|e| TelegramError::SessionError(format!("Failed to check git: {}", e)))?;
+
+        if !git_check.status.success() {
+            return Err(TelegramError::SessionError(
+                "Not in a git repository. Please run from a git repo.".to_string()
+            ));
+        }
+
+        // Create worktree path
+        let worktree_path = cwd.join(".worktrees").join(session_name);
+        let worktree_path_str = worktree_path.to_string_lossy().to_string();
+        let branch_name = format!("session/{}", session_name);
+
+        // Check if worktree already exists
+        if worktree_path.exists() {
+            return Err(TelegramError::SessionError(format!(
+                "Worktree already exists at {}",
+                worktree_path.display()
+            )));
+        }
+
+        // Create .worktrees directory if it doesn't exist
+        let worktrees_dir = cwd.join(".worktrees");
+        if !worktrees_dir.exists() {
+            std::fs::create_dir(&worktrees_dir)
+                .map_err(|e| TelegramError::SessionError(format!("Failed to create .worktrees directory: {}", e)))?;
+        }
+
+        // Create worktree with new branch
+        let worktree_output = Command::new("git")
+            .args([
+                "-C",
+                &parent_repo,
+                "worktree",
+                "add",
+                &worktree_path_str,
+                "-b",
+                &branch_name,
+            ])
+            .output()
+            .map_err(|e| TelegramError::SessionError(format!("Failed to create worktree: {}", e)))?;
+
+        if !worktree_output.status.success() {
+            let error_msg = String::from_utf8_lossy(&worktree_output.stderr);
+            return Err(TelegramError::SessionError(format!(
+                "git worktree add failed: {}",
+                error_msg
+            )));
+        }
+
+        // Detect adapter from existing config or default to claude-code
+        let tool_id = self
+            .store
+            .load_all_projects()
+            .ok()
+            .and_then(|projects| {
+                projects
+                    .values()
+                    .find(|p| p.path == parent_repo)
+                    .and_then(|p| p.config.get("tool"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "claude-code".to_string());
+
+        // Create tmux session in worktree directory
+        let tmux_session_name = format!("commander-{}", session_name);
+        if tmux.session_exists(&tmux_session_name) {
+            return Err(TelegramError::SessionError(format!(
+                "Session '{}' already exists",
+                tmux_session_name
+            )));
+        }
+
+        tmux.create_session_in_dir(&tmux_session_name, Some(&worktree_path_str))
+            .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+
+        // Launch adapter in the worktree
+        if let Some(adapter) = self.adapters.get(&tool_id) {
+            let (cmd, cmd_args) = adapter.launch_command(&worktree_path_str);
+            let full_cmd = if cmd_args.is_empty() {
+                cmd
+            } else {
+                format!("{} {}", cmd, cmd_args.join(" "))
+            };
+
+            tmux.send_line(&tmux_session_name, None, &full_cmd)
+                .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+        }
+
+        // Create user session with worktree info
+        let mut session = UserSession::new(
+            chat_id,
+            worktree_path_str.clone(),
+            session_name.to_string(),
+            tmux_session_name,
+        );
+
+        session.worktree_info = Some(crate::session::WorktreeInfo {
+            worktree_path: worktree_path_str,
+            branch_name,
+            parent_repo,
+        });
+
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(chat_id.0, session);
+
+        info!(
+            chat_id = %chat_id.0,
+            session = %session_name,
+            "Created worktree session"
+        );
+
+        Ok((session_name.to_string(), tool_id))
     }
 
     /// Attach to an existing tmux session.
