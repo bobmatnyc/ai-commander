@@ -221,8 +221,8 @@ fn parse_connect_args(arg: &str) -> Result<ConnectArgs, String> {
         return Err("connect requires arguments".to_string());
     }
 
-    // Check if this has -a or -n flags (new project syntax)
-    if parts.iter().any(|&p| p == "-a" || p == "-n") {
+    // Check if this has -a/-adapter or -n/-name flags (new project syntax)
+    if parts.iter().any(|&p| p == "-a" || p == "-adapter" || p == "-n" || p == "-name") {
         let path = shellexpand::tilde(parts[0]).to_string();
         let mut adapter = None;
         let mut name = None;
@@ -230,20 +230,20 @@ fn parse_connect_args(arg: &str) -> Result<ConnectArgs, String> {
         let mut i = 1;
         while i < parts.len() {
             match parts[i] {
-                "-a" => {
+                "-a" | "-adapter" => {
                     if i + 1 < parts.len() {
                         adapter = Some(parts[i + 1].to_string());
                         i += 2;
                     } else {
-                        return Err("-a requires an adapter (cc, mpm)".to_string());
+                        return Err("-a/-adapter requires an adapter (cc, mpm)".to_string());
                     }
                 }
-                "-n" => {
+                "-n" | "-name" => {
                     if i + 1 < parts.len() {
                         name = Some(parts[i + 1].to_string());
                         i += 2;
                     } else {
-                        return Err("-n requires a project name".to_string());
+                        return Err("-n/-name requires a project name".to_string());
                     }
                 }
                 _ => {
@@ -254,14 +254,14 @@ fn parse_connect_args(arg: &str) -> Result<ConnectArgs, String> {
 
         match (adapter, name) {
             (Some(a), Some(n)) => Ok(ConnectArgs::New { path, adapter: a, name: n }),
-            (None, _) => Err("missing -a <adapter> (cc, mpm)".to_string()),
-            (_, None) => Err("missing -n <name>".to_string()),
+            (None, _) => Err("missing -a/-adapter <adapter> (cc, mpm)".to_string()),
+            (_, None) => Err("missing -n/-name <name>".to_string()),
         }
     } else if parts.len() == 1 {
         // Existing project by name
         Ok(ConnectArgs::Existing(parts[0].to_string()))
     } else {
-        Err("use '/connect <name>' or '/connect <path> -a <adapter> -n <name>'".to_string())
+        Err("use '/connect <name>' or '/connect <path> -a/-adapter <adapter> -n/-name <name>'".to_string())
     }
 }
 
@@ -1700,5 +1700,63 @@ mod tests {
         let screen = "";
         let context = extract_conversation_context(screen);
         assert_eq!(context, None);
+    }
+
+    #[test]
+    fn test_parse_connect_args_short_flags() {
+        let args = "/path/to/project -a cc -n my-project";
+        let result = parse_connect_args(args);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ConnectArgs::New { path, adapter, name } => {
+                assert_eq!(path, "/path/to/project");
+                assert_eq!(adapter, "cc");
+                assert_eq!(name, "my-project");
+            }
+            _ => panic!("Expected ConnectArgs::New"),
+        }
+    }
+
+    #[test]
+    fn test_parse_connect_args_long_flags() {
+        let args = "/path/to/project -adapter mpm -name my-project";
+        let result = parse_connect_args(args);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ConnectArgs::New { path, adapter, name } => {
+                assert_eq!(path, "/path/to/project");
+                assert_eq!(adapter, "mpm");
+                assert_eq!(name, "my-project");
+            }
+            _ => panic!("Expected ConnectArgs::New"),
+        }
+    }
+
+    #[test]
+    fn test_parse_connect_args_mixed_flags() {
+        let args = "/path/to/project -a cc -name my-project";
+        let result = parse_connect_args(args);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ConnectArgs::New { path, adapter, name } => {
+                assert_eq!(path, "/path/to/project");
+                assert_eq!(adapter, "cc");
+                assert_eq!(name, "my-project");
+            }
+            _ => panic!("Expected ConnectArgs::New"),
+        }
+    }
+
+    #[test]
+    fn test_parse_connect_args_existing_project() {
+        let args = "my-project";
+        let result = parse_connect_args(args);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ConnectArgs::Existing(name) => {
+                assert_eq!(name, "my-project");
+            }
+            _ => panic!("Expected ConnectArgs::Existing"),
+        }
     }
 }
