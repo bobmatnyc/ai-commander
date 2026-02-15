@@ -1615,11 +1615,17 @@ pub async fn handle_callback(
         match state.connect(chat_id, session).await {
             Ok((name, tool_id)) => {
                 let adapter = adapter_display_name(&tool_id);
+
+                // Get status info to include in connection message
+                let status_info = get_connection_status(&state, chat_id, &name).await;
+
                 bot.send_message(
                     chat_id,
                     format!(
-                        "✅ Connected to <b>{}</b>\n\nSend messages to interact with {}.",
-                        name, adapter
+                        "✅ Connected to <b>{}</b>\n\n\
+                        📊 Status:{}\n\n\
+                        Send messages to interact with {}.",
+                        name, status_info, adapter
                     ),
                 )
                 .parse_mode(teloxide::types::ParseMode::Html)
