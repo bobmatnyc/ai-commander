@@ -588,6 +588,23 @@ fn extract_conversation_context(screen: &str) -> Option<String> {
         return None;
     }
 
+    // Skip patterns that aren't helpful (security/error messages)
+    let skip_patterns = [
+        "permission", "bypass", "error:", "warning:", "failed:",
+        "not authorized", "denied", "cannot", "unable to",
+    ];
+
+    // Priority patterns for meaningful work content
+    let priority_patterns = [
+        ("implemented", "implementation"),
+        ("fixed", "fix"),
+        ("added", "addition"),
+        ("created", "creation"),
+        ("updated", "update"),
+        ("working on", "in progress"),
+        ("completed", "completion"),
+    ];
+
     // Look for meaningful content patterns (in priority order)
     // 1. Lines starting with common status indicators
     let status_patterns = [
@@ -602,8 +619,16 @@ fn extract_conversation_context(screen: &str) -> Option<String> {
         ("Implemented", "implementation"),
     ];
 
-    // Check last few lines for status indicators
+    // Check last few lines for status indicators and meaningful content
     for line in lines.iter().rev().take(10) {
+        let lower = line.to_lowercase();
+
+        // Skip unhelpful messages
+        if skip_patterns.iter().any(|&pattern| lower.contains(pattern)) {
+            continue;
+        }
+
+        // Check for status indicators
         for (indicator, _category) in &status_patterns {
             if line.contains(indicator) {
                 // Truncate to ~50-100 chars
@@ -616,21 +641,28 @@ fn extract_conversation_context(screen: &str) -> Option<String> {
             }
         }
 
-        // 2. Lines that look like descriptions (contain key verbs/patterns)
-        let action_words = ["fixed", "added", "updated", "created", "implemented", "working", "completed"];
-        let lower = line.to_lowercase();
-        if action_words.iter().any(|&word| lower.contains(word)) {
-            let truncated = if line.len() > 100 {
-                format!("{}...", &line[..97])
-            } else {
-                line.to_string()
-            };
-            return Some(truncated);
+        // Check for priority work patterns
+        for (pattern, _category) in &priority_patterns {
+            if lower.contains(pattern) {
+                let truncated = if line.len() > 100 {
+                    format!("{}...", &line[..97])
+                } else {
+                    line.to_string()
+                };
+                return Some(truncated);
+            }
         }
     }
 
-    // 3. Last substantial line (not prompt, not empty, has content)
+    // Last substantial line (not prompt, not empty, has content)
     for line in lines.iter().rev().take(5) {
+        let lower = line.to_lowercase();
+
+        // Skip unhelpful messages
+        if skip_patterns.iter().any(|&pattern| lower.contains(pattern)) {
+            continue;
+        }
+
         // Skip lines that look like prompts or UI elements
         if line.starts_with('$')
             || line.starts_with('>')
@@ -1005,14 +1037,14 @@ pub async fn handle_sessions(
 
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
 
-        // Use clickable command link instead of inline button
+        // Use clickable command link with full session name (what /connect expects)
         text.push_str(&format!(
             "{} <b>{}</b>\n   {} | started {}\n   /connect {}\n\n",
             marker,
             html_escape(display_name),
             status,
             age_str,
-            html_escape(name)
+            html_escape(name)  // Use full session name, not display_name
         ));
     }
 
@@ -1700,6 +1732,40 @@ mod tests {
         let screen = "";
         let context = extract_conversation_context(screen);
         assert_eq!(context, None);
+    }
+
+    #[test]
+    fn test_extract_conversation_context_skips_permission_messages() {
+        let screen = "$ ls\nPermission denied: bypass required\n$ ";
+        let context = extract_conversation_context(screen);
+        assert_eq!(context, None); // Should skip permission-related messages
+    }
+
+    #[test]
+    fn test_extract_conversation_context_skips_errors() {
+        let screen = "Output\nerror: failed to connect\nwarning: deprecated\n$ ";
+        let context = extract_conversation_context(screen);
+        assert_eq!(context, None); // Should skip error messages
+    }
+
+    #[test]
+    fn test_extract_conversation_context_prioritizes_work() {
+        let screen = "Some output\nwarning: deprecated\nImplemented new feature for Telegram\n$ ";
+        let context = extract_conversation_context(screen);
+        assert!(context.is_some());
+        let ctx = context.unwrap();
+        assert!(ctx.contains("Implemented new feature"));
+        assert!(!ctx.contains("warning"));
+    }
+
+    #[test]
+    fn test_extract_conversation_context_multiple_work_items() {
+        let screen = "Processing\nFixed bug in parser\nAdded validation checks\nPrompt> ";
+        let context = extract_conversation_context(screen);
+        assert!(context.is_some());
+        // Should get most recent work item
+        let ctx = context.unwrap();
+        assert!(ctx.contains("Added validation") || ctx.contains("Fixed bug"));
     }
 
     #[test]
