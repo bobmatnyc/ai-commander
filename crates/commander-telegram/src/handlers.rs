@@ -343,9 +343,20 @@ pub async fn handle_connect(
             match state.connect(msg.chat.id, &project_name).await {
                 Ok((connected_name, tool_id)) => {
                     let adapter_name = adapter_display_name(&tool_id);
+
+                    // Get status info to include in connection message
+                    let status_info = get_connection_status(&state, msg.chat.id, &connected_name).await;
+
                     bot.send_message(
                         msg.chat.id,
-                        format!("✅ Connected to <b>{}</b>\n\nYou can now send messages to interact with {}.", connected_name, adapter_name),
+                        format!(
+                            "✅ Connected to <b>{}</b>\n\n\
+                            📊 Status:{}\n\n\
+                            You can now send messages to interact with {}.",
+                            connected_name,
+                            status_info,
+                            adapter_name
+                        ),
                     )
                     .parse_mode(teloxide::types::ParseMode::Html)
                     .await?;
@@ -376,9 +387,20 @@ pub async fn handle_connect(
                 match state.connect(msg.chat.id, &name).await {
                     Ok((connected_name, tool_id)) => {
                         let adapter_name = adapter_display_name(&tool_id);
+
+                        // Get status info to include in connection message
+                        let status_info = get_connection_status(&state, msg.chat.id, &connected_name).await;
+
                         bot.send_message(
                             msg.chat.id,
-                            format!("✅ Connected to existing session <b>{}</b>\n\nYou can now send messages to interact with {}.", connected_name, adapter_name),
+                            format!(
+                                "✅ Connected to existing session <b>{}</b>\n\n\
+                                📊 Status:{}\n\n\
+                                You can now send messages to interact with {}.",
+                                connected_name,
+                                status_info,
+                                adapter_name
+                            ),
                         )
                         .parse_mode(teloxide::types::ParseMode::Html)
                         .await?;
@@ -402,9 +424,20 @@ pub async fn handle_connect(
                 match state.connect_new(msg.chat.id, &path, &adapter, &name).await {
                     Ok((connected_name, tool_id)) => {
                         let adapter_name = adapter_display_name(&tool_id);
+
+                        // Get status info to include in connection message
+                        let status_info = get_connection_status(&state, msg.chat.id, &connected_name).await;
+
                         bot.send_message(
                             msg.chat.id,
-                            format!("✅ Created and connected to <b>{}</b>\n\nYou can now send messages to interact with {}.", connected_name, adapter_name),
+                            format!(
+                                "✅ Created and connected to <b>{}</b>\n\n\
+                                📊 Status:{}\n\n\
+                                You can now send messages to interact with {}.",
+                                connected_name,
+                                status_info,
+                                adapter_name
+                            ),
                         )
                         .parse_mode(teloxide::types::ParseMode::Html)
                         .await?;
@@ -465,6 +498,69 @@ fn adapter_display_name(tool_id: &str) -> &str {
         "unknown" => "this session",
         _ => tool_id,
     }
+}
+
+/// Get concise status info for connection success message.
+/// Returns a formatted string with git branch, state, and last activity.
+async fn get_connection_status(state: &Arc<TelegramState>, chat_id: ChatId, _connected_name: &str) -> String {
+    // Get detailed session status
+    let status = match state.get_session_status(chat_id).await {
+        Some((_, _, _, is_waiting, _, screen_preview)) => {
+            // Determine state
+            let state_emoji = if is_waiting {
+                "🔄 running"
+            } else {
+                "💤 idle"
+            };
+
+            // Try to extract git branch from screen preview
+            let branch_info = if let Some(ref preview) = screen_preview {
+                extract_git_branch(preview)
+                    .map(|branch| format!("\n• Branch: {} (with changes)", branch))
+                    .unwrap_or_else(|| String::new())
+            } else {
+                String::new()
+            };
+
+            format!("{}{}\n• State: {}", branch_info, if branch_info.is_empty() { "\n• Branch: unknown" } else { "" }, state_emoji)
+        }
+        None => {
+            "\n• State: connecting...".to_string()
+        }
+    };
+
+    status
+}
+
+/// Extract git branch from screen preview if visible.
+fn extract_git_branch(screen: &str) -> Option<String> {
+    // Look for common git branch indicators in terminal prompts
+    // Examples: "(main)", "[master]", "on main", "◉ main", "(feature/new)"
+    let patterns = [
+        r"\(([a-zA-Z0-9_/-]+)\)",  // (branch)
+        r"\[([a-zA-Z0-9_/-]+)\]",  // [branch]
+        r"on ([a-zA-Z0-9_/-]+)",   // on branch
+        r"◉ ([a-zA-Z0-9_/-]+)",    // ◉ branch
+        r"➜ ([a-zA-Z0-9_/-]+)",    // ➜ branch
+    ];
+
+    for pattern in &patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            if let Some(caps) = re.captures(screen) {
+                if let Some(branch) = caps.get(1) {
+                    let branch_name = branch.as_str();
+                    // Filter out common false positives
+                    if !branch_name.is_empty()
+                        && branch_name.len() < 50
+                        && !branch_name.chars().all(|c| c.is_numeric()) {
+                        return Some(branch_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Handle the /status command.
@@ -1428,5 +1524,46 @@ pub async fn handle_command(
         Command::GroupMode => handle_groupmode(bot, msg, state).await,
         Command::Topic(session) => handle_topic(bot, msg, state, session).await,
         Command::Topics => handle_topics(bot, msg, state).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_git_branch_parens() {
+        let screen = "user@host ~/project (main) $ ";
+        assert_eq!(extract_git_branch(screen), Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_extract_git_branch_brackets() {
+        let screen = "user@host ~/project [develop] $ ";
+        assert_eq!(extract_git_branch(screen), Some("develop".to_string()));
+    }
+
+    #[test]
+    fn test_extract_git_branch_with_slash() {
+        let screen = "~/project (feature/new-feature) $ ";
+        assert_eq!(extract_git_branch(screen), Some("feature/new-feature".to_string()));
+    }
+
+    #[test]
+    fn test_extract_git_branch_unicode() {
+        let screen = "~/project ◉ staging $ ";
+        assert_eq!(extract_git_branch(screen), Some("staging".to_string()));
+    }
+
+    #[test]
+    fn test_extract_git_branch_not_found() {
+        let screen = "user@host ~/project $ ";
+        assert_eq!(extract_git_branch(screen), None);
+    }
+
+    #[test]
+    fn test_extract_git_branch_filters_numbers() {
+        let screen = "user@host ~/project (12345) $ ";
+        assert_eq!(extract_git_branch(screen), None); // All numeric, filtered out
     }
 }

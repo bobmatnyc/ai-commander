@@ -37,6 +37,9 @@ reqwest = { workspace = true }
 # Time
 chrono = { workspace = true }
 
+# Regex
+regex = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
 
