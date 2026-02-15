@@ -26,9 +26,6 @@ pub enum Command {
     #[command(description = "Connect to project, tmux session, or create new: /connect <name> or /connect <path> -a <adapter> --name <name>")]
     Connect(String),
 
-    #[command(description = "List tmux sessions")]
-    Sessions,
-
     #[command(description = "Disconnect from current project")]
     Disconnect,
 
@@ -41,7 +38,7 @@ pub enum Command {
     #[command(description = "Show current connection status")]
     Status,
 
-    #[command(description = "List available projects (alias for /sessions)")]
+    #[command(description = "List available projects and sessions")]
     List,
 
     #[command(description = "Enable group mode for this supergroup")]
@@ -785,14 +782,78 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Handle the /list command - alias for /sessions.
+/// Handle the /list command - list tmux sessions with status info.
 pub async fn handle_list(
     bot: Bot,
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
-    // /list is now an alias for /sessions
-    handle_sessions(bot, msg, state).await
+    let sessions = state.list_tmux_sessions_with_status();
+
+    if sessions.is_empty() {
+        bot.send_message(msg.chat.id, "No tmux sessions found.")
+            .await?;
+        return Ok(());
+    }
+
+    let current_session = state
+        .get_session_info(msg.chat.id)
+        .await
+        .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
+
+    let mut text = String::from("<b>Sessions:</b>\n\n");
+
+    for (name, is_commander, created_at, preview) in &sessions {
+        let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
+        let marker = if is_current {
+            "✅"
+        } else if *is_commander {
+            "🤖"
+        } else {
+            "📟"
+        };
+
+        // Determine status from screen preview
+        let status = if let Some(ref prev) = preview {
+            if prev.contains("Waiting") || prev.contains(">") || prev.contains("$") {
+                "💤 idle"
+            } else {
+                "🔄 running"
+            }
+        } else {
+            "❓ unknown"
+        };
+
+        // Format created time as relative
+        let age = chrono::Utc::now().signed_duration_since(*created_at);
+        let age_str = if age.num_days() > 0 {
+            format!("{}d ago", age.num_days())
+        } else if age.num_hours() > 0 {
+            format!("{}h ago", age.num_hours())
+        } else {
+            format!("{}m ago", age.num_minutes())
+        };
+
+        let display_name = name.strip_prefix("commander-").unwrap_or(name);
+
+        // Use clickable command link with full session name (what /connect expects)
+        text.push_str(&format!(
+            "{} <b>{}</b>\n   {} | started {}\n   /connect {}\n\n",
+            marker,
+            html_escape(display_name),
+            status,
+            age_str,
+            html_escape(name)  // Use full session name
+        ));
+    }
+
+    text.push_str("Click a /connect command to connect.");
+
+    bot.send_message(msg.chat.id, text)
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+
+    Ok(())
 }
 
 /// Handle regular text messages (forward to Claude Code).
@@ -983,79 +1044,6 @@ async fn handle_topic_message(
     Ok(())
 }
 
-/// Handle the /sessions command - list tmux sessions with status info.
-pub async fn handle_sessions(
-    bot: Bot,
-    msg: Message,
-    state: Arc<TelegramState>,
-) -> ResponseResult<()> {
-    let sessions = state.list_tmux_sessions_with_status();
-
-    if sessions.is_empty() {
-        bot.send_message(msg.chat.id, "No tmux sessions found.")
-            .await?;
-        return Ok(());
-    }
-
-    let current_session = state
-        .get_session_info(msg.chat.id)
-        .await
-        .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
-
-    let mut text = String::from("<b>Sessions:</b>\n\n");
-
-    for (name, is_commander, created_at, preview) in &sessions {
-        let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
-        let marker = if is_current {
-            "✅"
-        } else if *is_commander {
-            "🤖"
-        } else {
-            "📟"
-        };
-
-        // Determine status from screen preview
-        let status = if let Some(ref prev) = preview {
-            if prev.contains("Waiting") || prev.contains(">") || prev.contains("$") {
-                "💤 idle"
-            } else {
-                "🔄 running"
-            }
-        } else {
-            "❓ unknown"
-        };
-
-        // Format created time as relative
-        let age = chrono::Utc::now().signed_duration_since(*created_at);
-        let age_str = if age.num_days() > 0 {
-            format!("{}d ago", age.num_days())
-        } else if age.num_hours() > 0 {
-            format!("{}h ago", age.num_hours())
-        } else {
-            format!("{}m ago", age.num_minutes())
-        };
-
-        let display_name = name.strip_prefix("commander-").unwrap_or(name);
-
-        // Use clickable command link with full session name (what /connect expects)
-        text.push_str(&format!(
-            "{} <b>{}</b>\n   {} | started {}\n   /connect {}\n\n",
-            marker,
-            html_escape(display_name),
-            status,
-            age_str,
-            html_escape(name)  // Use full session name, not display_name
-        ));
-    }
-
-    text.push_str("Click a /connect command to connect.");
-
-    bot.send_message(msg.chat.id, text)
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .await?;
-
-    Ok(())
-}
 
 /// Handle the /stop command - stop a session with optional git commit.
 pub async fn handle_stop(
@@ -1641,7 +1629,6 @@ pub async fn handle_command(
         Command::Help => handle_help(bot, msg).await,
         Command::Pair(code) => handle_pair(bot, msg, state, code).await,
         Command::Connect(project) => handle_connect(bot, msg, state, project).await,
-        Command::Sessions => handle_sessions(bot, msg, state).await,
         Command::Disconnect => handle_disconnect(bot, msg, state).await,
         Command::Stop(session) => handle_stop(bot, msg, state, session).await,
         Command::Send(message) => handle_send(bot, msg, state, message).await,
