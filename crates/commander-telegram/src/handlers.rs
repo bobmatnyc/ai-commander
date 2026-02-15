@@ -838,8 +838,9 @@ pub async fn handle_list(
 
         // Use clickable command link with full session name (what /connect expects)
         // Note: Command must NOT be HTML-escaped for Telegram to recognize it as clickable
+        info!(session_name = %name, display_name = %display_name, "Formatting session for /list");
         text.push_str(&format!(
-            "{} <b>{}</b>\n   {} | started {}\n   /connect {}\n\n",
+            "{} <b>{}</b>\n   {} | started {}\n   <code>/connect {}</code>\n\n",
             marker,
             html_escape(display_name),
             status,
