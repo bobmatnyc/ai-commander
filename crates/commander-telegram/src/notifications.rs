@@ -174,7 +174,7 @@ pub fn notify_session_ready(session_name: &str, preview: Option<&str>) -> Result
 
     let display_name = session_name.strip_prefix("commander-").unwrap_or(session_name);
 
-    let message = if let Some(prev) = preview {
+    let mut message = if let Some(prev) = preview {
         let clean_preview = strip_ansi(prev);
         if clean_preview.is_empty() {
             format!("Session \"{}\" is ready for input", display_name)
@@ -191,6 +191,9 @@ pub fn notify_session_ready(session_name: &str, preview: Option<&str>) -> Result
     } else {
         format!("Session \"{}\" is ready for input", display_name)
     };
+
+    // Add clickable connect link
+    message.push_str(&format!("\n\n/connect {}", display_name));
 
     push_notification(message, Some(session_name.to_string()))
 }
@@ -239,6 +242,17 @@ pub fn notify_sessions_waiting(sessions: &[(String, String)]) -> Result<(), std:
             }
         }
     }
+
+    // Add clickable connect links
+    message.push_str("\n\nChat with: ");
+    let connect_commands: Vec<String> = sessions
+        .iter()
+        .map(|(name, _)| {
+            let display_name = name.strip_prefix("commander-").unwrap_or(name);
+            format!("/connect {}", display_name)
+        })
+        .collect();
+    message.push_str(&connect_commands.join(" | "));
 
     push_notification(message, None)
 }
