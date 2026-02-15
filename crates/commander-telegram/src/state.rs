@@ -454,6 +454,12 @@ impl TelegramState {
             .map(|s| (s.project_name.clone(), s.project_path.clone()))
     }
 
+    /// Get the tmux session name for a user's current session.
+    pub async fn get_current_tmux_session(&self, chat_id: i64) -> Option<String> {
+        let sessions = self.sessions.read().await;
+        sessions.get(&chat_id).map(|s| s.tmux_session.clone())
+    }
+
     /// Get detailed session status for /status command.
     /// Returns (project_name, project_path, tool_id, is_waiting, pending_query, screen_preview).
     pub async fn get_session_status(
