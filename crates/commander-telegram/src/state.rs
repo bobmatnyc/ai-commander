@@ -21,7 +21,7 @@ use commander_orchestrator::AgentOrchestrator;
 
 use crate::error::{Result, TelegramError};
 use crate::pairing;
-use crate::session::UserSession;
+use crate::session::{PersistedSession, UserSession};
 
 /// Result from polling output - represents different stages of output collection.
 #[derive(Debug)]
@@ -108,6 +108,57 @@ fn save_group_configs(configs: &HashMap<i64, GroupChatConfig>) {
         }
         Err(e) => {
             error!(error = %e, "Failed to serialize group configs");
+        }
+    }
+}
+
+/// Load persisted sessions from disk.
+fn load_persisted_sessions() -> HashMap<i64, PersistedSession> {
+    let path = runtime_state_dir().join("telegram_sessions.json");
+    if !path.exists() {
+        return HashMap::new();
+    }
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<HashMap<i64, PersistedSession>>(&content) {
+            Ok(sessions) => {
+                info!(count = sessions.len(), "Loaded persisted sessions from disk");
+                sessions
+            }
+            Err(e) => {
+                error!(error = %e, path = %path.display(), "Failed to parse persisted sessions file");
+                HashMap::new()
+            }
+        },
+        Err(e) => {
+            error!(error = %e, path = %path.display(), "Failed to read persisted sessions file");
+            HashMap::new()
+        }
+    }
+}
+
+/// Save persisted sessions to disk.
+fn save_persisted_sessions(sessions: &HashMap<i64, PersistedSession>) {
+    let path = runtime_state_dir().join("telegram_sessions.json");
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            error!(error = %e, "Failed to create state directory");
+            return;
+        }
+    }
+
+    match serde_json::to_string_pretty(sessions) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                error!(error = %e, path = %path.display(), "Failed to write persisted sessions file");
+            } else {
+                debug!(count = sessions.len(), path = %path.display(), "Saved persisted sessions to disk");
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to serialize persisted sessions");
         }
     }
 }
@@ -587,8 +638,13 @@ impl TelegramState {
 
             let mut sessions = self.sessions.write().await;
             sessions.insert(chat_id.0, session);
+            drop(sessions); // Release lock before saving
 
             debug!(chat_id = %chat_id.0, project = %project.name, "User connected");
+
+            // Auto-save sessions after connection
+            self.save_sessions().await;
+
             return Ok((project.name.clone(), tool_id));
         }
 
@@ -632,12 +688,18 @@ impl TelegramState {
     /// Disconnect a user from their current project.
     pub async fn disconnect(&self, chat_id: ChatId) -> Result<Option<String>> {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.remove(&chat_id.0) {
+        let result = if let Some(session) = sessions.remove(&chat_id.0) {
             debug!(chat_id = %chat_id.0, project = %session.project_name, "User disconnected");
-            Ok(Some(session.project_name))
+            Some(session.project_name)
         } else {
-            Ok(None)
-        }
+            None
+        };
+        drop(sessions); // Release lock before saving
+
+        // Auto-save sessions after disconnection
+        self.save_sessions().await;
+
+        Ok(result)
     }
 
     /// Connect a topic to a project in group mode.
@@ -1390,6 +1452,71 @@ impl TelegramState {
 
         // Connect to the new project
         self.connect(chat_id, name).await
+    }
+
+    /// Save all active sessions to disk for persistence.
+    pub async fn save_sessions(&self) {
+        let sessions = self.sessions.read().await;
+        let persisted: HashMap<i64, PersistedSession> = sessions
+            .iter()
+            .map(|(key, session)| (*key, PersistedSession::from_user_session(session)))
+            .collect();
+        save_persisted_sessions(&persisted);
+    }
+
+    /// Load sessions from disk and restore valid ones.
+    /// Returns (restored_count, total_count).
+    pub async fn load_sessions(&self) -> (usize, usize) {
+        let persisted = load_persisted_sessions();
+        let total_count = persisted.len();
+
+        if persisted.is_empty() {
+            return (0, 0);
+        }
+
+        let tmux = match &self.tmux {
+            Some(t) => t,
+            None => {
+                warn!("Cannot restore sessions: tmux not available");
+                return (0, total_count);
+            }
+        };
+
+        let mut sessions = self.sessions.write().await;
+        let mut restored_count = 0;
+
+        for (key, persisted_session) in persisted {
+            // Validate session: must be < 24h old and tmux session must exist
+            if !persisted_session.is_valid() {
+                debug!(
+                    session = %persisted_session.tmux_session,
+                    age_hours = persisted_session.age_seconds() / 3600,
+                    "Skipping expired session"
+                );
+                continue;
+            }
+
+            if !tmux.session_exists(&persisted_session.tmux_session) {
+                debug!(
+                    session = %persisted_session.tmux_session,
+                    "Skipping session: tmux session not found"
+                );
+                continue;
+            }
+
+            // Restore session
+            let user_session = persisted_session.restore_to_user_session();
+            sessions.insert(key, user_session);
+            restored_count += 1;
+
+            info!(
+                session = %persisted_session.tmux_session,
+                chat_id = %persisted_session.chat_id,
+                "Restored session from disk"
+            );
+        }
+
+        (restored_count, total_count)
     }
 }
 
