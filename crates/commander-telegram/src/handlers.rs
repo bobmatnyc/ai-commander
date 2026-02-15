@@ -522,7 +522,20 @@ async fn get_connection_status(state: &Arc<TelegramState>, chat_id: ChatId, _con
                 String::new()
             };
 
-            format!("{}{}\n• State: {}", branch_info, if branch_info.is_empty() { "\n• Branch: unknown" } else { "" }, state_emoji)
+            // Extract context from screen when idle
+            let context_info = if !is_waiting {
+                if let Some(ref preview) = screen_preview {
+                    extract_conversation_context(preview)
+                        .map(|ctx| format!("\n• Context: {}", ctx))
+                        .unwrap_or_else(|| String::new())
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            format!("{}{}\n• State: {}{}", branch_info, if branch_info.is_empty() { "\n• Branch: unknown" } else { "" }, state_emoji, context_info)
         }
         None => {
             "\n• State: connecting...".to_string()
@@ -558,6 +571,87 @@ fn extract_git_branch(screen: &str) -> Option<String> {
                 }
             }
         }
+    }
+
+    None
+}
+
+/// Extract conversation context from screen content when idle.
+/// Attempts to find the last meaningful Claude response or status line.
+fn extract_conversation_context(screen: &str) -> Option<String> {
+    let lines: Vec<&str> = screen.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    // Look for meaningful content patterns (in priority order)
+    // 1. Lines starting with common status indicators
+    let status_patterns = [
+        ("✅", "completed"),
+        ("🎉", "completed"),
+        ("✓", "completed"),
+        ("Fixed", "fix"),
+        ("Created", "creation"),
+        ("Updated", "update"),
+        ("Added", "addition"),
+        ("Working on", "in progress"),
+        ("Implemented", "implementation"),
+    ];
+
+    // Check last few lines for status indicators
+    for line in lines.iter().rev().take(10) {
+        for (indicator, _category) in &status_patterns {
+            if line.contains(indicator) {
+                // Truncate to ~50-100 chars
+                let truncated = if line.len() > 100 {
+                    format!("{}...", &line[..97])
+                } else {
+                    line.to_string()
+                };
+                return Some(truncated);
+            }
+        }
+
+        // 2. Lines that look like descriptions (contain key verbs/patterns)
+        let action_words = ["fixed", "added", "updated", "created", "implemented", "working", "completed"];
+        let lower = line.to_lowercase();
+        if action_words.iter().any(|&word| lower.contains(word)) {
+            let truncated = if line.len() > 100 {
+                format!("{}...", &line[..97])
+            } else {
+                line.to_string()
+            };
+            return Some(truncated);
+        }
+    }
+
+    // 3. Last substantial line (not prompt, not empty, has content)
+    for line in lines.iter().rev().take(5) {
+        // Skip lines that look like prompts or UI elements
+        if line.starts_with('$')
+            || line.starts_with('>')
+            || line.starts_with('#')
+            || line.starts_with('❯')
+            || line.starts_with('➜')
+            || line.starts_with('┃')
+            || line.starts_with('│')
+            || line.starts_with('├')
+            || line.starts_with('└')
+            || line.len() < 10
+        {
+            continue;
+        }
+
+        let truncated = if line.len() > 100 {
+            format!("{}...", &line[..97])
+        } else {
+            line.to_string()
+        };
+        return Some(truncated);
     }
 
     None
@@ -1565,5 +1659,46 @@ mod tests {
     fn test_extract_git_branch_filters_numbers() {
         let screen = "user@host ~/project (12345) $ ";
         assert_eq!(extract_git_branch(screen), None); // All numeric, filtered out
+    }
+
+    #[test]
+    fn test_extract_conversation_context_with_status() {
+        let screen = "Some output\n✅ Fixed HTML parsing bug\nPrompt> ";
+        let context = extract_conversation_context(screen);
+        assert!(context.is_some());
+        assert!(context.unwrap().contains("Fixed HTML parsing bug"));
+    }
+
+    #[test]
+    fn test_extract_conversation_context_with_action() {
+        let screen = "Processing...\nWorking on Telegram bot improvements\nReady $ ";
+        let context = extract_conversation_context(screen);
+        assert!(context.is_some());
+        assert!(context.unwrap().contains("Working on Telegram bot improvements"));
+    }
+
+    #[test]
+    fn test_extract_conversation_context_truncates_long_lines() {
+        let long_line = "Fixed ".to_string() + &"x".repeat(200);
+        let screen = format!("Some output\n{}\nPrompt> ", long_line);
+        let context = extract_conversation_context(&screen);
+        assert!(context.is_some());
+        let ctx = context.unwrap();
+        assert!(ctx.len() <= 103); // 100 chars + "..."
+        assert!(ctx.ends_with("..."));
+    }
+
+    #[test]
+    fn test_extract_conversation_context_skips_prompts() {
+        let screen = "$ ls -la\n> command\n❯ prompt\n";
+        let context = extract_conversation_context(screen);
+        assert_eq!(context, None);
+    }
+
+    #[test]
+    fn test_extract_conversation_context_empty_screen() {
+        let screen = "";
+        let context = extract_conversation_context(screen);
+        assert_eq!(context, None);
     }
 }
