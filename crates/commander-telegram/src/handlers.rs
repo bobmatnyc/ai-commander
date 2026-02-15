@@ -33,6 +33,13 @@ pub enum Command {
 
     #[command(description = "Stop session (commits changes, ends tmux): /stop [session]")]
     Stop(String),
+    #[command(description = "Stop session (alias for /stop)")]
+    S(String),
+
+    #[command(description = "Connect with git worktree: /connect-tree <name>")]
+    ConnectTree(String),
+    #[command(description = "Connect with git worktree (alias for /connect-tree)")]
+    Ct(String),
 
     #[command(description = "Send message directly to session (bypasses AI interpretation): /send <message>")]
     Send(String),
@@ -1070,6 +1077,86 @@ async fn handle_topic_message(
 }
 
 
+/// Handle the /connect-tree command - create a session with git worktree.
+pub async fn handle_connect_tree(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    session_name: String,
+) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use <code>/pair &lt;code&gt;</code> first.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    let session_name = session_name.trim();
+    if session_name.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "Please specify a session name.\n\n\
+            <b>Usage:</b> <code>/connect-tree &lt;name&gt;</code>\n\n\
+            Creates a git worktree at .worktrees/&lt;name&gt;/ with branch session/&lt;name&gt;.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Check if already connected and disconnect first
+    if state.has_session(msg.chat.id).await {
+        let _ = state.disconnect(msg.chat.id).await;
+    }
+
+    bot.send_message(
+        msg.chat.id,
+        format!("Creating worktree session '{}'...", session_name),
+    )
+    .await?;
+
+    match state.connect_with_worktree(msg.chat.id, session_name).await {
+        Ok((connected_name, tool_id)) => {
+            let adapter_name = adapter_display_name(&tool_id);
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "✅ Connected to worktree session <b>{}</b>\n\n\
+                    📂 Worktree: <code>.worktrees/{}</code>\n\
+                    🌿 Branch: <code>session/{}</code>\n\n\
+                    You can now send messages to interact with {}.\n\n\
+                    Use /stop to merge changes and clean up the worktree.",
+                    connected_name,
+                    session_name,
+                    session_name,
+                    adapter_name
+                ),
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+            info!(
+                chat_id = %msg.chat.id,
+                session = %session_name,
+                "User connected with worktree"
+            );
+        }
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Failed to create worktree session: {}", e),
+            )
+            .await?;
+            error!(chat_id = %msg.chat.id, error = %e, "Worktree creation failed");
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle the /stop command - stop a session with optional git commit.
 pub async fn handle_stop(
     bot: Bot,
@@ -1168,9 +1255,25 @@ pub async fn handle_stop(
     bot.send_message(msg.chat.id, format!("Stopping session {}...", session_name))
         .await?;
 
+    // Check if this session has a worktree
+    let worktree_result = state.get_worktree_info(msg.chat.id).await;
+
     // Check for git changes and commit if needed
     let mut commit_message = None;
-    if project_path != "unknown" && std::path::Path::new(&project_path).exists() {
+    let mut worktree_cleanup_message = None;
+
+    if let Some(worktree_info) = worktree_result {
+        // Handle worktree session
+        match cleanup_worktree(&worktree_info, &session_name).await {
+            Ok(msg) => worktree_cleanup_message = Some(msg),
+            Err(e) => {
+                bot.send_message(msg.chat.id, format!("⚠️ Worktree cleanup failed: {}", e))
+                    .await?;
+                error!(error = %e, "Worktree cleanup failed");
+            }
+        }
+    } else if project_path != "unknown" && std::path::Path::new(&project_path).exists() {
+        // Handle regular session
         match check_and_commit_changes(&project_path, &session_name).await {
             Ok(Some(msg)) => commit_message = Some(msg),
             Ok(None) => {} // No changes to commit
@@ -1193,7 +1296,14 @@ pub async fn handle_stop(
     }
 
     // Build response
-    let response = if let Some(commit_msg) = commit_message {
+    let response = if let Some(worktree_msg) = worktree_cleanup_message {
+        format!(
+            "Session <code>{}</code> stopped.\n\n\
+            {}",
+            html_escape(&session_name),
+            html_escape(&worktree_msg)
+        )
+    } else if let Some(commit_msg) = commit_message {
         format!(
             "Session <code>{}</code> stopped.\n\n\
             Git changes committed:\n<pre>{}</pre>",
@@ -1219,6 +1329,130 @@ pub async fn handle_stop(
     );
 
     Ok(())
+}
+
+/// Clean up a git worktree session by merging changes and removing worktree.
+/// Returns a message describing the cleanup result.
+async fn cleanup_worktree(
+    worktree_info: &crate::session::WorktreeInfo,
+    session_name: &str,
+) -> std::result::Result<String, String> {
+    use std::process::Command;
+
+    let parent_repo = &worktree_info.parent_repo;
+    let worktree_path = &worktree_info.worktree_path;
+    let branch_name = &worktree_info.branch_name;
+
+    // Check for uncommitted changes in worktree
+    let status_output = Command::new("git")
+        .args(["-C", worktree_path, "status", "--porcelain"])
+        .output()
+        .map_err(|e| format!("Failed to run git status: {}", e))?;
+
+    if !status_output.status.success() {
+        return Err("git status failed (not a git repo?)".to_string());
+    }
+
+    let changes = String::from_utf8_lossy(&status_output.stdout);
+    let has_changes = !changes.trim().is_empty();
+
+    if has_changes {
+        // Stage all changes
+        let add_output = Command::new("git")
+            .args(["-C", worktree_path, "add", "-A"])
+            .output()
+            .map_err(|e| format!("Failed to run git add: {}", e))?;
+
+        if !add_output.status.success() {
+            return Err(format!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&add_output.stderr)
+            ));
+        }
+
+        // Commit changes
+        let friendly_name = session_name
+            .strip_prefix("commander-")
+            .unwrap_or(session_name);
+        let commit_msg = format!("WIP: Auto-commit from worktree session '{}'", friendly_name);
+
+        let commit_output = Command::new("git")
+            .args(["-C", worktree_path, "commit", "-m", &commit_msg])
+            .output()
+            .map_err(|e| format!("Failed to run git commit: {}", e))?;
+
+        if !commit_output.status.success() {
+            let stderr = String::from_utf8_lossy(&commit_output.stderr);
+            if !stderr.contains("nothing to commit") {
+                return Err(format!("git commit failed: {}", stderr));
+            }
+        }
+    }
+
+    // Switch back to main/master in parent repo
+    let current_branch_output = Command::new("git")
+        .args(["-C", parent_repo, "branch", "--show-current"])
+        .output()
+        .map_err(|e| format!("Failed to get current branch: {}", e))?;
+
+    let current_branch = String::from_utf8_lossy(&current_branch_output.stdout)
+        .trim()
+        .to_string();
+
+    // If not on main/master, switch to default branch
+    if current_branch == *branch_name {
+        // Try main first, then master
+        for default_branch in &["main", "master"] {
+            let checkout_output = Command::new("git")
+                .args(["-C", parent_repo, "checkout", default_branch])
+                .output();
+
+            if checkout_output.is_ok() && checkout_output.unwrap().status.success() {
+                break;
+            }
+        }
+    }
+
+    // Merge the worktree branch into current branch
+    let merge_output = Command::new("git")
+        .args(["-C", parent_repo, "merge", branch_name, "--no-ff"])
+        .output()
+        .map_err(|e| format!("Failed to run git merge: {}", e))?;
+
+    let merge_success = merge_output.status.success();
+    let merge_message = if merge_success {
+        format!("✅ Merged branch '{}' into current branch", branch_name)
+    } else {
+        format!(
+            "⚠️ Merge conflict - manual resolution needed\n{}",
+            String::from_utf8_lossy(&merge_output.stderr)
+        )
+    };
+
+    // Remove worktree
+    let worktree_remove_output = Command::new("git")
+        .args(["-C", parent_repo, "worktree", "remove", worktree_path])
+        .output()
+        .map_err(|e| format!("Failed to remove worktree: {}", e))?;
+
+    if !worktree_remove_output.status.success() {
+        return Err(format!(
+            "Failed to remove worktree: {}",
+            String::from_utf8_lossy(&worktree_remove_output.stderr)
+        ));
+    }
+
+    // Delete the branch (if merge was successful)
+    if merge_success {
+        let _ = Command::new("git")
+            .args(["-C", parent_repo, "branch", "-d", branch_name])
+            .output();
+    }
+
+    Ok(format!(
+        "{}\n🗑️ Cleaned up worktree and branch",
+        merge_message
+    ))
 }
 
 /// Check for git changes and commit them if present.
@@ -1657,6 +1891,9 @@ pub async fn handle_command(
         Command::C(project) => handle_connect(bot, msg, state, project).await,
         Command::Disconnect => handle_disconnect(bot, msg, state).await,
         Command::Stop(session) => handle_stop(bot, msg, state, session).await,
+        Command::S(session) => handle_stop(bot, msg, state, session).await,
+        Command::ConnectTree(session) => handle_connect_tree(bot, msg, state, session).await,
+        Command::Ct(session) => handle_connect_tree(bot, msg, state, session).await,
         Command::Send(message) => handle_send(bot, msg, state, message).await,
         Command::Status => handle_status(bot, msg, state).await,
         Command::List => handle_list(bot, msg, state).await,
