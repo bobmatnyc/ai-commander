@@ -112,6 +112,34 @@ impl TelegramBot {
     pub async fn start_polling(&self) -> Result<()> {
         info!("Starting Telegram bot in polling mode...");
 
+        // Check for rebuild and restore sessions
+        let (is_rebuild, is_first_start, start_count) = crate::version::check_rebuild();
+        info!(
+            is_rebuild = is_rebuild,
+            is_first_start = is_first_start,
+            start_count = start_count,
+            "Bot version checked"
+        );
+
+        // Restore sessions from disk
+        let (restored_count, total_count) = self.state.load_sessions().await;
+        if total_count > 0 {
+            info!(
+                restored = restored_count,
+                total = total_count,
+                "Session restoration complete"
+            );
+        }
+
+        // Send rebuild notification if this is a rebuild (not first start)
+        if is_rebuild && !is_first_start {
+            let bot = self.bot.clone();
+            let state = Arc::clone(&self.state);
+            tokio::spawn(async move {
+                send_rebuild_notification(bot, state, restored_count, total_count).await;
+            });
+        }
+
         // Initialize agent orchestrator (if agents feature enabled)
         #[cfg(feature = "agents")]
         {
@@ -485,6 +513,52 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
         // Mark notifications as read
         if let Err(e) = mark_notifications_read("telegram", &sent_ids) {
             warn!(error = %e, "Failed to mark notifications as read");
+        }
+    }
+}
+
+/// Send rebuild notification to all authorized chats.
+async fn send_rebuild_notification(
+    bot: Bot,
+    state: Arc<TelegramState>,
+    restored_count: usize,
+    total_count: usize,
+) {
+    let authorized_chats = state.get_authorized_chat_ids().await;
+    if authorized_chats.is_empty() {
+        return;
+    }
+
+    let message = if total_count == 0 {
+        "🔄 Bot rebuilt and restarted.\n\nNo active sessions to restore.".to_string()
+    } else if restored_count == 0 {
+        format!(
+            "🔄 Bot rebuilt and restarted.\n\n⚠️ Could not restore {} session(s) (expired or tmux session not found).",
+            total_count
+        )
+    } else if restored_count == total_count {
+        format!(
+            "🔄 Bot rebuilt and restarted.\n\n✅ Successfully restored {} session(s).",
+            restored_count
+        )
+    } else {
+        format!(
+            "🔄 Bot rebuilt and restarted.\n\n✅ Restored {} of {} session(s).\n⚠️ {} session(s) could not be restored (expired or tmux session not found).",
+            restored_count,
+            total_count,
+            total_count - restored_count
+        )
+    };
+
+    for chat_id in authorized_chats {
+        let result = bot
+            .send_message(teloxide::types::ChatId(chat_id), &message)
+            .await;
+
+        if let Err(e) = result {
+            warn!(chat_id = %chat_id, error = %e, "Failed to send rebuild notification");
+        } else {
+            debug!(chat_id = %chat_id, "Rebuild notification sent");
         }
     }
 }

@@ -68,6 +68,7 @@ pub mod notifications;
 pub mod pairing;
 pub mod session;
 pub mod state;
+pub mod version;
 
 pub use bot::TelegramBot;
 pub use error::{Result, TelegramError};
@@ -79,3 +80,4 @@ pub use notifications::{
 pub use pairing::{consume_pairing, create_pairing, generate_code};
 pub use session::UserSession;
 pub use state::{create_shared_state, TelegramState};
+pub use version::{check_rebuild, load_version, save_version, BotVersion};

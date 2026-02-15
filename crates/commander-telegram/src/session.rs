@@ -1,7 +1,8 @@
 //! User session management for Telegram bot.
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use teloxide::types::{ChatId, MessageId, ThreadId};
 
 /// A user's session with a connected project.
@@ -40,7 +41,7 @@ pub struct UserSession {
 }
 
 /// Worktree information for sessions created with /connect-tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     /// Path to the worktree directory.
     pub worktree_path: String,
@@ -48,6 +49,86 @@ pub struct WorktreeInfo {
     pub branch_name: String,
     /// Original project path (parent repository).
     pub parent_repo: String,
+}
+
+/// Persisted session data for restoration after bot restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedSession {
+    /// Telegram chat ID.
+    pub chat_id: i64,
+    /// Path to the connected project.
+    pub project_path: String,
+    /// Name of the project.
+    pub project_name: String,
+    /// Name of the tmux session.
+    pub tmux_session: String,
+    /// Forum topic thread ID (for group mode).
+    pub thread_id: Option<i32>,
+    /// Worktree info (if session uses git worktree).
+    pub worktree_info: Option<WorktreeInfo>,
+    /// Timestamp when session was created (Unix timestamp).
+    pub created_at: u64,
+    /// Timestamp of last activity (Unix timestamp).
+    pub last_activity: u64,
+}
+
+impl PersistedSession {
+    /// Create from an active UserSession.
+    pub fn from_user_session(session: &UserSession) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        Self {
+            chat_id: session.chat_id.0,
+            project_path: session.project_path.clone(),
+            project_name: session.project_name.clone(),
+            tmux_session: session.tmux_session.clone(),
+            thread_id: session.thread_id.map(|tid| tid.0.0),
+            worktree_info: session.worktree_info.clone(),
+            created_at: now,
+            last_activity: now,
+        }
+    }
+
+    /// Get session age in seconds.
+    pub fn age_seconds(&self) -> u64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        now.saturating_sub(self.created_at)
+    }
+
+    /// Check if session is still valid (< 24 hours old).
+    pub fn is_valid(&self) -> bool {
+        self.age_seconds() < 24 * 60 * 60
+    }
+
+    /// Restore to an active UserSession.
+    pub fn restore_to_user_session(&self) -> UserSession {
+        let thread_id = self.thread_id.map(|tid| ThreadId(MessageId(tid)));
+
+        if let Some(tid) = thread_id {
+            UserSession::with_thread_id(
+                ChatId(self.chat_id),
+                self.project_path.clone(),
+                self.project_name.clone(),
+                self.tmux_session.clone(),
+                tid,
+            )
+        } else {
+            let mut session = UserSession::new(
+                ChatId(self.chat_id),
+                self.project_path.clone(),
+                self.project_name.clone(),
+                self.tmux_session.clone(),
+            );
+            session.worktree_info = self.worktree_info.clone();
+            session
+        }
+    }
 }
 
 impl UserSession {
