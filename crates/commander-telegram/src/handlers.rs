@@ -837,13 +837,14 @@ pub async fn handle_list(
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
 
         // Use clickable command link with full session name (what /connect expects)
+        // Note: Command must NOT be HTML-escaped for Telegram to recognize it as clickable
         text.push_str(&format!(
             "{} <b>{}</b>\n   {} | started {}\n   /connect {}\n\n",
             marker,
             html_escape(display_name),
             status,
             age_str,
-            html_escape(name)  // Use full session name
+            name  // Use full session name - DO NOT escape commands
         ));
     }
 
