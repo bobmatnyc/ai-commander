@@ -7,7 +7,7 @@ use teloxide::dispatching::UpdateFilterExt;
 use teloxide::prelude::*;
 use tokio::sync::mpsc;
 use tokio::time::interval;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::{Result, TelegramError};
 use crate::handlers::{handle_callback, handle_command, handle_message, Command};
@@ -435,6 +435,20 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
             });
 
             for &chat_id in &authorized_chats {
+                // Skip notification if it's for the session the user is currently connected to
+                if let Some(ref notification_session) = notification.session {
+                    if let Some(current_session) = state.get_current_tmux_session(chat_id).await {
+                        if &current_session == notification_session {
+                            debug!(
+                                chat_id = %chat_id,
+                                session = %notification_session,
+                                "Skipping notification - user already connected to this session"
+                            );
+                            continue;
+                        }
+                    }
+                }
+
                 let mut req = bot.send_message(ChatId(chat_id), &notification.message);
                 if let Some(ref kb) = keyboard {
                     req = req.reply_markup(kb.clone());
