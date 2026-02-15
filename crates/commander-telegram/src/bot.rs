@@ -246,6 +246,8 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
 
     // Track progress message IDs per session key
     let mut progress_messages: HashMap<i64, MessageId> = HashMap::new();
+    // Track summary message IDs per session key
+    let mut summary_messages: HashMap<i64, MessageId> = HashMap::new();
 
     loop {
         poll_interval.tick().await;
@@ -293,15 +295,28 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     }
                 }
                 Ok(PollResult::IncrementalSummary(summary)) => {
-                    // Send incremental summary as a separate message (not an edit)
-                    let mut req = bot.send_message(chat_id, &summary);
-                    if let Some(tid) = thread_id {
-                        req = req.message_thread_id(tid);
-                    }
-                    if let Err(e) = req.await {
-                        warn!(chat_id = %chat_id.0, error = %e, "Failed to send incremental summary");
+                    if let Some(&msg_id) = summary_messages.get(&session_key) {
+                        // Update existing summary message
+                        if let Err(e) = bot.edit_message_text(chat_id, msg_id, &summary).await {
+                            warn!(chat_id = %chat_id.0, error = %e, "Failed to update incremental summary");
+                        } else {
+                            info!(chat_id = %chat_id.0, "Incremental summary updated");
+                        }
                     } else {
-                        info!(chat_id = %chat_id.0, "Incremental summary sent");
+                        // Send new summary message and track ID
+                        let mut req = bot.send_message(chat_id, &summary);
+                        if let Some(tid) = thread_id {
+                            req = req.message_thread_id(tid);
+                        }
+                        match req.await {
+                            Ok(sent) => {
+                                summary_messages.insert(session_key, sent.id);
+                                info!(chat_id = %chat_id.0, "Incremental summary sent");
+                            }
+                            Err(e) => {
+                                warn!(chat_id = %chat_id.0, error = %e, "Failed to send incremental summary");
+                            }
+                        }
                     }
                 }
                 Ok(PollResult::Summarizing) => {
@@ -331,6 +346,11 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     // Delete progress message if it exists
                     if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, prog_msg_id).await;
+                    }
+
+                    // Delete summary message if it exists
+                    if let Some(sum_msg_id) = summary_messages.remove(&session_key) {
+                        let _ = bot.delete_message(chat_id, sum_msg_id).await;
                     }
 
                     // Determine which thread to send to (prefer response's thread_id)
