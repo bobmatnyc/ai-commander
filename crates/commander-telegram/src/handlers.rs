@@ -25,6 +25,8 @@ pub enum Command {
 
     #[command(description = "Connect to project, tmux session, or create new: /connect <name> or /connect <path> -a <adapter> --name <name>")]
     Connect(String),
+    #[command(description = "Connect to project (alias for /connect)")]
+    C(String),
 
     #[command(description = "Disconnect from current project")]
     Disconnect,
@@ -1652,6 +1654,7 @@ pub async fn handle_command(
         Command::Help => handle_help(bot, msg).await,
         Command::Pair(code) => handle_pair(bot, msg, state, code).await,
         Command::Connect(project) => handle_connect(bot, msg, state, project).await,
+        Command::C(project) => handle_connect(bot, msg, state, project).await,
         Command::Disconnect => handle_disconnect(bot, msg, state).await,
         Command::Stop(session) => handle_stop(bot, msg, state, session).await,
         Command::Send(message) => handle_send(bot, msg, state, message).await,
