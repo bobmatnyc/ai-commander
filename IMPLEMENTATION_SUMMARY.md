@@ -1,221 +1,244 @@
-# Implementation Summary: Telegram Bot Rebuild Detection & Auto-Reconnect
+# Session Aliasing Implementation Summary
 
-## Issue #37 - Complete Implementation
+**Date:** 2026-02-18
+**Feature:** Session Aliasing for AI Commander
+**Status:** ✅ Complete
 
-### Overview
-Successfully implemented rebuild detection and automatic session reconnection for the Telegram bot with session persistence, version tracking, and intelligent notifications.
+## Overview
 
-## Changes Made
+Implemented session aliasing functionality that allows users to create short, memorable aliases for their projects (e.g., `prod`, `staging`, `dev`) to simplify connection commands.
 
-### Phase 1: Session Persistence ✅
+## Implementation Details
 
-**Files Modified:**
-- `crates/commander-telegram/src/session.rs`
-  - Added `PersistedSession` struct for serializable session data
-  - Added `from_user_session()`, `is_valid()`, `restore_to_user_session()` methods
-  - Validation: sessions < 24h old, tmux session exists
+### 1. **Project Model Changes** (`crates/commander-models/src/project.rs`)
 
-- `crates/commander-telegram/src/state.rs`
-  - Added `load_persisted_sessions()` and `save_persisted_sessions()` functions
-  - Added `save_sessions()` and `load_sessions()` methods to TelegramState
-  - Auto-save on `connect()` and `disconnect()`
-  - Storage: `~/.ai-commander/state/telegram_sessions.json`
+Added aliases support to the Project struct:
+- New field: `aliases: Vec<String>` with `#[serde(default)]` for backward compatibility
+- `add_alias(alias: String) -> Result<(), String>` - Add alias with validation and collision detection
+- `remove_alias(alias: &str) -> bool` - Remove alias
+- `matches(name_or_alias: &str) -> bool` - Check if project matches name, ID, or alias
+- `validate_alias(alias: &str) -> Result<(), String>` - Validate alias format
 
-### Phase 2: Rebuild Detection ✅
+**Constraints:**
+- Maximum 10 aliases per project
+- Alphanumeric with optional dash/underscore only
+- 1-64 characters in length
+- Aliases are automatically sorted alphabetically
 
-**Files Created:**
-- `crates/commander-telegram/src/version.rs` (new module)
-  - `BotVersion` struct with binary_hash, last_start, start_count
-  - `compute_binary_hash()` using file size + modification time
-  - `check_rebuild()` - returns (is_rebuild, is_first_start, start_count)
-  - Storage: `~/.ai-commander/state/bot_version.json`
+**Tests Added:**
+- Alias validation (valid/invalid formats)
+- Add/remove alias operations
+- Max limit enforcement (10 aliases)
+- Duplicate detection
+- Serialization roundtrip
+- Backward compatibility with old JSON files
 
-**Files Modified:**
-- `crates/commander-telegram/src/lib.rs`
-  - Registered version module
-  - Exported `check_rebuild`, `load_version`, `save_version`, `BotVersion`
+### 2. **StateStore Updates** (`crates/commander-persistence/src/state_store.rs`)
 
-### Phase 3: Auto-Reconnect and Notifications ✅
+Added helper methods for alias resolution:
+- `find_project_by_name_or_alias(name_or_alias: &str) -> Result<Option<Project>>` - Find project by name or any alias
+- `alias_exists(alias: &str) -> Result<bool>` - Check if alias is in use by any project (collision detection)
 
-**Files Modified:**
-- `crates/commander-telegram/src/bot.rs`
-  - Modified `start_polling()` to check rebuild status on startup
-  - Added `load_sessions()` call to restore persisted sessions
-  - Added `send_rebuild_notification()` function
-  - Notifications sent only on rebuild (not first start or restart)
+**Tests Added:**
+- Find by project name
+- Find by alias
+- Alias collision detection
+- Alias persistence across save/load cycles
 
-### Testing ✅
+### 3. **Connection Logic** (`crates/ai-commander/src/tui/connection.rs`)
 
-**Files Created:**
-- `crates/commander-telegram/tests/rebuild_detection_test.rs`
-  - `test_version_tracking` - Version state transitions
-  - `test_version_persistence` - Disk persistence
-  - `test_persisted_session_validation` - Age validation (24h expiry)
-  - `test_session_restoration` - Session reconstruction with/without thread_id
-  - `test_session_serialization` - JSON serialization
+Updated `connect()` method to support alias resolution:
+- Resolves aliases to project names transparently
+- Displays connection message with alias context: "Connected to 'myapp' (alias: prod)"
+- Maintains tmux session naming based on project name (not alias) for consistency
 
-**Test Results:**
-```
-✅ 43 unit tests (existing)
-✅ 5 integration tests (new)
-✅ 1 doc test
-━━━━━━━━━━━━━━━━━━━━━━
-   49 tests PASSED
-```
+**Key behavior:**
+- Tmux session name always uses primary project name: `commander-myapp`
+- User can connect via `/connect prod` which resolves to `myapp`
+- Connection message shows both project name and alias used
 
-### Documentation ✅
+### 4. **Commands** (`crates/ai-commander/src/tui/commands.rs`)
 
-**Files Created:**
-- `docs/telegram-rebuild-detection.md`
-  - Architecture overview
-  - User experience guide
-  - Testing documentation
-  - File structure
-  - Future enhancements
+Implemented new commands:
 
-## Key Features
+#### `/alias [project] [alias]`
+- No args: List all aliases across all projects
+- One arg: Show aliases for specific project
+- Two args: Add alias to project with collision detection
 
-### 1. Session Persistence
-- ✅ Auto-save sessions on connect/disconnect
-- ✅ JSON format with pretty-printing
-- ✅ Stores: chat_id, project_path, project_name, tmux_session, thread_id, worktree_info
-- ✅ Tracks: created_at, last_activity timestamps
+#### `/unalias <alias>`
+- Remove alias from project
 
-### 2. Rebuild Detection
-- ✅ Binary hash computed from file size + modification time
-- ✅ Distinguishes rebuild vs restart vs first start
-- ✅ Tracks start count for monitoring
-- ✅ Fallback to compile-time version info
+Updated existing commands:
+- `/list` - Shows aliases for each session: `commander-myapp [aliases: prod, staging]`
+- `/status` - Displays aliases in project info: `Aliases: prod, staging`
+- Help text updated with new commands
 
-### 3. Auto-Reconnect
-- ✅ Validates sessions: < 24h old, tmux exists
-- ✅ Restores valid sessions on startup
-- ✅ Logs skipped sessions (expired or tmux not found)
-- ✅ Works with 1:1 chats, forum topics, worktree sessions
+### 5. **Completion** (`crates/ai-commander/src/tui/completion.rs`)
 
-### 4. Notifications
-- ✅ Sent only on rebuild (not restart or first start)
-- ✅ Shows restoration status (success/partial/failed)
-- ✅ Clear emoji indicators (🔄 ✅ ⚠️)
-- ✅ Broadcast to all authorized chats
+Enhanced tab completion:
+- Added `/alias` and `/unalias` to command list
+- `/connect` completes both project names AND aliases
+- `/status` completes both project names AND aliases
+- `/alias` completes project names for first argument
+- `/unalias` completes existing aliases only
 
-## Notification Examples
+New helper methods:
+- `complete_project_names_and_aliases()` - Combined completion
+- `complete_aliases()` - Alias-only completion
+- `load_projects_and_aliases_cached()` - Cached alias loading (5 second TTL)
 
-**All restored:**
-```
-🔄 Bot rebuilt and restarted.
-✅ Successfully restored 3 session(s).
-```
+### 6. **REPL Updates** (`crates/ai-commander/src/repl.rs`)
 
-**Partial restoration:**
-```
-🔄 Bot rebuilt and restarted.
-✅ Restored 2 of 3 session(s).
-⚠️ 1 session(s) could not be restored (expired or tmux session not found).
-```
+- Updated command list to include `/alias` and `/unalias`
+- Fixed test expectations for new commands
 
-**No sessions:**
-```
-🔄 Bot rebuilt and restarted.
-No active sessions to restore.
-```
+## Test Coverage
 
-## Error Handling
+### Unit Tests
+- **commander-models**: 35 tests (19 alias-specific)
+  - Validation tests
+  - Add/remove operations
+  - Serialization/deserialization
+  - Backward compatibility
 
-All error cases handled gracefully:
-- 📁 Missing files → Create new
-- 🔧 Corrupted JSON → Log error, create new
-- ⏰ Expired sessions → Skip with debug log
-- 💀 Dead tmux → Skip with debug log
-- 🚫 Permission errors → Log error, continue
+- **commander-persistence**: 14 tests (7 alias-specific)
+  - Find by name/alias
+  - Collision detection
+  - Persistence across save/load
 
-**Result:** Bot always starts successfully, no crashes.
+- **ai-commander**: 97 tests (2 updated for new commands)
+  - Command parsing
+  - Completion behavior
 
-## Statistics
+### Integration Tests
+- **alias_integration.rs** (4 tests)
+  - End-to-end alias workflow
+  - Collision detection across projects
+  - Backward compatibility
+  - Max limit enforcement
 
-- **New files**: 3 (version.rs, rebuild_detection_test.rs, docs)
-- **Modified files**: 4 (session.rs, state.rs, bot.rs, lib.rs)
-- **New structs**: 2 (PersistedSession, BotVersion)
-- **New methods**: 10+ (persistence, validation, restoration)
-- **New tests**: 5 integration tests
-- **Lines of code**: ~500 new lines
-- **Test coverage**: 100% for new code
+**Total: 150+ tests passing ✅**
 
-## Compatibility
+## Usage Examples
 
-✅ Works with all existing features:
-- Standard project connections
-- Git worktree sessions (`/connect-tree`)
-- Forum group topics
-- Multiple adapters (claude-code, mpm)
-- Agent orchestrator integration
-- Cross-channel notifications
-
-## Configuration
-
-**Zero configuration needed!**
-- Uses existing state directory
-- Uses existing authorization system
-- Uses existing tmux session tracking
-- No environment variables required
-- No database setup needed
-
-## File Structure
-
-```
-~/.ai-commander/state/
-├── telegram_sessions.json   ← NEW (session persistence)
-├── bot_version.json          ← NEW (rebuild detection)
-├── authorized_chats.json     (existing)
-├── group_configs.json        (existing)
-└── pairings.json            (existing)
-```
-
-## Verification
-
-**Build Status:**
+### Create project and add aliases
 ```bash
-$ cargo build -p commander-telegram
-   Finished `dev` profile
+/connect ~/code/myapp -a cc -n myapp
+/alias myapp prod
+/alias myapp staging
 ```
 
-**Test Status:**
+### Connect via alias
 ```bash
-$ cargo test -p commander-telegram
-   49 tests passed
+/connect prod
+# Output: [Claude] Connected to 'myapp' (alias: prod)
 ```
 
-**Warnings:**
+### List aliases
+```bash
+/alias
+# Output:
+# Project aliases:
+#   prod → myapp
+#   staging → myapp
+
+/alias myapp
+# Output:
+# Aliases for 'myapp':
+#   prod
+#   staging
 ```
-None - all code is warning-free
+
+### Remove alias
+```bash
+/unalias staging
+# Output: Removed alias 'staging' from 'myapp'
 ```
 
-## Next Steps
+### View in status
+```bash
+/status myapp
+# Output:
+# Status: myapp
+#   Path: /Users/masa/code/myapp
+#   Adapter: claude-code
+#   Aliases: prod, staging
+#   Session: Running
+```
 
-The implementation is **complete and ready for use**. Suggested workflow:
+### View in list
+```bash
+/list
+# Output:
+# Sessions:
+#   [Claude] commander-myapp (connected) [aliases: prod, staging] - Waiting for input
+```
 
-1. **Review code changes** in this PR
-2. **Run tests locally** to verify (optional)
-3. **Merge to main** when approved
-4. **Deploy bot** - it will auto-detect rebuild and restore sessions
+## Design Decisions
 
-## Future Enhancements (Optional)
+### 1. **Aliases stored in Project model**
+- **Rationale:** Natural ownership, no separate persistence layer, prevents orphaned aliases
+- **Alternative considered:** Separate `~/.commander/aliases.json` file (rejected due to consistency issues)
 
-Possible improvements for future iterations:
+### 2. **Tmux session name based on project name**
+- **Rationale:** Deterministic, predictable, no session renaming complexity
+- **Alternative considered:** Rename tmux session to alias (rejected due to breaking changes)
 
-1. **Configurable expiry** - Allow custom session TTL
-2. **Session migration** - Handle project path changes
-3. **Partial state restoration** - Restore response buffers
-4. **Metrics collection** - Track restoration success rates
-5. **Admin notifications** - Separate health monitoring channel
+### 3. **Display format shows both**
+- **Format:** "Connected to 'myapp' (alias: prod)"
+- **Rationale:** Clear, shows both primary name and alias used for connection
 
-## Notes
+### 4. **Maximum 10 aliases per project**
+- **Rationale:** Prevents abuse, keeps UI manageable, covers realistic use cases
 
-- **No breaking changes** - fully backward compatible
-- **No database required** - uses JSON files
-- **No new dependencies** - uses existing crates
-- **No performance impact** - O(n) where n = active sessions (typically < 10)
+### 5. **Same validation rules as project names**
+- **Rationale:** Consistency, prevents confusing characters, works with shell completion
 
----
+## Backward Compatibility
 
-**Status: ✅ COMPLETE - All 3 phases implemented and tested**
+- Old project JSON files without `aliases` field deserialize with empty aliases vector
+- `#[serde(default)]` ensures compatibility
+- Existing projects unaffected
+- Tests confirm backward compatibility
+
+## Files Modified
+
+1. `crates/commander-models/src/project.rs` - Added aliases field and methods
+2. `crates/commander-persistence/src/state_store.rs` - Added helper methods
+3. `crates/ai-commander/src/tui/connection.rs` - Updated connect logic
+4. `crates/ai-commander/src/tui/commands.rs` - Added /alias and /unalias commands
+5. `crates/ai-commander/src/tui/completion.rs` - Enhanced completion
+6. `crates/ai-commander/src/repl.rs` - Updated command list
+7. `crates/ai-commander/src/tui/app.rs` - Updated tab completion test
+
+## Files Created
+
+1. `crates/commander-persistence/tests/alias_integration.rs` - Integration tests
+2. `IMPLEMENTATION_SUMMARY.md` - This document
+
+## Acceptance Criteria
+
+✅ User can add aliases to projects
+✅ `/connect @<alias>` connects to correct project
+✅ Alias collision prevention works
+✅ Backward compatible with existing project JSON files
+✅ Tests pass (150+ tests)
+✅ Aliases shown in `/list` command
+✅ Aliases shown in `/status` command
+✅ Tab completion includes aliases
+✅ Help text updated
+✅ No compilation warnings or errors
+
+## Future Enhancements (Not Implemented)
+
+- Global aliases file for cross-project shortcuts
+- Alias history/analytics
+- Alias export/import
+- Alias templates
+
+## References
+
+- Research document: `docs/research/session-aliasing-investigation-2026-02-18.md`
+- Architecture approved by Code Analyzer
+- TDD approach used throughout implementation

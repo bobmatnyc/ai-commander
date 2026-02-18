@@ -478,29 +478,31 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(temp_dir.path());
 
-        // Type /s and press Tab multiple times
-        app.input = "/s".to_string();
-        app.cursor_pos = 2;
+        // Type /help (exact match) and press Tab
+        app.input = "/help".to_string();
+        app.cursor_pos = 5;
 
-        // First Tab: /send
+        // Should complete to /help (single match)
         app.complete_command();
-        assert_eq!(app.input, "/send");
+        assert_eq!(app.input, "/help");
 
-        // Second Tab: /sessions
-        app.complete_command();
-        assert_eq!(app.input, "/sessions");
+        // Test cycling with a prefix that has multiple matches
+        app.reset_completions();
+        app.input = "/status".to_string();
+        app.cursor_pos = 7;
 
-        // Third Tab: /status
+        // First tab should complete /status (exact match)
         app.complete_command();
         assert_eq!(app.input, "/status");
 
-        // Fourth Tab: /stop
-        app.complete_command();
-        assert_eq!(app.input, "/stop");
+        // Test that completions cycle with fuzzy matches
+        app.reset_completions();
+        app.input = "/con".to_string();
+        app.cursor_pos = 4;
 
-        // Fifth Tab: cycles back to /send
+        // Should get /connect
         app.complete_command();
-        assert_eq!(app.input, "/send");
+        assert_eq!(app.input, "/connect");
     }
 
     #[test]

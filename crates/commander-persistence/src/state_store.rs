@@ -135,6 +135,28 @@ impl StateStore {
         }
         Ok(())
     }
+
+    /// Finds a project by name or alias.
+    ///
+    /// Returns the first project that matches the given name or alias.
+    pub fn find_project_by_name_or_alias(&self, name_or_alias: &str) -> Result<Option<Project>> {
+        let projects = self.load_all_projects()?;
+
+        Ok(projects.into_values().find(|p| p.matches(name_or_alias)))
+    }
+
+    /// Checks if an alias is already in use by any project.
+    ///
+    /// Returns true if the alias matches:
+    /// - Any project name
+    /// - Any existing alias
+    pub fn alias_exists(&self, alias: &str) -> Result<bool> {
+        let projects = self.load_all_projects()?;
+
+        Ok(projects
+            .values()
+            .any(|p| p.name == alias || p.aliases.contains(&alias.to_string())))
+    }
 }
 
 #[cfg(test)]
@@ -247,5 +269,89 @@ mod tests {
 
         assert_eq!(loaded.state, ProjectState::Working);
         assert_eq!(loaded.state_reason, Some("Processing".to_string()));
+    }
+
+    #[test]
+    fn test_find_project_by_name() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+
+        let project = Project::new("/path".to_string(), "my-project".to_string());
+        store.save_project(&project).unwrap();
+
+        let found = store.find_project_by_name_or_alias("my-project").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "my-project");
+    }
+
+    #[test]
+    fn test_find_project_by_alias() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+
+        let mut project = Project::new("/path".to_string(), "my-project".to_string());
+        project.add_alias("prod".to_string()).unwrap();
+        store.save_project(&project).unwrap();
+
+        let found = store.find_project_by_name_or_alias("prod").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "my-project");
+    }
+
+    #[test]
+    fn test_find_project_not_found() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+
+        let found = store.find_project_by_name_or_alias("nonexistent").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_alias_exists_project_name() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+
+        let project = Project::new("/path".to_string(), "my-project".to_string());
+        store.save_project(&project).unwrap();
+
+        // Project name should be detected as "exists"
+        assert!(store.alias_exists("my-project").unwrap());
+    }
+
+    #[test]
+    fn test_alias_exists_alias() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+
+        let mut project = Project::new("/path".to_string(), "my-project".to_string());
+        project.add_alias("prod".to_string()).unwrap();
+        store.save_project(&project).unwrap();
+
+        assert!(store.alias_exists("prod").unwrap());
+    }
+
+    #[test]
+    fn test_alias_exists_not_found() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+
+        assert!(!store.alias_exists("nonexistent").unwrap());
+    }
+
+    #[test]
+    fn test_aliases_persisted() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::new(dir.path());
+
+        let mut project = Project::new("/path".to_string(), "test".to_string());
+        project.add_alias("prod".to_string()).unwrap();
+        project.add_alias("staging".to_string()).unwrap();
+        let id = project.id.clone();
+
+        store.save_project(&project).unwrap();
+        let loaded = store.load_project(&id).unwrap();
+
+        assert_eq!(loaded.aliases, vec!["prod", "staging"]);
     }
 }
