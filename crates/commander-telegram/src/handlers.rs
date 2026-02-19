@@ -1576,12 +1576,23 @@ pub async fn handle_callback(
     q: CallbackQuery,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    info!(
+        callback_id = %q.id,
+        data = ?q.data,
+        user_id = ?q.from.id,
+        "Callback query received"
+    );
+
+    // Always acknowledge callback to remove loading state, even if data is missing
+    if let Err(e) = bot.answer_callback_query(&q.id).await {
+        error!(callback_id = %q.id, error = %e, "Failed to acknowledge callback");
+        return Err(e);
+    }
+
     let Some(data) = &q.data else {
+        warn!(callback_id = %q.id, "Callback has no data");
         return Ok(());
     };
-
-    // Acknowledge callback immediately to remove loading state
-    bot.answer_callback_query(&q.id).await?;
 
     // Parse callback data
     if let Some(session) = data.strip_prefix("connect:") {
