@@ -15,7 +15,7 @@ use crate::state::TelegramState;
 #[command(rename_rule = "lowercase", description = "Available commands:")]
 pub enum Command {
     #[command(description = "Start the bot and get help")]
-    Start,
+    Start(String),
 
     #[command(description = "Show help message")]
     Help,
@@ -47,11 +47,14 @@ pub enum Command {
     #[command(description = "Show current connection status")]
     Status,
 
-    #[command(description = "List available projects and sessions")]
+    #[command(description = "List available projects and sessions with deep links")]
     List,
 
     #[command(description = "List available projects and sessions (alias for /list)")]
     Ls,
+
+    #[command(description = "Generate a shareable deep link for a session: /link <session>")]
+    Link(String),
 
     #[command(description = "Enable group mode for this supergroup")]
     GroupMode,
@@ -63,12 +66,37 @@ pub enum Command {
     Topics,
 }
 
-/// Handle the /start command.
+/// Handle the /start command with optional deep link parameter.
 pub async fn handle_start(
     bot: Bot,
     msg: Message,
     state: Arc<TelegramState>,
+    args: String,
 ) -> ResponseResult<()> {
+    // Parse deep link payload
+    let payload = args.trim();
+
+    // Check if this is a deep link connection
+    if let Some(session_name) = payload.strip_prefix("connect_") {
+        info!(chat_id = %msg.chat.id.0, session = %session_name, "Deep link connection attempt");
+
+        // Check authorization first
+        if !state.is_authorized(msg.chat.id.0).await {
+            bot.send_message(
+                msg.chat.id,
+                "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+                Get a pairing code by running <code>/telegram</code> in the Commander CLI.\n\n\
+                After pairing, you can click the link again to connect.",
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+            return Ok(());
+        }
+
+        return handle_deep_link_connect(bot, msg, state, session_name).await;
+    }
+
+    // Default welcome message
     let welcome = format!(
         "Welcome to Commander Bot! 🚀\n\n\
         I can help you interact with AI coding sessions from anywhere.\n\n\
@@ -90,6 +118,92 @@ pub async fn handle_start(
         .await?;
 
     info!(chat_id = %msg.chat.id, user = ?msg.from.as_ref().map(|u| &u.username), "User started bot");
+    Ok(())
+}
+
+/// Handle deep link connection from /start command.
+async fn handle_deep_link_connect(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    session_name: &str,
+) -> ResponseResult<()> {
+    // Validate session name (alphanumeric, dash, underscore only)
+    if !session_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Invalid session name: '{}'\n\nSession names can only contain letters, numbers, dashes, and underscores.", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Get list of sessions and validate the session exists
+    let sessions = state.list_tmux_sessions_with_status();
+    let session_exists = sessions.iter().any(|(name, _, _, _)| {
+        let display_name = name.strip_prefix("commander-").unwrap_or(name);
+        display_name == session_name
+    });
+
+    if !session_exists {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Session '{}' not found.\n\nUse /list to see available sessions.", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Check if already connected to this session
+    if let Some((current_project, _)) = state.get_session_info(msg.chat.id).await {
+        if current_project == session_name {
+            bot.send_message(
+                msg.chat.id,
+                format!("✅ Already connected to <b>{}</b>", session_name)
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+            return Ok(());
+        }
+
+        // Disconnect from current session
+        let _ = state.disconnect(msg.chat.id).await;
+    }
+
+    // Connect to the session
+    match state.connect_session(msg.chat.id, session_name).await {
+        Ok((connected_name, tool_id)) => {
+            let adapter_name = adapter_display_name(&tool_id);
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "✅ Connected to <b>{}</b> via deep link!\n\n\
+                    You can now send messages to interact with {}.",
+                    connected_name, adapter_name
+                )
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+
+            info!(
+                chat_id = %msg.chat.id.0,
+                session = %session_name,
+                "Deep link connection successful"
+            );
+        }
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Failed to connect to '{}': {}", session_name, e)
+            ).await?;
+
+            error!(
+                chat_id = %msg.chat.id.0,
+                session = %session_name,
+                error = %e,
+                "Deep link connection failed"
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -818,7 +932,16 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Handle the /list command - list tmux sessions with status info.
+/// Generate a deep link for connecting to a session.
+async fn generate_session_link(bot: &Bot, session_name: &str) -> String {
+    let bot_username = match bot.get_me().await {
+        Ok(me) => me.username().to_string(),
+        Err(_) => "commander".to_string(), // Fallback if can't get username
+    };
+    format!("https://t.me/{}?start=connect_{}", bot_username, session_name)
+}
+
+/// Handle the /list command - list tmux sessions with status info and deep links.
 pub async fn handle_list(
     bot: Bot,
     msg: Message,
@@ -849,7 +972,7 @@ pub async fn handle_list(
         .await
         .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
 
-    let mut text = String::from("<b>Sessions:</b>\n\n");
+    let mut text = String::from("🤖 <b>Available Sessions</b>\n\n");
     let mut keyboard_buttons = Vec::new();
 
     for (name, is_commander, created_at, preview) in &sessions {
@@ -885,13 +1008,17 @@ pub async fn handle_list(
 
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
 
-        // Add session info to text
+        // Generate deep link for this session
+        let deep_link = generate_session_link(&bot, display_name).await;
+
+        // Add session info to text with deep link
         text.push_str(&format!(
-            "{} <b>{}</b>\n   {} | started {}\n\n",
-            marker,
+            "• <code>{}</code> {}\n  {} | started {}\n  🔗 <a href=\"{}\">Quick Link</a>\n\n",
             html_escape(display_name),
             status,
-            age_str
+            marker,
+            age_str,
+            deep_link
         ));
 
         // Create inline keyboard button with stripped session name
@@ -912,7 +1039,7 @@ pub async fn handle_list(
         )]);
     }
 
-    text.push_str("Tap a button to connect:");
+    text.push_str("\n<i>Tap a button to connect, or share the link!</i>");
 
     let keyboard = InlineKeyboardMarkup::new(keyboard_buttons);
 
@@ -920,6 +1047,86 @@ pub async fn handle_list(
         .parse_mode(teloxide::types::ParseMode::Html)
         .reply_markup(keyboard)
         .await?;
+
+    Ok(())
+}
+
+/// Handle the /link command - generate a shareable deep link for a session.
+pub async fn handle_link(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    args: String,
+) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Parse session name from command
+    let session_name = args.trim();
+
+    if session_name.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "Usage: <code>/link &lt;session&gt;</code>\n\n\
+            Example: <code>/link production</code>\n\n\
+            This will generate a shareable deep link that auto-connects to the session.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Validate session exists
+    let sessions = state.list_tmux_sessions_with_status();
+    let session_exists = sessions.iter().any(|(name, _, _, _)| {
+        let display_name = name.strip_prefix("commander-").unwrap_or(name);
+        display_name == session_name
+    });
+
+    if !session_exists {
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "❌ Session '{}' not found.\n\nUse /list to see available sessions.",
+                html_escape(session_name)
+            ),
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Generate and send link
+    let link = generate_session_link(&bot, session_name).await;
+
+    bot.send_message(
+        msg.chat.id,
+        format!(
+            "🔗 <b>Deep Link for '{}'</b>\n\n\
+            <a href=\"{}\">{}</a>\n\n\
+            <i>Click to connect, or copy and share this link!</i>",
+            html_escape(session_name),
+            link,
+            link
+        ),
+    )
+    .parse_mode(teloxide::types::ParseMode::Html)
+    .await?;
+
+    info!(
+        chat_id = %msg.chat.id.0,
+        session = %session_name,
+        "Generated deep link for session"
+    );
 
     Ok(())
 }
@@ -1952,7 +2159,7 @@ pub async fn handle_command(
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
     match cmd {
-        Command::Start => handle_start(bot, msg, state).await,
+        Command::Start(args) => handle_start(bot, msg, state, args).await,
         Command::Help => handle_help(bot, msg).await,
         Command::Pair(code) => handle_pair(bot, msg, state, code).await,
         Command::Connect(project) => handle_connect(bot, msg, state, project).await,
@@ -1966,6 +2173,7 @@ pub async fn handle_command(
         Command::Status => handle_status(bot, msg, state).await,
         Command::List => handle_list(bot, msg, state).await,
         Command::Ls => handle_list(bot, msg, state).await,
+        Command::Link(session) => handle_link(bot, msg, state, session).await,
         Command::GroupMode => handle_groupmode(bot, msg, state).await,
         Command::Topic(session) => handle_topic(bot, msg, state, session).await,
         Command::Topics => handle_topics(bot, msg, state).await,
