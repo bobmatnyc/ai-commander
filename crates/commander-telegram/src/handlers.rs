@@ -475,6 +475,18 @@ pub async fn handle_disconnect(
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     match state.disconnect(msg.chat.id).await {
         Ok(Some(project_name)) => {
             bot.send_message(
@@ -704,6 +716,18 @@ pub async fn handle_status(
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     let status = if let Some((project_name, project_path, tool_id, is_waiting, pending_query, screen_preview)) =
         state.get_session_status(msg.chat.id).await
     {
@@ -800,6 +824,18 @@ pub async fn handle_list(
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     let sessions = state.list_tmux_sessions_with_status();
 
     if sessions.is_empty() {
@@ -894,6 +930,18 @@ pub async fn handle_message(
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    // Check authorization first (defense-in-depth)
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     // Extract text and thread_id early to avoid borrow issues
     let text = match msg.text() {
         Some(t) => t.to_string(),
