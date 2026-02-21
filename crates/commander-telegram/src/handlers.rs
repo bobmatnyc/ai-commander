@@ -96,6 +96,26 @@ pub async fn handle_start(
         return handle_deep_link_connect(bot, msg, state, session_name).await;
     }
 
+    // Check if this is a deep link stop
+    if let Some(session_name) = payload.strip_prefix("stop_") {
+        info!(chat_id = %msg.chat.id.0, session = %session_name, "Deep link stop attempt");
+
+        // Check authorization first
+        if !state.is_authorized(msg.chat.id.0).await {
+            bot.send_message(
+                msg.chat.id,
+                "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+                Get a pairing code by running <code>/telegram</code> in the Commander CLI.\n\n\
+                After pairing, you can click the link again to stop the session.",
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+            return Ok(());
+        }
+
+        return handle_deep_link_stop(bot, msg, state, session_name).await;
+    }
+
     // Default welcome message
     let welcome = format!(
         "Welcome to Commander Bot! 🚀\n\n\
@@ -200,6 +220,93 @@ async fn handle_deep_link_connect(
                 session = %session_name,
                 error = %e,
                 "Deep link connection failed"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle deep link stop from /start command.
+async fn handle_deep_link_stop(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    session_name: &str,
+) -> ResponseResult<()> {
+    // Validate session name (alphanumeric, dash, underscore only)
+    if !session_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Invalid session name: '{}'", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Get list of sessions and validate the session exists
+    let sessions = state.list_tmux_sessions_with_status();
+    let session_exists = sessions.iter().any(|(name, _, _, _)| {
+        let display_name = name.strip_prefix("commander-").unwrap_or(name);
+        display_name == session_name
+    });
+
+    if !session_exists {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Session '{}' not found.", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Get tmux orchestrator
+    let tmux = match state.tmux() {
+        Some(t) => t,
+        None => {
+            bot.send_message(msg.chat.id, "❌ tmux not available.").await?;
+            return Ok(());
+        }
+    };
+
+    // Stop the session
+    let full_session = format!("commander-{}", session_name);
+
+    // Check if session exists
+    if !tmux.session_exists(&full_session) {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Session '{}' not found.", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Destroy the tmux session
+    match tmux.destroy_session(&full_session) {
+        Ok(_) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("🛑 Stopped session <b>{}</b>", html_escape(session_name))
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+
+            info!(
+                chat_id = %msg.chat.id.0,
+                session = %session_name,
+                "Deep link stop successful"
+            );
+        }
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Failed to stop '{}': {}", session_name, e)
+            )
+            .await?;
+
+            error!(
+                chat_id = %msg.chat.id.0,
+                session = %session_name,
+                error = %e,
+                "Deep link stop failed"
             );
         }
     }
@@ -941,6 +1048,15 @@ async fn generate_session_link(bot: &Bot, session_name: &str) -> String {
     format!("https://t.me/{}?start=connect_{}", bot_username, session_name)
 }
 
+/// Generate a deep link for stopping a session.
+async fn generate_stop_link(bot: &Bot, session_name: &str) -> String {
+    let bot_username = match bot.get_me().await {
+        Ok(me) => me.username().to_string(),
+        Err(_) => "commander".to_string(), // Fallback if can't get username
+    };
+    format!("https://t.me/{}?start=stop_{}", bot_username, session_name)
+}
+
 /// Handle the /list command - list tmux sessions with status info and deep links.
 pub async fn handle_list(
     bot: Bot,
@@ -972,7 +1088,7 @@ pub async fn handle_list(
         .await
         .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
 
-    let mut text = String::from("🤖 <b>Available Sessions</b>\n\nTap a link to connect:\n\n");
+    let mut text = String::from("🤖 <b>Available Sessions</b>\n\nTap a link to connect or stop:\n\n");
 
     for (name, is_commander, created_at, preview) in &sessions {
         let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
@@ -1007,18 +1123,19 @@ pub async fn handle_list(
 
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
 
-        // Generate deep link for this session
-        let deep_link = generate_session_link(&bot, display_name).await;
+        // Generate deep links for this session
+        let connect_link = generate_session_link(&bot, display_name).await;
+        let stop_link = generate_stop_link(&bot, display_name).await;
 
-        // Add session info to text with prominent deep link
+        // Add session info to text with prominent deep links for both connect and stop
         text.push_str(&format!(
-            "• <b>{}</b> {} {}\n  Started {}\n  👉 <a href=\"{}\">Connect to {}</a>\n\n",
+            "• <b>{}</b> {} {}\n  Started {}\n  👉 <a href=\"{}\">Connect</a> | 🛑 <a href=\"{}\">Stop</a>\n\n",
             html_escape(display_name),
             status,
             marker,
             age_str,
-            deep_link,
-            html_escape(display_name)
+            connect_link,
+            stop_link
         ));
     }
 

@@ -387,9 +387,7 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                         }
                     }
                 }
-                Ok(PollResult::Complete(response, message_id, response_thread_id)) => {
-                    use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
-
+                Ok(PollResult::Complete(mut response, message_id, response_thread_id)) => {
                     // Delete progress message if it exists
                     if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, prog_msg_id).await;
@@ -403,25 +401,22 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     // Determine which thread to send to (prefer response's thread_id)
                     let target_thread_id = response_thread_id.or(thread_id);
 
-                    // Check if response was truncated (fallback used) - add session link button
-                    let is_truncated = response.contains("more characters)_") || response.contains("more lines)_");
-                    let keyboard = if is_truncated {
-                        // Get session info for the button
-                        state.get_session_info(chat_id).await.map(|(name, _)| {
-                            let session_name = format!("commander-{}", name);
-                            InlineKeyboardMarkup::new(vec![vec![
-                                InlineKeyboardButton::callback(
-                                    format!("Open {}", name),
-                                    format!("connect:{}", session_name),
-                                )
-                            ]])
-                        })
-                    } else {
-                        None
-                    };
+                    // If truncated, append deep link to message text
+                    if response.contains("more characters)_") || response.contains("more lines)_") {
+                        if let Some((name, _)) = state.get_session_info(chat_id).await {
+                            // Generate deep link for opening full session
+                            let bot_username = match bot.get_me().await {
+                                Ok(me) => me.username().to_string(),
+                                Err(_) => "commander".to_string(),
+                            };
+                            let link = format!("https://t.me/{}?start=connect_{}", bot_username, name);
+                            response.push_str(&format!("\n\n👉 <a href=\"{}\">Open full session</a>", link));
+                        }
+                    }
 
                     // Send the final response, as a reply if we have a message ID
-                    let mut req = bot.send_message(chat_id, &response);
+                    let mut req = bot.send_message(chat_id, &response)
+                        .parse_mode(teloxide::types::ParseMode::Html);
 
                     if let Some(tid) = target_thread_id {
                         req = req.message_thread_id(tid);
@@ -429,10 +424,6 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
 
                     if let Some(msg_id) = message_id {
                         req = req.reply_parameters(ReplyParameters::new(msg_id));
-                    }
-
-                    if let Some(kb) = keyboard {
-                        req = req.reply_markup(kb);
                     }
 
                     if let Err(e) = req.await {
@@ -459,7 +450,7 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
 
 /// Background task to poll for cross-channel notifications and broadcast to authorized users.
 async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
-    use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup};
+    use teloxide::types::ChatId;
     use crate::notifications::{get_unread_notifications, mark_notifications_read};
 
     let mut poll_interval = interval(Duration::from_millis(NOTIFICATION_POLL_INTERVAL_MS));
@@ -490,16 +481,18 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
         // No LLM summarization needed - it only introduces preamble bleeding.
         let mut sent_ids = Vec::new();
         for notification in &notifications {
-            // Build inline keyboard with session link button if session is specified
-            let keyboard = notification.session.as_ref().map(|session| {
+            // Build notification message with deep link if session is specified
+            let mut message = notification.message.clone();
+            if let Some(session) = &notification.session {
                 let display_name = session.strip_prefix("commander-").unwrap_or(session);
-                InlineKeyboardMarkup::new(vec![vec![
-                    InlineKeyboardButton::callback(
-                        format!("Open {}", display_name),
-                        format!("connect:{}", session),
-                    )
-                ]])
-            });
+                // Generate deep link for connecting to this session
+                let bot_username = match bot.get_me().await {
+                    Ok(me) => me.username().to_string(),
+                    Err(_) => "commander".to_string(),
+                };
+                let link = format!("https://t.me/{}?start=connect_{}", bot_username, display_name);
+                message.push_str(&format!("\n\n👉 <a href=\"{}\">Open {}</a>", link, display_name));
+            }
 
             for &chat_id in &authorized_chats {
                 // Skip notification if it's for the session the user is currently connected to
@@ -516,10 +509,8 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
                     }
                 }
 
-                let mut req = bot.send_message(ChatId(chat_id), &notification.message);
-                if let Some(ref kb) = keyboard {
-                    req = req.reply_markup(kb.clone());
-                }
+                let req = bot.send_message(ChatId(chat_id), &message)
+                    .parse_mode(teloxide::types::ParseMode::Html);
                 if let Err(e) = req.await {
                     warn!(chat_id = %chat_id, error = %e, "Failed to send notification");
                 } else {
