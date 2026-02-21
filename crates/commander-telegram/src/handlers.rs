@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, ThreadId};
+use teloxide::types::{CallbackQuery, ThreadId};
 use teloxide::utils::command::BotCommands;
 use tracing::{debug, error, info, warn};
 
@@ -972,8 +972,7 @@ pub async fn handle_list(
         .await
         .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
 
-    let mut text = String::from("🤖 <b>Available Sessions</b>\n\n");
-    let mut keyboard_buttons = Vec::new();
+    let mut text = String::from("🤖 <b>Available Sessions</b>\n\nTap a link to connect:\n\n");
 
     for (name, is_commander, created_at, preview) in &sessions {
         let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
@@ -1011,41 +1010,22 @@ pub async fn handle_list(
         // Generate deep link for this session
         let deep_link = generate_session_link(&bot, display_name).await;
 
-        // Add session info to text with deep link
+        // Add session info to text with prominent deep link
         text.push_str(&format!(
-            "• <code>{}</code> {}\n  {} | started {}\n  🔗 <a href=\"{}\">Quick Link</a>\n\n",
+            "• <b>{}</b> {} {}\n  Started {}\n  👉 <a href=\"{}\">Connect to {}</a>\n\n",
             html_escape(display_name),
             status,
             marker,
             age_str,
-            deep_link
+            deep_link,
+            html_escape(display_name)
         ));
-
-        // Create inline keyboard button with stripped session name
-        // Strip "commander-" prefix for the callback data so /connect works correctly
-        let button_text = format!("{} {}", marker, display_name);
-        let callback_data = format!("connect:{}", display_name);
-
-        info!(
-            session_name = %name,
-            display_name = %display_name,
-            callback_data = %callback_data,
-            "Creating inline button for session"
-        );
-
-        keyboard_buttons.push(vec![InlineKeyboardButton::callback(
-            button_text,
-            callback_data,
-        )]);
     }
 
-    text.push_str("\n<i>Tap a button to connect, or share the link!</i>");
-
-    let keyboard = InlineKeyboardMarkup::new(keyboard_buttons);
+    text.push_str("<i>💡 Tip: Bookmark these links for quick access!</i>");
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(keyboard)
         .await?;
 
     Ok(())
