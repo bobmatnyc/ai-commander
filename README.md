@@ -18,6 +18,7 @@ Control AI coding sessions from TUI, REPL, or Telegram with support for multiple
 - Inspect mode for live tmux view (F2)
 - Text wrapping for long outputs
 - Tab autocomplete for slash commands
+- Clickable session links - click session names in `/list` output to connect
 
 ### Telegram Bot
 - Remote session control from Telegram
@@ -26,6 +27,8 @@ Control AI coding sessions from TUI, REPL, or Telegram with support for multiple
 - Auto-build binary if not found
 - Auto-restart bot on app launch
 - Response summarization for mobile (via OpenRouter)
+- Inline keyboard buttons - tap session names in `/list` or `/sessions` to connect
+- Forum Topics support - create dedicated topics for different sessions in group chats
 
 ## Installation
 
@@ -49,6 +52,55 @@ cargo install --path crates/ai-commander
 
 ```bash
 ai-commander --version
+```
+
+## Development
+
+### Auto-Restart on Code Changes
+
+AI Commander includes a development mode that automatically rebuilds and restarts the bot when you save code changes, while preserving active sessions:
+
+```bash
+./scripts/dev.sh          # Start dev mode with auto-restart
+./scripts/dev.sh --debug  # Debug build (faster compilation)
+./scripts/dev.sh -v       # Verbose bot logging
+```
+
+**How it works:**
+- Watches `crates/` directory for file changes using `cargo-watch`
+- Automatically rebuilds on save (~30 seconds)
+- Gracefully restarts the bot with SIGTERM
+- Saves active sessions before shutdown
+- Restores valid sessions after restart (<24h old, tmux exists)
+- Sends Telegram notification with restoration status
+
+**Development workflow:**
+1. Run `./scripts/dev.sh` once
+2. Edit code in your editor
+3. Save → Auto-rebuild → Auto-restart → Sessions restored
+4. Check Telegram for rebuild notifications
+
+No need to manually restart the bot during development!
+
+### Development Dependencies
+
+```bash
+cargo install cargo-watch  # For auto-restart on code changes
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific crate tests
+cargo test -p ai-commander
+cargo test -p commander-telegram
+cargo test -p commander-tmux
+
+# Run tmux integration tests (requires tmux)
+cargo test -p commander-tmux -- --ignored
 ```
 
 ## Quick Start
@@ -78,10 +130,43 @@ ai-commander --version
 
 ## Telegram Integration
 
+### Quick Start
+
 1. Set `TELEGRAM_BOT_TOKEN` in `.env.local`
 2. Run `/telegram` in TUI to generate a pairing code
 3. In Telegram, send `/pair <code>` to your bot
 4. Control sessions remotely from your phone
+
+### Inline Keyboard Buttons
+
+The `/list` and `/sessions` commands display inline keyboard buttons for one-tap session connection. Simply tap a session button to connect instead of typing the full `/connect` command.
+
+### Forum Topics (Group Chat Mode)
+
+Use Telegram Forum Topics to organize multiple sessions in a single group chat, with each session getting its own dedicated topic thread.
+
+**Setup:**
+
+1. Create a Telegram supergroup
+2. Enable Forum Topics in group settings (Settings > Topics > Enable)
+3. Add the bot as an admin
+4. Run `/groupmode` to enable group mode
+5. Run `/topic <session>` to create a topic for each session
+
+**Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/groupmode` | Enable group mode in the current supergroup |
+| `/topic <session>` | Create a dedicated forum topic for a session |
+| `/topics` | List all topics and their linked sessions |
+
+**How it works:**
+
+- Messages sent in each topic are automatically routed to that topic's linked session
+- Responses from the session appear in the correct topic
+- Great for managing multiple projects from one group chat
+- Each topic acts as an isolated conversation with its session
 
 ## Architecture
 
@@ -162,21 +247,6 @@ POST   /api/work                Create work item
 GET    /api/work/:id            Get work item
 POST   /api/work/:id/complete   Complete work
 GET    /api/adapters            List adapters
-```
-
-## Development
-
-```bash
-# Run all tests
-cargo test
-
-# Run specific crate tests
-cargo test -p ai-commander
-cargo test -p commander-telegram
-cargo test -p commander-tmux
-
-# Run tmux integration tests (requires tmux)
-cargo test -p commander-tmux -- --ignored
 ```
 
 ## License
