@@ -50,7 +50,17 @@ impl TelegramBot {
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_WEBHOOK_PORT);
 
-        let bot = Bot::new(token);
+        // Configure HTTP client with timeouts for better connection stability
+        // Use teloxide's net module to get the correct reqwest version
+        let client = teloxide::net::default_reqwest_settings()
+            .timeout(Duration::from_secs(120))          // Read timeout - long enough for getUpdates
+            .connect_timeout(Duration::from_secs(30))   // Connect timeout
+            .pool_idle_timeout(Duration::from_secs(90)) // Keep connections alive
+            .pool_max_idle_per_host(2)                  // Limit connection pool
+            .build()
+            .map_err(|e| TelegramError::BotStartFailed(format!("Failed to create HTTP client: {}", e)))?;
+
+        let bot = Bot::with_client(token, client);
         let state = create_shared_state(state_dir);
 
         Ok(Self {
@@ -229,10 +239,14 @@ impl TelegramBot {
 
         info!("Bot is running! Send /start to begin.");
 
+        // Build dispatcher with error handler
         Dispatcher::builder(bot, handler)
             .default_handler(|upd| async move {
                 warn!("Unhandled update: {:?}", upd);
             })
+            .error_handler(teloxide::error_handlers::LoggingErrorHandler::with_custom_text(
+                "An error occurred in the dispatcher"
+            ))
             .enable_ctrlc_handler()
             .build()
             .dispatch()
@@ -286,11 +300,16 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
         for (session_key, chat_id, thread_id) in waiting_sessions {
             // Refresh typing indicator to show processing is ongoing
             if let Some(tid) = thread_id {
-                let _ = bot.send_chat_action(chat_id, ChatAction::Typing)
+                if let Err(e) = bot.send_chat_action(chat_id, ChatAction::Typing)
                     .message_thread_id(tid)
-                    .await;
+                    .await
+                {
+                    warn!(chat_id = %chat_id, thread_id = ?tid, error = %e, "Failed to send typing indicator");
+                }
             } else {
-                let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+                if let Err(e) = bot.send_chat_action(chat_id, ChatAction::Typing).await {
+                    warn!(chat_id = %chat_id, error = %e, "Failed to send typing indicator");
+                }
             }
 
             // Poll for output from this session

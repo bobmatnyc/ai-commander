@@ -1094,9 +1094,12 @@ async fn handle_topic_message(
     }
 
     // Send typing indicator to the topic
-    let _ = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+    if let Err(e) = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .message_thread_id(thread_id)
-        .await;
+        .await
+    {
+        warn!(chat_id = %msg.chat.id, thread_id = ?thread_id, error = %e, "Failed to send typing indicator");
+    }
 
     // Send message to the topic's session
     match state.send_message_to_topic(msg.chat.id, thread_id, text, Some(msg.id)).await {
