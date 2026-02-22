@@ -3,8 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use commander_core::options::{DetectedOptions, OptionDetector, OptionFormat};
 use teloxide::dispatching::UpdateFilterExt;
 use teloxide::prelude::*;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -279,6 +281,27 @@ impl TelegramBot {
     }
 }
 
+/// Create inline keyboard from detected options.
+fn create_option_keyboard(options: &DetectedOptions) -> InlineKeyboardMarkup {
+    let buttons: Vec<Vec<InlineKeyboardButton>> = options.options
+        .iter()
+        .map(|opt| {
+            let button_text = match options.format {
+                OptionFormat::Letters => format!("{}) {}", opt.key, opt.label),
+                OptionFormat::Numbers => format!("{}. {}", opt.key, opt.label),
+                OptionFormat::YesNo => opt.label.clone(),
+            };
+
+            // Callback data: "option:{key}"
+            let callback_data = format!("option:{}", opt.key);
+
+            vec![InlineKeyboardButton::callback(button_text, callback_data)]
+        })
+        .collect();
+
+    InlineKeyboardMarkup::new(buttons)
+}
+
 /// Background task to poll for output from connected sessions and send responses.
 async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
     use teloxide::types::{ChatAction, MessageId, ReplyParameters};
@@ -414,9 +437,18 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                         }
                     }
 
+                    // Check for options in response
+                    let detected_options = OptionDetector::detect_options(&response);
+
                     // Send the final response, as a reply if we have a message ID
                     let mut req = bot.send_message(chat_id, &response)
                         .parse_mode(teloxide::types::ParseMode::Html);
+
+                    // Add inline keyboard if options detected
+                    if let Some(ref options) = detected_options {
+                        let keyboard = create_option_keyboard(options);
+                        req = req.reply_markup(keyboard);
+                    }
 
                     if let Some(tid) = target_thread_id {
                         req = req.message_thread_id(tid);
@@ -429,7 +461,11 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     if let Err(e) = req.await {
                         warn!(chat_id = %chat_id.0, error = %e, "Failed to send response");
                     } else {
-                        info!(chat_id = %chat_id.0, thread_id = ?target_thread_id, "Response sent to user");
+                        if detected_options.is_some() {
+                            info!(chat_id = %chat_id.0, thread_id = ?target_thread_id, "Response with options sent to user");
+                        } else {
+                            info!(chat_id = %chat_id.0, thread_id = ?target_thread_id, "Response sent to user");
+                        }
                     }
                 }
                 Ok(PollResult::NoOutput) => {

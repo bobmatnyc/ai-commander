@@ -16,6 +16,7 @@ pub mod config;
 pub mod migration;
 pub mod notification_parser;
 pub mod onboarding;
+pub mod options;
 pub mod output_filter;
 pub mod summarizer;
 
@@ -41,3 +42,6 @@ pub use change_detector::{
 
 // Re-export notification parsing
 pub use notification_parser::{parse_notification, parse_session_preview, strip_ansi, ParsedSessionStatus};
+
+// Re-export option detection
+pub use options::{DetectedOptions, OptionDetector, OptionFormat, ParsedOption};

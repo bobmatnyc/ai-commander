@@ -1925,6 +1925,57 @@ pub async fn handle_send(
     Ok(())
 }
 
+/// Handle option selection from inline keyboard buttons.
+async fn handle_option_selection(
+    bot: Bot,
+    q: CallbackQuery,
+    state: Arc<TelegramState>,
+    option_key: &str,
+) -> ResponseResult<()> {
+    let Some(msg) = q.message.as_ref() else {
+        return Ok(());
+    };
+
+    let chat_id = msg.chat().id;
+
+    // Check if user has active session
+    if !state.has_session(chat_id).await {
+        bot.send_message(
+            chat_id,
+            "Not connected to a session. Use /connect first.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Send the selected option to Claude
+    // Just send the key (A, B, 1, 2, y, n) - Claude understands
+    match state.send_message_direct(chat_id, option_key, Some(msg.id())).await {
+        Ok(()) => {
+            // Confirm selection with a notification (not a full message)
+            if let Err(e) = bot.answer_callback_query(&q.id)
+                .text(format!("Selected: {}", option_key))
+                .await
+            {
+                warn!(error = %e, "Failed to send callback notification");
+            }
+
+            info!(chat_id = %chat_id.0, option = %option_key, "Option selected");
+        }
+        Err(e) => {
+            bot.send_message(
+                chat_id,
+                format!("Failed to send selection: {}", e),
+            )
+            .await?;
+
+            error!(chat_id = %chat_id.0, error = %e, "Failed to send option selection");
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle callback queries from inline keyboard buttons.
 pub async fn handle_callback(
     bot: Bot,
@@ -1944,12 +1995,18 @@ pub async fn handle_callback(
         return Err(e);
     }
 
-    let Some(data) = &q.data else {
+    let Some(data) = q.data.clone() else {
         warn!(callback_id = %q.id, "Callback has no data");
         return Ok(());
     };
 
     // Parse callback data
+
+    // Handle option selection
+    if let Some(option_key) = data.strip_prefix("option:") {
+        return handle_option_selection(bot, q, state, option_key).await;
+    }
+
     if let Some(session) = data.strip_prefix("connect:") {
         let Some(msg) = q.message.as_ref() else {
             return Ok(());
