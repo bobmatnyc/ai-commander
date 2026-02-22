@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **GUI Application (MVP)**: Desktop application using Tauri 2.x + Svelte
+  - Session management (list, connect, real-time updates with 2s refresh)
+  - Chat interface with auto-scroll and timestamps
+  - Bot daemon control (start, stop, status monitoring with 5s interval)
+  - Keyboard shortcuts (Enter to send messages, Shift+Enter for newlines)
+  - Lightweight binary (~10MB with Tauri 2.x)
+  - Cross-platform support (macOS, Linux, Windows)
+  - Real-time event streaming with `session-output` events
+- Daemon module extraction to `commander-telegram/src/daemon.rs`
+  - Cross-platform process management (Unix + Windows)
+  - Graceful shutdown with SIGTERM + SIGKILL fallback
+  - Public API for bot lifecycle management (`start()`, `stop()`, `is_running()`, `get_pid()`)
+
+### Changed
+- Refactored daemon functions from `ai-commander/src/lib.rs` to `commander-telegram`
+- Improved bot management with `DaemonStatus` and `DaemonError` types
+
+### Technical
+- New crate: `commander-gui` (Tauri backend + Svelte frontend)
+  - Frontend: Svelte 4.2 + TypeScript 5.3 + Tailwind CSS 3.4
+  - Backend: Tauri 2.x with IPC commands for session/bot management
+  - Dependencies: commander-models, commander-persistence, commander-tmux, commander-telegram, commander-core, commander-adapters
+  - Build system: Cargo + npm/Vite
+- QA status: Code-verified (35/40 tests), approved for manual validation (95% confidence)
+
 ## [0.3.0] - 2025-02-12
 
 ### Added

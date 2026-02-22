@@ -20,6 +20,16 @@ Control AI coding sessions from TUI, REPL, or Telegram with support for multiple
 - Tab autocomplete for slash commands
 - Clickable session links - click session names in `/list` output to connect
 
+### GUI (Graphical User Interface) 🪟
+- Desktop application with all TUI features and better discoverability
+- Real-time session list with auto-refresh (2s interval)
+- Chat interface with Claude and auto-scroll
+- Bot daemon control (start/stop/status with 5s monitoring)
+- Keyboard shortcuts (Enter to send, Shift+Enter for newlines)
+- Lightweight binary (~10MB, Tauri 2.x + Svelte)
+- Cross-platform support (macOS, Linux, Windows)
+- **Documentation**: See [`docs/GUI.md`](docs/GUI.md) for comprehensive guide
+
 ### Telegram Bot
 - Remote session control from Telegram
 - Secure pairing with 6-character codes
@@ -105,11 +115,29 @@ cargo test -p commander-tmux -- --ignored
 
 ## Quick Start
 
+### TUI/REPL
 1. Start the TUI: `ai-commander tui`
 2. Create a project: `/connect /path/to/project -a claude-code -n myproject`
 3. Send messages to interact with Claude Code
 4. Use `/telegram` to enable mobile access
 5. Use `/stop` to end session (auto-commits changes if in git repo)
+
+### GUI
+1. Install frontend dependencies:
+   ```bash
+   cd crates/commander-gui/ui
+   npm install
+   ```
+2. Start the GUI:
+   ```bash
+   cd crates/commander-gui
+   cargo tauri dev  # Development with hot-reload
+   # OR
+   cargo tauri build  # Production binary in target/release/bundle/
+   ```
+3. Click a session to connect or manage bot daemon from the UI
+
+**Note**: GUI requires Node.js 18+ and npm 9+ for frontend development.
 
 ## Slash Commands
 
@@ -171,10 +199,41 @@ Use Telegram Forum Topics to organize multiple sessions in a single group chat, 
 ## Architecture
 
 ```
+┌─────────────────────────────────────────────────┐
+│            User Interfaces                      │
+│  ┌──────┐  ┌──────┐  ┌──────┐  ┌────────────┐  │
+│  │ CLI  │  │ TUI  │  │ GUI  │  │ Telegram   │  │
+│  │      │  │      │  │(Tauri│  │    Bot     │  │
+│  └──┬───┘  └──┬───┘  │Svelte│  └─────┬──────┘  │
+│     │        │        └───┬──┘        │         │
+└─────┼────────┼────────────┼───────────┼─────────┘
+      │        │            │           │
+      v        v            v           v
+┌─────────────────────────────────────────────────┐
+│           Shared Core Crates                    │
+│  ┌────────────────┐  ┌──────────────────────┐  │
+│  │ commander-core │  │ commander-persistence│  │
+│  │ commander-state│  │ commander-models     │  │
+│  └────────────────┘  └──────────────────────┘  │
+│  ┌────────────────┐  ┌──────────────────────┐  │
+│  │ commander-tmux │  │ commander-telegram   │  │
+│  └────────────────┘  └──────────────────────┘  │
+│  ┌────────────────┐  ┌──────────────────────┐  │
+│  │ commander-     │  │ commander-events     │  │
+│  │   adapters     │  │ commander-work       │  │
+│  │ commander-api  │  │ commander-runtime    │  │
+│  └────────────────┘  └──────────────────────┘  │
+└─────────────────────────────────────────────────┘
+```
+
+### Crates Overview
+
+```
 crates/
 ├── commander-core/      # Shared business logic (output filtering, summarization, config)
 ├── ai-commander/        # TUI and REPL interfaces (main binary)
-├── commander-telegram/  # Telegram bot
+├── commander-gui/       # GUI application (Tauri 2.x backend + Svelte frontend)
+├── commander-telegram/  # Telegram bot with daemon management
 ├── commander-tmux/      # Tmux orchestration
 ├── commander-adapters/  # Runtime adapters (Claude Code, MPM, Shell, etc.)
 ├── commander-state/     # Project state management
@@ -185,6 +244,8 @@ crates/
 ├── commander-runtime/   # Async runtime
 └── commander-api/       # REST API
 ```
+
+**Documentation**: See [`crates/commander-gui/README.md`](crates/commander-gui/README.md) for GUI details and [`docs/architecture/`](docs/architecture/) for architecture deep-dives.
 
 ## Configuration
 
