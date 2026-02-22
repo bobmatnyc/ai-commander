@@ -33,6 +33,8 @@ fn main() {
             commands::stop_bot,
             commands::get_bot_status,
             commands::generate_pairing_code,
+            commands::list_project_directories,
+            commands::create_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,5 +1,6 @@
 use crate::state::GuiState;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tauri::State;
 
 #[derive(Serialize, Deserialize)]
@@ -149,4 +150,85 @@ pub async fn generate_pairing_code() -> Result<String, String> {
     // Placeholder implementation - will depend on bot pairing mechanism
     // TODO: Implement actual pairing code generation
     Ok("12345678".to_string())
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ProjectDirectory {
+    pub name: String,
+    pub path: String,
+    pub project_type: String, // "claude-code" or "mpm"
+}
+
+#[tauri::command]
+pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String> {
+    let mut dirs = Vec::new();
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+
+    // Check ~/.claude/projects/ for Claude Code projects
+    let cc_path = PathBuf::from(&home).join(".claude/projects");
+    if let Ok(entries) = std::fs::read_dir(&cc_path) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    dirs.push(ProjectDirectory {
+                        name: name.to_string(),
+                        path: entry.path().to_string_lossy().to_string(),
+                        project_type: "claude-code".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Check ~/.claude-mpm/projects/ for MPM projects
+    let mpm_path = PathBuf::from(&home).join(".claude-mpm/projects");
+    if let Ok(entries) = std::fs::read_dir(&mpm_path) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    dirs.push(ProjectDirectory {
+                        name: name.to_string(),
+                        path: entry.path().to_string_lossy().to_string(),
+                        project_type: "mpm".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Also check current working directory for any projects
+    if let Ok(current_dir) = std::env::current_dir() {
+        // Check if current directory has .claude or package.json
+        if current_dir.join(".claude").exists() || current_dir.join("package.json").exists() {
+            if let Some(name) = current_dir.file_name().and_then(|n| n.to_str()) {
+                dirs.push(ProjectDirectory {
+                    name: name.to_string(),
+                    path: current_dir.to_string_lossy().to_string(),
+                    project_type: "current-dir".to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(dirs)
+}
+
+#[tauri::command]
+pub async fn create_session(
+    name: String,
+    directory: String,
+    state: State<'_, GuiState>,
+) -> Result<(), String> {
+    let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
+
+    // Check if session already exists
+    if tmux.session_exists(&name) {
+        return Err(format!("Session '{}' already exists", name));
+    }
+
+    // Create session in specified directory
+    tmux.create_session_in_dir(&name, Some(&directory))
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
 }

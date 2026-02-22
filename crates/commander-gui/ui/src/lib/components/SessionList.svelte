@@ -2,10 +2,12 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { sessions, currentSession } from '../stores/app';
-  import { Activity } from 'lucide-svelte';
+  import { Activity, Plus } from 'lucide-svelte';
   import type { Session } from '../stores/app';
+  import CreateSessionModal from './CreateSessionModal.svelte';
 
   let interval: number;
+  let showCreateModal = false;
 
   function getDisplayName(sessionName: string): string {
     return sessionName.replace(/^commander-/, '');
@@ -32,6 +34,11 @@
     }
   }
 
+  function handleSessionCreated() {
+    showCreateModal = false;
+    loadSessions();
+  }
+
   onMount(() => {
     loadSessions();
     interval = window.setInterval(loadSessions, 2000);
@@ -43,7 +50,13 @@
 </script>
 
 <div class="session-list">
-  <h2 class="text-lg font-semibold px-4 py-3 border-b border-gray-200">Sessions</h2>
+  <div class="session-list-header">
+    <h2 class="header-title">Sessions</h2>
+    <button class="create-btn" on:click={() => showCreateModal = true} title="Create new session">
+      <Plus size={16} />
+      <span>New</span>
+    </button>
+  </div>
   <div class="session-items">
     {#each $sessions as session}
       <button
@@ -63,6 +76,11 @@
       </div>
     {/each}
   </div>
+
+  <CreateSessionModal
+    bind:show={showCreateModal}
+    on:created={handleSessionCreated}
+  />
 </div>
 
 <style>
@@ -71,6 +89,41 @@
     flex-direction: column;
     height: 100%;
     background-color: #fafafa;
+  }
+
+  .session-list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+    background-color: white;
+  }
+
+  .header-title {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #1f2937;
+    margin: 0;
+  }
+
+  .create-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.375rem 0.75rem;
+    background: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: background 0.2s;
+  }
+
+  .create-btn:hover {
+    background: #2563eb;
   }
 
   .session-items {

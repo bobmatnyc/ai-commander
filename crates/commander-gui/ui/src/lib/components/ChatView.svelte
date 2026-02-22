@@ -9,6 +9,23 @@
   let autoScroll = true;
   let showScrollButton = false;
   let isActionLoading = false;
+  let previousSessionName: string | null = null;
+
+  // Watch for session changes and clear messages
+  $: {
+    const currentName = $currentSession?.name ?? null;
+    if (currentName !== previousSessionName) {
+      messages.set([]);
+      if (currentName) {
+        messages.update(m => [...m, {
+          direction: 'system',
+          content: `Connected to session: ${currentName.replace(/^commander-/, '')}`,
+          timestamp: new Date(),
+        }]);
+      }
+      previousSessionName = currentName;
+    }
+  }
 
   function scrollToBottom() {
     if (chatContainer) {
