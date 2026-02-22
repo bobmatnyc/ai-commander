@@ -61,6 +61,7 @@
 //! - `/list` - List available projects
 
 pub mod bot;
+pub mod daemon;
 pub mod error;
 pub mod handlers;
 pub mod ngrok;
@@ -71,6 +72,10 @@ pub mod state;
 pub mod version;
 
 pub use bot::TelegramBot;
+pub use daemon::{
+    ensure_running, is_running, restart, restart_if_running, start, status, stop, DaemonError,
+    DaemonStatus, StartResult,
+};
 pub use error::{Result, TelegramError};
 pub use ngrok::NgrokTunnel;
 pub use notifications::{
