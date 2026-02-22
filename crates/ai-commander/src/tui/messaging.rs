@@ -9,6 +9,7 @@ use std::time::Instant;
 use commander_core::{find_new_lines, is_claude_ready, summarize_blocking_with_fallback};
 
 use super::app::{App, Message};
+use super::options::OptionDetector;
 
 impl App {
     /// Send a message to the connected project.
@@ -50,7 +51,12 @@ impl App {
             if let Ok(summary) = rx.try_recv() {
                 // Got summary result
                 if let Some(project) = &self.project {
-                    self.messages.push(Message::received(project.clone(), summary));
+                    self.messages.push(Message::received(project.clone(), summary.clone()));
+
+                    // Check for options in the summary
+                    if let Some(detected_options) = OptionDetector::detect_options(&summary) {
+                        self.enter_option_mode(detected_options);
+                    }
                 }
                 self.summarizer_rx = None;
                 self.is_summarizing = false;
@@ -91,6 +97,15 @@ impl App {
             }
             self.last_output = current_output.clone();
             self.last_activity = Some(Instant::now());
+
+            // Check for options in the raw output (immediate detection)
+            // This allows detecting options without waiting for summarization
+            if !self.option_mode {
+                let buffer_text = self.response_buffer.join("\n");
+                if let Some(detected_options) = OptionDetector::detect_options(&buffer_text) {
+                    self.enter_option_mode(detected_options);
+                }
+            }
         }
 
         // Check if Claude Code is idle (prompt visible and no activity for 1.5s)

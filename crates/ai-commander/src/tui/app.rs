@@ -100,6 +100,8 @@ pub enum InputMode {
     Normal,
     /// Scrolling through output
     Scrolling,
+    /// Selecting from detected options
+    SelectingOption,
 }
 
 /// View mode for the TUI.
@@ -230,6 +232,14 @@ pub struct App {
     pub clickable_items: Vec<ClickableItem>,
     /// Current output area rect (for coordinate translation).
     pub output_area: Option<Rect>,
+
+    // Option selection
+    /// Detected options from Claude's last response.
+    pub pending_options: Option<super::options::DetectedOptions>,
+    /// Currently selected option index.
+    pub option_selected_index: usize,
+    /// Whether in option selection mode.
+    pub option_mode: bool,
 }
 
 impl App {
@@ -295,6 +305,10 @@ impl App {
 
             clickable_items: Vec::new(),
             output_area: None,
+
+            pending_options: None,
+            option_selected_index: 0,
+            option_mode: false,
         };
 
         // Add welcome message
@@ -337,6 +351,72 @@ impl App {
     /// Register a clickable item for the current frame.
     pub fn add_clickable_item(&mut self, rect: Rect, action: ClickAction) {
         self.clickable_items.push(ClickableItem { rect, action });
+    }
+
+    /// Enter option selection mode with detected options.
+    pub fn enter_option_mode(&mut self, options: super::options::DetectedOptions) {
+        self.pending_options = Some(options);
+        self.option_selected_index = 0;
+        self.option_mode = true;
+        self.input_mode = InputMode::SelectingOption;
+    }
+
+    /// Exit option selection mode.
+    pub fn exit_option_mode(&mut self) {
+        self.pending_options = None;
+        self.option_mode = false;
+        self.input_mode = InputMode::Normal;
+    }
+
+    /// Select next option in the list.
+    pub fn option_select_next(&mut self) {
+        if let Some(opts) = &self.pending_options {
+            self.option_selected_index = (self.option_selected_index + 1) % opts.options.len();
+        }
+    }
+
+    /// Select previous option in the list.
+    pub fn option_select_prev(&mut self) {
+        if let Some(opts) = &self.pending_options {
+            if self.option_selected_index == 0 {
+                self.option_selected_index = opts.options.len() - 1;
+            } else {
+                self.option_selected_index -= 1;
+            }
+        }
+    }
+
+    /// Quick-select option by key (letter or number).
+    ///
+    /// Returns true if a matching option was found and selected.
+    pub fn option_quick_select(&mut self, key: char) -> bool {
+        if let Some(opts) = &self.pending_options {
+            let key_upper = key.to_ascii_uppercase().to_string();
+            let key_lower = key.to_ascii_lowercase().to_string();
+
+            for (i, opt) in opts.options.iter().enumerate() {
+                if opt.key == key_upper || opt.key == key_lower || opt.key == key.to_string() {
+                    self.option_selected_index = i;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Confirm the currently selected option and send it to Claude.
+    ///
+    /// Returns the formatted response that was sent.
+    pub fn confirm_option_selection(&mut self) -> Option<String> {
+        if let Some(opts) = &self.pending_options {
+            let selected = &opts.options[self.option_selected_index];
+            let response = selected.label.clone();
+
+            self.exit_option_mode();
+
+            return Some(response);
+        }
+        None
     }
 }
 
