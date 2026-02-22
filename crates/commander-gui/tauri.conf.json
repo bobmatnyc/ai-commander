@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.ai-commander.gui",
   "build": {
-    "beforeDevCommand": "echo 'Frontend dev server placeholder'",
-    "beforeBuildCommand": "echo 'Frontend build placeholder'",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "cd ui && npm run build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../ui/dist"
   },
