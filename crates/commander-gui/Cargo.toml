@@ -19,4 +19,4 @@ commander-telegram = { path = "../commander-telegram" }
 commander-adapters = { path = "../commander-adapters" }
 
 [build-dependencies]
-tauri-build = "2.0"
+tauri-build = { version = "2.0", features = [] }

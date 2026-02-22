@@ -11,6 +11,15 @@
   async function sendMessage() {
     if (!input.trim() || isDisabled) return;
 
+    if (!$currentSession) {
+      messages.update(m => [...m, {
+        direction: 'system',
+        content: 'Error: Not connected to a session. Please select a session first.',
+        timestamp: new Date(),
+      }]);
+      return;
+    }
+
     const content = input.trim();
     input = '';
 
@@ -22,7 +31,11 @@
         timestamp: new Date(),
       }]);
     } catch (err) {
-      alert(`Failed to send: ${err}`);
+      messages.update(m => [...m, {
+        direction: 'system',
+        content: `Failed to send message: ${err}`,
+        timestamp: new Date(),
+      }]);
       input = content;
     }
   }

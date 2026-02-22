@@ -54,6 +54,27 @@ pub async fn disconnect_session(state: State<'_, GuiState>) -> Result<(), String
 }
 
 #[tauri::command]
+pub async fn stop_session(name: String, state: State<'_, GuiState>) -> Result<(), String> {
+    let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
+
+    if !tmux.session_exists(&name) {
+        return Err(format!("Session '{}' not found", name));
+    }
+
+    tmux.destroy_session(&name)
+        .map_err(|e| format!("Failed to stop session: {}", e))?;
+
+    // If we were connected to this session, disconnect
+    let current = state.current_session.read().unwrap();
+    if current.as_ref() == Some(&name) {
+        drop(current); // Release read lock before acquiring write lock
+        *state.current_session.write().unwrap() = None;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn send_message(content: String, state: State<'_, GuiState>) -> Result<(), String> {
     let session_name = state
         .current_session
@@ -64,9 +85,21 @@ pub async fn send_message(content: String, state: State<'_, GuiState>) -> Result
 
     let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
 
-    tmux.send_line(&session_name, None, &content)
-        .map_err(|e| e.to_string())?;
+    eprintln!("[GUI] Sending message to session '{}': {}", session_name, content);
 
+    // Verify session exists before sending
+    if !tmux.session_exists(&session_name) {
+        eprintln!("[GUI] Error: Session '{}' not found", session_name);
+        return Err(format!("Session '{}' not found", session_name));
+    }
+
+    tmux.send_line(&session_name, None, &content)
+        .map_err(|e| {
+            eprintln!("[GUI] Failed to send message to '{}': {}", session_name, e);
+            e.to_string()
+        })?;
+
+    eprintln!("[GUI] Message sent successfully to '{}'", session_name);
     Ok(())
 }
 

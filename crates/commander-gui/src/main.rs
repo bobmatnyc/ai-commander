@@ -27,6 +27,7 @@ fn main() {
             commands::list_sessions,
             commands::connect_session,
             commands::disconnect_session,
+            commands::stop_session,
             commands::send_message,
             commands::start_bot,
             commands::stop_bot,

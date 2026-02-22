@@ -7,6 +7,10 @@
 
   let interval: number;
 
+  function getDisplayName(sessionName: string): string {
+    return sessionName.replace(/^commander-/, '');
+  }
+
   async function loadSessions() {
     try {
       const result = await invoke('list_sessions');
@@ -47,7 +51,7 @@
         class:active={$currentSession?.name === session.name}
         on:click={() => connect(session.name)}
       >
-        <span class="session-name">{session.name}</span>
+        <span class="session-name">{getDisplayName(session.name)}</span>
         <Activity
           size={16}
           class={session.is_connected ? 'text-green-500' : 'text-gray-400'}

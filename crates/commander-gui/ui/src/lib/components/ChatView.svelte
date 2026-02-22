@@ -2,11 +2,13 @@
   import { messages, currentSession } from '../stores/app';
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
+  import { invoke } from '@tauri-apps/api/core';
   import { ArrowDown } from 'lucide-svelte';
 
   let chatContainer: HTMLDivElement;
   let autoScroll = true;
   let showScrollButton = false;
+  let isActionLoading = false;
 
   function scrollToBottom() {
     if (chatContainer) {
@@ -22,6 +24,80 @@
     const atBottom = scrollHeight - scrollTop - clientHeight < 50;
     autoScroll = atBottom;
     showScrollButton = !atBottom;
+  }
+
+  async function handleStatus() {
+    if (!$currentSession || isActionLoading) return;
+    isActionLoading = true;
+
+    try {
+      await invoke('send_message', { content: '/status' });
+      messages.update(m => [...m, {
+        direction: 'sent',
+        content: '/status',
+        timestamp: new Date(),
+      }]);
+    } catch (err) {
+      messages.update(m => [...m, {
+        direction: 'system',
+        content: `Failed to send status command: ${err}`,
+        timestamp: new Date(),
+      }]);
+    } finally {
+      isActionLoading = false;
+    }
+  }
+
+  async function handleStop() {
+    if (!$currentSession || isActionLoading) return;
+
+    const confirmed = confirm(`Are you sure you want to stop session "${$currentSession.name}"? This will terminate the session.`);
+    if (!confirmed) return;
+
+    isActionLoading = true;
+
+    try {
+      await invoke('stop_session', { name: $currentSession.name });
+      messages.update(m => [...m, {
+        direction: 'system',
+        content: `Session "${$currentSession.name}" stopped successfully.`,
+        timestamp: new Date(),
+      }]);
+      currentSession.set(null);
+      messages.set([]);
+    } catch (err) {
+      messages.update(m => [...m, {
+        direction: 'system',
+        content: `Failed to stop session: ${err}`,
+        timestamp: new Date(),
+      }]);
+    } finally {
+      isActionLoading = false;
+    }
+  }
+
+  async function handleDisconnect() {
+    if (!$currentSession || isActionLoading) return;
+    isActionLoading = true;
+
+    try {
+      await invoke('disconnect_session');
+      messages.update(m => [...m, {
+        direction: 'system',
+        content: `Disconnected from session "${$currentSession.name}".`,
+        timestamp: new Date(),
+      }]);
+      currentSession.set(null);
+      messages.set([]);
+    } catch (err) {
+      messages.update(m => [...m, {
+        direction: 'system',
+        content: `Failed to disconnect: ${err}`,
+        timestamp: new Date(),
+      }]);
+    } finally {
+      isActionLoading = false;
+    }
   }
 
   onMount(() => {
@@ -52,6 +128,33 @@
       <p class="text-gray-500">Select a session to start chatting</p>
     </div>
   {:else}
+    <div class="session-actions">
+      <button
+        class="tab"
+        on:click={handleStatus}
+        disabled={isActionLoading}
+        title="Send /status command"
+      >
+        Status
+      </button>
+      <button
+        class="tab"
+        on:click={handleStop}
+        disabled={isActionLoading}
+        title="Stop and destroy this session"
+      >
+        Stop
+      </button>
+      <button
+        class="tab"
+        on:click={handleDisconnect}
+        disabled={isActionLoading}
+        title="Disconnect from this session"
+      >
+        Disconnect
+      </button>
+    </div>
+
     <div
       bind:this={chatContainer}
       on:scroll={handleScroll}
@@ -87,6 +190,40 @@
     position: relative;
     background-color: white;
     overflow: hidden;
+  }
+
+  .session-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+    background-color: #f9fafb;
+  }
+
+  .tab {
+    padding: 0.5rem 1rem;
+    border: 1px solid #d1d5db;
+    border-radius: 0.375rem;
+    background-color: white;
+    color: #374151;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .tab:hover:not(:disabled) {
+    background-color: #f3f4f6;
+    border-color: #9ca3af;
+  }
+
+  .tab:active:not(:disabled) {
+    background-color: #e5e7eb;
+  }
+
+  .tab:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .messages {
