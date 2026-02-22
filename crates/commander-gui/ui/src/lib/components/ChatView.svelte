@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { messages, currentSession } from '../stores/app';
+  import { messages, currentSession, addMessageToSession } from '../stores/app';
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
@@ -9,23 +9,6 @@
   let autoScroll = true;
   let showScrollButton = false;
   let isActionLoading = false;
-  let previousSessionName: string | null = null;
-
-  // Watch for session changes and clear messages
-  $: {
-    const currentName = $currentSession?.name ?? null;
-    if (currentName !== previousSessionName) {
-      messages.set([]);
-      if (currentName) {
-        messages.update(m => [...m, {
-          direction: 'system',
-          content: `Connected to session: ${currentName.replace(/^commander-/, '')}`,
-          timestamp: new Date(),
-        }]);
-      }
-      previousSessionName = currentName;
-    }
-  }
 
   function scrollToBottom() {
     if (chatContainer) {
@@ -45,21 +28,22 @@
 
   async function handleStatus() {
     if (!$currentSession || isActionLoading) return;
+    const sessionName = $currentSession.name;
     isActionLoading = true;
 
     try {
       await invoke('send_message', { content: '/status' });
-      messages.update(m => [...m, {
+      addMessageToSession(sessionName, {
         direction: 'sent',
         content: '/status',
         timestamp: new Date(),
-      }]);
+      });
     } catch (err) {
-      messages.update(m => [...m, {
+      addMessageToSession(sessionName, {
         direction: 'system',
         content: `Failed to send status command: ${err}`,
         timestamp: new Date(),
-      }]);
+      });
     } finally {
       isActionLoading = false;
     }
@@ -67,27 +51,27 @@
 
   async function handleStop() {
     if (!$currentSession || isActionLoading) return;
+    const sessionName = $currentSession.name;
 
-    const confirmed = confirm(`Are you sure you want to stop session "${$currentSession.name}"? This will terminate the session.`);
+    const confirmed = confirm(`Are you sure you want to stop session "${sessionName.replace(/^commander-/, '')}"? This will terminate the session.`);
     if (!confirmed) return;
 
     isActionLoading = true;
 
     try {
-      await invoke('stop_session', { name: $currentSession.name });
-      messages.update(m => [...m, {
+      await invoke('stop_session', { name: sessionName });
+      addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Session "${$currentSession.name}" stopped successfully.`,
+        content: `Session "${sessionName.replace(/^commander-/, '')}" stopped successfully.`,
         timestamp: new Date(),
-      }]);
+      });
       currentSession.set(null);
-      messages.set([]);
     } catch (err) {
-      messages.update(m => [...m, {
+      addMessageToSession(sessionName, {
         direction: 'system',
         content: `Failed to stop session: ${err}`,
         timestamp: new Date(),
-      }]);
+      });
     } finally {
       isActionLoading = false;
     }
@@ -95,23 +79,23 @@
 
   async function handleDisconnect() {
     if (!$currentSession || isActionLoading) return;
+    const sessionName = $currentSession.name;
     isActionLoading = true;
 
     try {
       await invoke('disconnect_session');
-      messages.update(m => [...m, {
+      addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Disconnected from session "${$currentSession.name}".`,
+        content: `Disconnected from session "${sessionName.replace(/^commander-/, '')}".`,
         timestamp: new Date(),
-      }]);
+      });
       currentSession.set(null);
-      messages.set([]);
     } catch (err) {
-      messages.update(m => [...m, {
+      addMessageToSession(sessionName, {
         direction: 'system',
         content: `Failed to disconnect: ${err}`,
         timestamp: new Date(),
-      }]);
+      });
     } finally {
       isActionLoading = false;
     }
@@ -120,11 +104,13 @@
   onMount(() => {
     const unlisten = listen('session-output', (event: any) => {
       const { output } = event.payload;
-      messages.update(m => [...m, {
-        direction: 'received',
-        content: output,
-        timestamp: new Date(),
-      }]);
+      if ($currentSession) {
+        addMessageToSession($currentSession.name, {
+          direction: 'received',
+          content: output,
+          timestamp: new Date(),
+        });
+      }
 
       if (autoScroll) {
         setTimeout(scrollToBottom, 10);

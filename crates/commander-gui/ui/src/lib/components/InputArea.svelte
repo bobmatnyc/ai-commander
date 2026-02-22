@@ -1,41 +1,149 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { messages, currentSession } from '../stores/app';
+  import {
+    addMessageToSession,
+    currentSession,
+    sessions,
+    clearSessionMessages
+  } from '../stores/app';
   import { Send } from 'lucide-svelte';
 
   let input = '';
   let isDisabled = false;
 
   $: isDisabled = !$currentSession;
+  $: isSlashCommand = input.trim().startsWith('/') && !input.trim().startsWith('/send ');
+
+  async function handleSlashCommand(command: string) {
+    const sessionName = $currentSession?.name;
+    if (!sessionName) return;
+
+    const parts = command.split(' ');
+    const cmd = parts[0].toLowerCase();
+    const args = parts.slice(1).join(' ');
+
+    try {
+      switch (cmd) {
+        case '/status':
+          await invoke('send_message', { content: '/status' });
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: 'Sent status command',
+            timestamp: new Date(),
+          });
+          break;
+
+        case '/list':
+          const sessionList = $sessions
+            .map(s => `  ${s.name.replace(/^commander-/, '')}${s.is_connected ? ' (connected)' : ''}`)
+            .join('\n');
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: `Available sessions:\n${sessionList}`,
+            timestamp: new Date(),
+          });
+          break;
+
+        case '/disconnect':
+          await invoke('disconnect_session');
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: 'Disconnected from session',
+            timestamp: new Date(),
+          });
+          currentSession.set(null);
+          break;
+
+        case '/stop':
+          if (confirm(`Stop session "${sessionName.replace(/^commander-/, '')}"? This cannot be undone.`)) {
+            await invoke('stop_session', { name: sessionName });
+            addMessageToSession(sessionName, {
+              direction: 'system',
+              content: 'Session stopped',
+              timestamp: new Date(),
+            });
+            currentSession.set(null);
+          }
+          break;
+
+        case '/clear':
+          clearSessionMessages(sessionName);
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: 'Messages cleared',
+            timestamp: new Date(),
+          });
+          break;
+
+        case '/help':
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: `Available commands:
+  /status - Send status command
+  /list - List all sessions
+  /disconnect - Disconnect from session
+  /stop - Stop this session
+  /clear - Clear message history
+  /help - Show this help
+  /send <text> - Send literal text (bypass interpreter)`,
+            timestamp: new Date(),
+          });
+          break;
+
+        default:
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: `Unknown command: ${cmd}. Type /help for available commands.`,
+            timestamp: new Date(),
+          });
+      }
+    } catch (err) {
+      addMessageToSession(sessionName, {
+        direction: 'system',
+        content: `Command failed: ${err}`,
+        timestamp: new Date(),
+      });
+    }
+  }
 
   async function sendMessage() {
     if (!input.trim() || isDisabled) return;
 
     if (!$currentSession) {
-      messages.update(m => [...m, {
-        direction: 'system',
-        content: 'Error: Not connected to a session. Please select a session first.',
-        timestamp: new Date(),
-      }]);
       return;
     }
 
     const content = input.trim();
+    const sessionName = $currentSession.name;
     input = '';
 
     try {
-      await invoke('send_message', { content });
-      messages.update(m => [...m, {
-        direction: 'sent',
-        content,
-        timestamp: new Date(),
-      }]);
+      if (content.startsWith('/')) {
+        if (content.startsWith('/send ')) {
+          const actualContent = content.substring(6);
+          await invoke('send_message', { content: actualContent });
+          addMessageToSession(sessionName, {
+            direction: 'sent',
+            content: actualContent,
+            timestamp: new Date(),
+          });
+        } else {
+          await handleSlashCommand(content);
+        }
+      } else {
+        await invoke('send_message', { content });
+        addMessageToSession(sessionName, {
+          direction: 'sent',
+          content,
+          timestamp: new Date(),
+        });
+      }
     } catch (err) {
-      messages.update(m => [...m, {
+      addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Failed to send message: ${err}`,
+        content: `Error: ${err}`,
         timestamp: new Date(),
-      }]);
+      });
       input = content;
     }
   }
@@ -53,9 +161,10 @@
     type="text"
     bind:value={input}
     on:keydown={handleKeydown}
-    placeholder={isDisabled ? "Select a session first..." : "Type message..."}
+    placeholder={isDisabled ? "Select a session first..." : "Type message or /help for commands..."}
     disabled={isDisabled}
     class="input-field"
+    class:slash-command={isSlashCommand}
   />
   <button
     on:click={sendMessage}
@@ -93,6 +202,11 @@
     background-color: #f9fafb;
     color: #9ca3af;
     cursor: not-allowed;
+  }
+
+  .input-field.slash-command {
+    border-color: #8b5cf6;
+    background-color: #faf5ff;
   }
 
   .send-button {

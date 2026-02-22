@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 
 export interface Session {
   name: string;
@@ -17,8 +17,38 @@ export interface BotStatus {
   pid: number | null;
 }
 
-export const sessions = writable<Session[]>([]);
+// Session-specific message history
+export const sessionMessages = writable<Map<string, Message[]>>(new Map());
+
+// Current active session
 export const currentSession = writable<Session | null>(null);
-export const messages = writable<Message[]>([]);
+
+// Derived store: messages for current session only
+export const messages = derived(
+  [sessionMessages, currentSession],
+  ([$sessionMessages, $currentSession]) => {
+    if (!$currentSession) return [];
+    return $sessionMessages.get($currentSession.name) || [];
+  }
+);
+
+// Helper to add message to specific session
+export function addMessageToSession(sessionName: string, message: Message) {
+  sessionMessages.update(map => {
+    const msgs = map.get(sessionName) || [];
+    map.set(sessionName, [...msgs, message]);
+    return new Map(map);
+  });
+}
+
+// Helper to clear messages for specific session
+export function clearSessionMessages(sessionName: string) {
+  sessionMessages.update(map => {
+    map.delete(sessionName);
+    return new Map(map);
+  });
+}
+
+export const sessions = writable<Session[]>([]);
 export const botRunning = writable(false);
 export const botPid = writable<number | null>(null);

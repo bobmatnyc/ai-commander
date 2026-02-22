@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { sessions, currentSession } from '../stores/app';
+  import { sessions, currentSession, sessionMessages, addMessageToSession } from '../stores/app';
   import { Activity, Plus } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
@@ -28,6 +28,16 @@
       const session = $sessions.find(s => s.name === name);
       if (session) {
         currentSession.set({ ...session, is_connected: true });
+
+        // Add initial connection message only if this session has no messages yet
+        const existingMessages = $sessionMessages.get(name);
+        if (!existingMessages || existingMessages.length === 0) {
+          addMessageToSession(name, {
+            direction: 'system',
+            content: `Connected to session: ${getDisplayName(name)}`,
+            timestamp: new Date(),
+          });
+        }
       }
     } catch (err) {
       alert(`Failed to connect: ${err}`);
