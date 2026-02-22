@@ -527,7 +527,20 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
                     Err(_) => "commander".to_string(),
                 };
                 let link = format!("https://t.me/{}?start=connect_{}", bot_username, display_name);
-                message.push_str(&format!("\n\n👉 <a href=\"{}\">Open {}</a>", link, display_name));
+
+                // Choose link text based on notification context
+                let link_text = if message.contains("resumed work") || message.contains("resumed") {
+                    format!("Resume {}", display_name)
+                } else if message.contains("paused") || message.contains("waiting") {
+                    format!("Continue {}", display_name)
+                } else if message.contains("ready") || message.contains("started") {
+                    format!("Open {}", display_name)
+                } else {
+                    // Default for unknown contexts
+                    format!("Connect to {}", display_name)
+                };
+
+                message.push_str(&format!("\n\n👉 <a href=\"{}\">{}</a>", link, link_text));
             }
 
             for &chat_id in &authorized_chats {
