@@ -42,6 +42,24 @@ Control AI coding sessions from TUI, REPL, or Telegram with support for multiple
 
 ## Installation
 
+### Quick Start - Local Deployment (macOS)
+
+For stable production-like local setup with auto-starting services:
+
+```bash
+cd /Users/masa/Projects/ai-commander
+
+# Build and install (5 minutes)
+cargo build --release -p ai-commander
+cd crates/commander-gui/ui && npm run build && cd .. && cargo tauri build && cd ../..
+./scripts/install-user.sh
+
+# Setup Telegram bot service (optional)
+./scripts/setup-telegram-service.sh
+```
+
+**See [DEPLOYMENT_QUICKSTART.md](DEPLOYMENT_QUICKSTART.md) for complete setup guide.**
+
 ### Homebrew (macOS)
 
 ```bash
