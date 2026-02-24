@@ -38,10 +38,15 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
 
 #[tauri::command]
 pub async fn connect_session(name: String, state: State<'_, GuiState>) -> Result<(), String> {
-    let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
+    let tmux = state.tmux.as_ref().ok_or(
+        "Cannot connect: tmux is not available. Make sure tmux is installed and accessible."
+    )?;
 
     if !tmux.session_exists(&name) {
-        return Err(format!("Session '{}' not found", name));
+        return Err(format!(
+            "Session '{}' does not exist. Available sessions can be seen in the list.",
+            name
+        ));
     }
 
     *state.current_session.write().unwrap() = Some(name.clone());

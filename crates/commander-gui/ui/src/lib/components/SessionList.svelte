@@ -8,6 +8,8 @@
 
   let interval: number;
   let showCreateModal = false;
+  let lastError: string | null = null;
+  let errorTimeout: number | null = null;
 
   function getDisplayName(sessionName: string): string {
     return sessionName.replace(/^commander-/, '');
@@ -23,6 +25,10 @@
   }
 
   async function connect(name: string) {
+    // Clear any previous error
+    lastError = null;
+    if (errorTimeout) clearTimeout(errorTimeout);
+
     try {
       await invoke('connect_session', { name });
       const session = $sessions.find(s => s.name === name);
@@ -40,7 +46,26 @@
         }
       }
     } catch (err) {
-      alert(`Failed to connect: ${err}`);
+      const errorMessage = err instanceof Error ? err.message : String(err);
+
+      // Show error banner
+      lastError = `Cannot connect to ${getDisplayName(name)}: ${errorMessage}`;
+
+      // Auto-clear after 5 seconds
+      errorTimeout = setTimeout(() => {
+        lastError = null;
+      }, 5000);
+
+      // Also add to messages
+      if ($currentSession) {
+        addMessageToSession($currentSession.name, {
+          direction: 'system',
+          content: lastError,
+          timestamp: new Date(),
+        });
+      }
+
+      console.error('Failed to connect:', err);
     }
   }
 
@@ -67,6 +92,11 @@
       <span>New</span>
     </button>
   </div>
+  {#if lastError}
+    <div class="error-banner">
+      ⚠️ {lastError}
+    </div>
+  {/if}
   <div class="session-items">
     {#each $sessions as session}
       <button
@@ -99,6 +129,16 @@
     flex-direction: column;
     height: 100%;
     background-color: #fafafa;
+  }
+
+  .error-banner {
+    background: #fee2e2;
+    color: #991b1b;
+    padding: 0.75rem;
+    margin: 0.5rem;
+    border-radius: 4px;
+    border-left: 3px solid #dc2626;
+    font-size: 0.875rem;
   }
 
   .session-list-header {
