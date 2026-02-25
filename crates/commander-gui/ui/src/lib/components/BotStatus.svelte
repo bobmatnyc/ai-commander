@@ -139,8 +139,8 @@
       {/if}
     </div>
 
-    {#if $botRunning && telegramConnection}
-      <div class="connection-status">
+    <div class="connection-status" class:visible={$botRunning && telegramConnection}>
+      {#if $botRunning && telegramConnection}
         {#if telegramConnection.connected}
           <Check size={14} class="text-green-500" />
           <span class="connected">Connected</span>
@@ -149,8 +149,8 @@
           <X size={14} class="text-gray-400" />
           <span class="not-connected">Not connected</span>
         {/if}
-      </div>
-    {/if}
+      {/if}
+    </div>
   </div>
 
   <div class="controls">
@@ -261,6 +261,15 @@
     background: #f9fafb;
     border-radius: 0.375rem;
     border: 1px solid #e5e7eb;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.3s ease, visibility 0.3s ease;
+    min-width: 120px; /* Reserve space to prevent layout shift */
+  }
+
+  .connection-status.visible {
+    opacity: 1;
+    visibility: visible;
   }
 
   .connected {
