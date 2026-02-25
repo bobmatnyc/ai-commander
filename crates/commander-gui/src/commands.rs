@@ -152,9 +152,50 @@ pub async fn get_bot_status(_state: State<'_, GuiState>) -> Result<BotInfo, Stri
 
 #[tauri::command]
 pub async fn generate_pairing_code() -> Result<String, String> {
-    // Placeholder implementation - will depend on bot pairing mechanism
-    // TODO: Implement actual pairing code generation
-    Ok("12345678".to_string())
+    use commander_telegram::pairing;
+
+    // Create a pairing with empty project/session for GUI-level authorization
+    // The empty strings tell the bot to just authorize without auto-connecting
+    let code = pairing::create_pairing("", "")
+        .map_err(|e| format!("Failed to create pairing: {}", e))?;
+
+    Ok(code)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TelegramConnection {
+    pub connected: bool,
+    pub chat_ids: Vec<i64>,
+    pub count: usize,
+}
+
+#[tauri::command]
+pub async fn check_telegram_connection() -> Result<TelegramConnection, String> {
+    use commander_core::config;
+    use std::fs;
+
+    // Read authorized chats file
+    let chats_file = config::authorized_chats_file();
+
+    if !chats_file.exists() {
+        return Ok(TelegramConnection {
+            connected: false,
+            chat_ids: vec![],
+            count: 0,
+        });
+    }
+
+    let content = fs::read_to_string(&chats_file)
+        .map_err(|e| format!("Failed to read authorized chats: {}", e))?;
+
+    let chat_ids: Vec<i64> = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse authorized chats: {}", e))?;
+
+    Ok(TelegramConnection {
+        connected: !chat_ids.is_empty(),
+        chat_ids: chat_ids.clone(),
+        count: chat_ids.len(),
+    })
 }
 
 #[derive(Serialize, Deserialize)]
