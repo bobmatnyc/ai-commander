@@ -2,9 +2,21 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { botRunning, botPid } from '../stores/app';
-  import { Power, Settings } from 'lucide-svelte';
+  import { Power, Link, Check, X } from 'lucide-svelte';
+
+  interface TelegramConnection {
+    connected: boolean;
+    chat_ids: number[];
+    count: number;
+  }
 
   let interval: number;
+  let connectionInterval: number;
+  let showPairingModal = false;
+  let pairingCode = '';
+  let generatingCode = false;
+  let telegramConnection: TelegramConnection | null = null;
+  let checkingConnection = false;
 
   async function checkStatus() {
     try {
@@ -16,11 +28,31 @@
     }
   }
 
+  async function checkTelegramConnection() {
+    if (!$botRunning) {
+      telegramConnection = null;
+      return;
+    }
+
+    checkingConnection = true;
+    try {
+      telegramConnection = await invoke('check_telegram_connection');
+    } catch (err) {
+      console.error('Failed to check telegram connection:', err);
+      telegramConnection = null;
+    } finally {
+      checkingConnection = false;
+    }
+  }
+
   async function startBot() {
     try {
       const info: any = await invoke('start_bot');
       botRunning.set(info.running);
       botPid.set(info.pid);
+
+      // Check connection after starting
+      setTimeout(checkTelegramConnection, 2000);
     } catch (err) {
       alert(`Failed to start bot: ${err}`);
     }
@@ -31,32 +63,77 @@
       await invoke('stop_bot');
       botRunning.set(false);
       botPid.set(null);
+      telegramConnection = null;
     } catch (err) {
       alert(`Failed to stop bot: ${err}`);
     }
   }
 
+  async function generatePairingCode() {
+    if (!$botRunning) {
+      alert('Please start the bot first');
+      return;
+    }
+
+    generatingCode = true;
+    try {
+      pairingCode = await invoke('generate_pairing_code');
+      showPairingModal = true;
+    } catch (err) {
+      alert(`Failed to generate pairing code: ${err}`);
+    } finally {
+      generatingCode = false;
+    }
+  }
+
+  function closePairingModal() {
+    showPairingModal = false;
+    pairingCode = '';
+
+    // Check if user connected after closing modal
+    setTimeout(checkTelegramConnection, 1000);
+  }
+
   onMount(() => {
     checkStatus();
+    checkTelegramConnection();
+
     interval = window.setInterval(checkStatus, 5000);
+    connectionInterval = window.setInterval(checkTelegramConnection, 10000);
 
     return () => {
       clearInterval(interval);
+      clearInterval(connectionInterval);
     };
   });
 </script>
 
 <div class="bot-status">
-  <div class="status-indicator">
-    <Power
-      size={16}
-      class={$botRunning ? 'text-green-500' : 'text-gray-400'}
-    />
-    <span class="status-text">
-      Bot {$botRunning ? 'Running' : 'Stopped'}
-    </span>
-    {#if $botPid}
-      <span class="pid">(PID: {$botPid})</span>
+  <div class="status-row">
+    <div class="status-indicator">
+      <Power
+        size={16}
+        class={$botRunning ? 'text-green-500' : 'text-gray-400'}
+      />
+      <span class="status-text">
+        Bot {$botRunning ? 'Running' : 'Stopped'}
+      </span>
+      {#if $botPid}
+        <span class="pid">(PID: {$botPid})</span>
+      {/if}
+    </div>
+
+    {#if $botRunning && telegramConnection}
+      <div class="connection-status">
+        {#if telegramConnection.connected}
+          <Check size={14} class="text-green-500" />
+          <span class="connected">Connected</span>
+          <span class="count">({telegramConnection.count} chat{telegramConnection.count !== 1 ? 's' : ''})</span>
+        {:else}
+          <X size={14} class="text-gray-400" />
+          <span class="not-connected">Not connected</span>
+        {/if}
+      </div>
     {/if}
   </div>
 
@@ -75,14 +152,60 @@
     >
       Stop
     </button>
+    <button
+      on:click={generatePairingCode}
+      disabled={!$botRunning || generatingCode}
+      class="control-button pair"
+    >
+      <Link size={14} />
+      {generatingCode ? 'Generating...' : 'Pair'}
+    </button>
   </div>
 </div>
+
+{#if showPairingModal}
+  <div class="modal-overlay" on:click={closePairingModal} role="presentation">
+    <div class="modal-content" on:click|stopPropagation role="dialog" aria-modal="true" aria-labelledby="pairing-modal-title">
+      <div class="modal-header">
+        <h2 id="pairing-modal-title">Telegram Pairing Code</h2>
+        <button class="close-btn" on:click={closePairingModal}>&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <p class="instructions">
+          Send this code to the bot in Telegram to connect:
+        </p>
+
+        <div class="pairing-code">
+          {pairingCode}
+        </div>
+
+        <p class="help-text">
+          Open Telegram and send: <code>/pair {pairingCode}</code>
+        </p>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-primary" on:click={closePairingModal}>
+          Done
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .bot-status {
     display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .status-row {
+    display: flex;
+    justify-content: space-between;
     align-items: center;
-    gap: 1.5rem;
+    gap: 1rem;
   }
 
   .status-indicator {
@@ -102,6 +225,31 @@
     color: #6b7280;
   }
 
+  .connection-status {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-size: 0.75rem;
+    padding: 0.25rem 0.625rem;
+    background: #f9fafb;
+    border-radius: 0.375rem;
+    border: 1px solid #e5e7eb;
+  }
+
+  .connected {
+    color: #059669;
+    font-weight: 500;
+  }
+
+  .not-connected {
+    color: #6b7280;
+  }
+
+  .count {
+    color: #6b7280;
+    font-size: 0.7rem;
+  }
+
   .controls {
     display: flex;
     gap: 0.5rem;
@@ -115,6 +263,9 @@
     font-weight: 500;
     cursor: pointer;
     transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
   }
 
   .control-button.start {
@@ -135,9 +286,136 @@
     background-color: #dc2626;
   }
 
+  .control-button.pair {
+    background-color: #3b82f6;
+    color: white;
+  }
+
+  .control-button.pair:hover:not(:disabled) {
+    background-color: #2563eb;
+  }
+
   .control-button:disabled {
     background-color: #d1d5db;
     color: #9ca3af;
     cursor: not-allowed;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal-content {
+    background: white;
+    border-radius: 0.5rem;
+    width: 90%;
+    max-width: 500px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1),
+      0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .modal-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1f2937;
+  }
+
+  .close-btn {
+    background: none;
+    border: none;
+    font-size: 1.75rem;
+    cursor: pointer;
+    padding: 0;
+    width: 2rem;
+    height: 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6b7280;
+    line-height: 1;
+  }
+
+  .close-btn:hover {
+    color: #374151;
+  }
+
+  .modal-body {
+    padding: 1.5rem;
+  }
+
+  .instructions {
+    margin: 0 0 1rem 0;
+    color: #374151;
+    font-size: 0.875rem;
+  }
+
+  .pairing-code {
+    font-size: 2rem;
+    font-weight: 700;
+    text-align: center;
+    padding: 1.5rem;
+    background: #f3f4f6;
+    border-radius: 0.5rem;
+    letter-spacing: 0.5rem;
+    margin-bottom: 1rem;
+    font-family: 'Monaco', 'Courier New', monospace;
+    color: #1f2937;
+    user-select: all;
+  }
+
+  .help-text {
+    font-size: 0.875rem;
+    color: #6b7280;
+    text-align: center;
+    margin: 0;
+  }
+
+  .help-text code {
+    background: #f3f4f6;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-family: 'Monaco', 'Courier New', monospace;
+    color: #1f2937;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 1.5rem;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  .btn-primary {
+    background: #3b82f6;
+    color: white;
+    border: none;
+    padding: 0.5rem 1.5rem;
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn-primary:hover {
+    background: #2563eb;
   }
 </style>
