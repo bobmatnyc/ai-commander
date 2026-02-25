@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { botRunning, botPid } from '../stores/app';
-  import { Power, Link, Check, X } from 'lucide-svelte';
+  import { Power, Link, Check, X, Copy, CheckCheck } from 'lucide-svelte';
 
   interface TelegramConnection {
     connected: boolean;
@@ -17,6 +17,7 @@
   let generatingCode = false;
   let telegramConnection: TelegramConnection | null = null;
   let checkingConnection = false;
+  let copied = false;
 
   async function checkStatus() {
     try {
@@ -89,9 +90,24 @@
   function closePairingModal() {
     showPairingModal = false;
     pairingCode = '';
+    copied = false;
 
     // Check if user connected after closing modal
     setTimeout(checkTelegramConnection, 1000);
+  }
+
+  async function copyPairingCommand() {
+    const command = `/pair ${pairingCode}`;
+    try {
+      await navigator.clipboard.writeText(command);
+      copied = true;
+      setTimeout(() => {
+        copied = false;
+      }, 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+      alert('Failed to copy to clipboard');
+    }
   }
 
   onMount(() => {
@@ -180,9 +196,20 @@
           {pairingCode}
         </div>
 
-        <p class="help-text">
-          Open Telegram and send: <code>/pair {pairingCode}</code>
-        </p>
+        <div class="help-text">
+          <span>Open Telegram and send: <code>/pair {pairingCode}</code></span>
+          <button
+            class="copy-btn"
+            on:click={copyPairingCommand}
+            title={copied ? 'Copied!' : 'Copy to clipboard'}
+          >
+            {#if copied}
+              <CheckCheck size={16} class="text-green-500" />
+            {:else}
+              <Copy size={16} />
+            {/if}
+          </button>
+        </div>
       </div>
 
       <div class="modal-footer">
@@ -386,6 +413,10 @@
     color: #6b7280;
     text-align: center;
     margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
   }
 
   .help-text code {
@@ -394,6 +425,28 @@
     border-radius: 0.25rem;
     font-family: 'Monaco', 'Courier New', monospace;
     color: #1f2937;
+  }
+
+  .copy-btn {
+    background: transparent;
+    border: 1px solid #d1d5db;
+    padding: 0.375rem;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    color: #6b7280;
+  }
+
+  .copy-btn:hover {
+    background: #f3f4f6;
+    border-color: #9ca3af;
+  }
+
+  .copy-btn:active {
+    transform: scale(0.95);
   }
 
   .modal-footer {
