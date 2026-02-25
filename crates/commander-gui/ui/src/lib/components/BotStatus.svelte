@@ -18,6 +18,8 @@
   let telegramConnection: TelegramConnection | null = null;
   let checkingConnection = false;
   let copied = false;
+  let starting = false;
+  let stopping = false;
 
   async function checkStatus() {
     try {
@@ -47,6 +49,7 @@
   }
 
   async function startBot() {
+    starting = true;
     try {
       const info: any = await invoke('start_bot');
       botRunning.set(info.running);
@@ -56,10 +59,13 @@
       setTimeout(checkTelegramConnection, 2000);
     } catch (err) {
       alert(`Failed to start bot: ${err}`);
+    } finally {
+      starting = false;
     }
   }
 
   async function stopBot() {
+    stopping = true;
     try {
       await invoke('stop_bot');
       botRunning.set(false);
@@ -67,6 +73,8 @@
       telegramConnection = null;
     } catch (err) {
       alert(`Failed to stop bot: ${err}`);
+    } finally {
+      stopping = false;
     }
   }
 
@@ -156,17 +164,19 @@
   <div class="controls">
     <button
       on:click={startBot}
-      disabled={$botRunning}
+      disabled={$botRunning || starting}
       class="control-button start"
+      class:loading={starting}
     >
-      Start
+      {starting ? 'Starting...' : 'Start'}
     </button>
     <button
       on:click={stopBot}
-      disabled={!$botRunning}
+      disabled={!$botRunning || stopping}
       class="control-button stop"
+      class:loading={stopping}
     >
-      Stop
+      {stopping ? 'Stopping...' : 'Stop'}
     </button>
     <button
       on:click={generatePairingCode}
@@ -335,6 +345,21 @@
     background-color: #d1d5db;
     color: #9ca3af;
     cursor: not-allowed;
+  }
+
+  .control-button.loading {
+    opacity: 0.7;
+    cursor: wait;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% {
+      opacity: 0.7;
+    }
+    50% {
+      opacity: 1;
+    }
   }
 
   .modal-overlay {
