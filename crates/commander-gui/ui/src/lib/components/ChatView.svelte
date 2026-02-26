@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { messages, currentSession, addMessageToSession } from '../stores/app';
+  import { messages, currentSession, addMessageToSession, clearSessionMessages } from '../stores/app';
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
@@ -60,11 +60,7 @@
 
     try {
       await invoke('stop_session', { name: sessionName });
-      addMessageToSession(sessionName, {
-        direction: 'system',
-        content: `Session "${sessionName.replace(/^commander-/, '')}" stopped successfully.`,
-        timestamp: new Date(),
-      });
+      clearSessionMessages(sessionName);
       currentSession.set(null);
     } catch (err) {
       addMessageToSession(sessionName, {

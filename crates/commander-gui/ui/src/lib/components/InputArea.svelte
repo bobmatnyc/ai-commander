@@ -57,11 +57,7 @@
         case '/stop':
           if (confirm(`Stop session "${sessionName.replace(/^commander-/, '')}"? This cannot be undone.`)) {
             await invoke('stop_session', { name: sessionName });
-            addMessageToSession(sessionName, {
-              direction: 'system',
-              content: 'Session stopped',
-              timestamp: new Date(),
-            });
+            clearSessionMessages(sessionName);
             currentSession.set(null);
           }
           break;

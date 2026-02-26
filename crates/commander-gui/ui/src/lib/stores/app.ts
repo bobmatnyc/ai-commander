@@ -17,6 +17,9 @@ export interface BotStatus {
   pid: number | null;
 }
 
+// Maximum messages retained per session to prevent memory leaks
+const MAX_MESSAGES_PER_SESSION = 500;
+
 // Session-specific message history
 export const sessionMessages = writable<Map<string, Message[]>>(new Map());
 
@@ -36,7 +39,10 @@ export const messages = derived(
 export function addMessageToSession(sessionName: string, message: Message) {
   sessionMessages.update(map => {
     const msgs = map.get(sessionName) || [];
-    map.set(sessionName, [...msgs, message]);
+    const updated = [...msgs, message];
+    map.set(sessionName, updated.length > MAX_MESSAGES_PER_SESSION
+      ? updated.slice(updated.length - MAX_MESSAGES_PER_SESSION)
+      : updated);
     return new Map(map);
   });
 }

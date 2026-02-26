@@ -14,42 +14,55 @@ pub struct SessionOutput {
 }
 
 pub async fn start_session_polling(app: AppHandle, state: GuiState) {
-    tokio::spawn(async move {
-        let last_hashes: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let last_hashes: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let mut cleanup_counter: u32 = 0;
 
-        loop {
-            if let Some(session_name) = state.current_session.read().unwrap().clone() {
-                if let Some(tmux) = &state.tmux {
-                    if let Ok(output) = tmux.capture_output(&session_name, None, Some(50)) {
-                        if !output.is_empty() {
-                            // Calculate hash of output
-                            let mut hasher = DefaultHasher::new();
-                            output.hash(&mut hasher);
-                            let current_hash = hasher.finish();
+    loop {
+        if let Some(session_name) = state.current_session.read().unwrap().clone() {
+            if let Some(tmux) = &state.tmux {
+                if let Ok(output) = tmux.capture_output(&session_name, None, Some(50)) {
+                    if !output.is_empty() {
+                        // Calculate hash of output
+                        let mut hasher = DefaultHasher::new();
+                        output.hash(&mut hasher);
+                        let current_hash = hasher.finish();
 
-                            // Check if output changed
-                            let mut hashes = last_hashes.lock().unwrap();
-                            let last_hash = hashes.get(&session_name).copied();
+                        // Check if output changed
+                        let mut hashes = last_hashes.lock().unwrap();
+                        let last_hash = hashes.get(&session_name).copied();
 
-                            if last_hash != Some(current_hash) {
-                                // Output changed - emit event
-                                hashes.insert(session_name.clone(), current_hash);
-                                drop(hashes); // Release lock before async emit
+                        if last_hash != Some(current_hash) {
+                            // Output changed - emit event
+                            hashes.insert(session_name.clone(), current_hash);
+                            drop(hashes); // Release lock before async emit
 
-                                let _ = app.emit(
-                                    "session-output",
-                                    SessionOutput {
-                                        session: session_name.clone(),
-                                        output,
-                                    },
-                                );
-                            }
+                            let _ = app.emit(
+                                "session-output",
+                                SessionOutput {
+                                    session: session_name.clone(),
+                                    output,
+                                },
+                            );
                         }
                     }
                 }
             }
-
-            sleep(Duration::from_millis(500)).await;
         }
-    });
+
+        // Periodically clean up stale hash entries for destroyed sessions (~every 30s)
+        cleanup_counter += 1;
+        if cleanup_counter >= 60 {
+            cleanup_counter = 0;
+            if let Some(tmux) = &state.tmux {
+                if let Ok(active_sessions) = tmux.list_sessions() {
+                    let active_names: std::collections::HashSet<String> =
+                        active_sessions.into_iter().map(|s| s.name).collect();
+                    let mut hashes = last_hashes.lock().unwrap();
+                    hashes.retain(|name, _| active_names.contains(name));
+                }
+            }
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    }
 }

@@ -15,10 +15,20 @@
     return sessionName.replace(/^commander-/, '');
   }
 
+  function sessionsEqual(a: Session[], b: Session[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i].name !== b[i].name || a[i].is_connected !== b[i].is_connected) return false;
+    }
+    return true;
+  }
+
   async function loadSessions() {
     try {
-      const result = await invoke('list_sessions');
-      sessions.set(result as Session[]);
+      const result = await invoke('list_sessions') as Session[];
+      if (!sessionsEqual(result, $sessions)) {
+        sessions.set(result);
+      }
     } catch (err) {
       console.error('Failed to load sessions:', err);
     }
