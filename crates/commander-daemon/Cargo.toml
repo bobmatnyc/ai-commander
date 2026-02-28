@@ -28,8 +28,12 @@ commander-core = { path = "../commander-core" }
 commander-orchestrator = { path = "../commander-orchestrator" }
 commander-memory = { path = "../commander-memory" }
 
+# Optional dependencies for enhanced monitoring
+psutil = { version = "3.2", optional = true }
+
 [features]
 default = []
+psutil = ["dep:psutil"]
 
 [[bin]]
 name = "commander-daemon"

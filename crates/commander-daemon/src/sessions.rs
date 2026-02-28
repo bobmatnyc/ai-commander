@@ -124,6 +124,7 @@ pub struct SessionManager {
     /// Memory monitor
     memory_monitor: MemoryMonitor,
     /// Session persistence (future: could save/restore sessions)
+    #[allow(dead_code)]
     persistence_path: Option<PathBuf>,
 }
 
