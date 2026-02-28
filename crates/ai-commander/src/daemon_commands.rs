@@ -1,6 +1,6 @@
 //! Daemon management commands for the CLI.
 
-use commander_daemon::{DaemonService, Result as DaemonResult};
+use commander_daemon::DaemonService;
 
 use crate::cli::DaemonCommands;
 use crate::commands::Result;
