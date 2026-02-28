@@ -16,9 +16,9 @@ use tracing::{debug, info, warn};
 
 use crate::error::{DaemonError, Result};
 use crate::ipc::{IpcConfig, IpcServer, protocol::{HealthStatusResponse, MemoryStatusResponse, SystemInfo, SessionInfo}};
-use crate::monitoring::{MemoryUsage, SessionMemoryInfo};
+use crate::monitoring::MemoryUsage;
 use crate::pairing::{PairingManager, PairingEntry};
-use crate::sessions::{SessionManager, SessionStatus};
+use crate::sessions::SessionManager;
 
 /// Daemon service configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

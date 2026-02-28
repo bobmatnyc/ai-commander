@@ -74,7 +74,7 @@ pub struct SessionMemoryInfo {
 
 mod instant_as_iso_string {
     use std::time::Instant;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
 
     pub fn serialize<S>(instant: &Instant, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -260,7 +260,7 @@ impl Drop for MemoryMonitor {
 }
 
 /// Get memory usage for a process.
-async fn get_process_memory(pid: u32) -> Result<MemoryUsage> {
+async fn get_process_memory(_pid: u32) -> Result<MemoryUsage> {
     tokio::task::spawn_blocking(move || {
         #[cfg(feature = "psutil")]
         {

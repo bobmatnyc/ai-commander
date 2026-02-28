@@ -230,7 +230,7 @@ impl SessionManager {
 
     /// Terminate a session.
     pub async fn terminate_session(&mut self, session_id: &str) -> Result<()> {
-        if let Some(mut session) = self.sessions.get_mut(session_id) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
             info!(session_id = %session_id, "Terminating session");
 
             session.status = SessionStatus::Terminating;

@@ -268,7 +268,7 @@ async fn dispatch_request(
             }
 
             let params: Params = request.parse_params()?;
-            let mut service = service.write().await;
+            let service = service.write().await;
 
             match service.terminate_session(&params.session_id).await {
                 Ok(_) => Ok(serde_json::json!({ "success": true })),
@@ -288,7 +288,7 @@ async fn dispatch_request(
 
         RpcMethod::PairingGenerate => {
             let params: crate::ipc::protocol::PairingGenerateParams = request.parse_params()?;
-            let mut service = service.write().await;
+            let service = service.write().await;
 
             match service.generate_pairing_code(params.session_id, params.project_path).await {
                 Ok((code, expires_at)) => {
@@ -301,7 +301,7 @@ async fn dispatch_request(
 
         RpcMethod::PairingValidate => {
             let params: crate::ipc::protocol::PairingValidateParams = request.parse_params()?;
-            let mut service = service.write().await;
+            let service = service.write().await;
 
             match service.validate_pairing_code(&params.code, params.client_info).await {
                 Ok(Some(entry)) => Ok(serde_json::to_value(entry).unwrap()),
@@ -331,7 +331,7 @@ async fn dispatch_request(
         }
 
         RpcMethod::DaemonStop => {
-            let mut service = service.write().await;
+            let service = service.write().await;
             match service.shutdown().await {
                 Ok(_) => Ok(serde_json::json!({ "success": true, "message": "Daemon stopping" })),
                 Err(e) => Err(JsonRpcError::internal_error(e.to_string())),
@@ -339,7 +339,7 @@ async fn dispatch_request(
         }
 
         RpcMethod::DaemonRestart => {
-            let mut service = service.write().await;
+            let service = service.write().await;
             match service.restart().await {
                 Ok(_) => Ok(serde_json::json!({ "success": true, "message": "Daemon restarting" })),
                 Err(e) => Err(JsonRpcError::internal_error(e.to_string())),
