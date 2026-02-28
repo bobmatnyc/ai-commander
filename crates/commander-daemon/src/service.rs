@@ -260,6 +260,18 @@ impl DaemonService {
     pub async fn run(mut self) -> Result<()> {
         info!("Starting daemon service in foreground mode");
 
+        // Create PID file for tracking even in foreground mode
+        let pid_file = daemon_pid_file();
+        if let Some(parent) = pid_file.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| DaemonError::StartFailed(format!("Failed to create state directory: {}", e)))?;
+        }
+
+        std::fs::write(&pid_file, std::process::id().to_string())
+            .map_err(|e| DaemonError::StartFailed(format!("Failed to write PID file: {}", e)))?;
+
+        info!("Created PID file with PID: {}", std::process::id());
+
         // Start IPC server
         self.start_ipc_server().await?;
 
@@ -311,10 +323,90 @@ impl DaemonService {
     pub async fn daemonize(self) -> Result<()> {
         info!("Starting daemon service in background mode");
 
-        // For now, just run in foreground
-        // In a real implementation, this would fork and detach
-        // or use a proper daemonization library
-        self.run().await
+        // Check if already running
+        if let Some(pid) = Self::get_running_pid().await {
+            return Err(DaemonError::AlreadyRunning(pid));
+        }
+
+        // Find the commander-daemon binary
+        let binary = find_daemon_binary()
+            .ok_or_else(|| DaemonError::StartFailed("commander-daemon binary not found".to_string()))?;
+
+        // Spawn the daemon process in foreground mode (which now creates PID file)
+        let current_dir = std::env::current_dir()
+            .map_err(|e| DaemonError::StartFailed(format!("Failed to get current directory: {}", e)))?;
+
+        let mut child = std::process::Command::new(&binary)
+            .arg("start")
+            .arg("--foreground")
+            .current_dir(&current_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped()) // Temporarily capture stderr
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| DaemonError::StartFailed(format!("Failed to spawn daemon: {}", e)))?;
+
+        // Give it a moment to start or fail
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Check if it exited early
+        if let Ok(Some(status)) = child.try_wait() {
+            let stderr = child.stderr.take();
+            if let Some(mut stderr) = stderr {
+                use std::io::Read;
+                let mut error_output = Vec::new();
+                let _ = stderr.read_to_end(&mut error_output);
+                let error_str = String::from_utf8_lossy(&error_output);
+                return Err(DaemonError::StartFailed(format!(
+                    "Daemon exited with status: {} Error: {}", status, error_str
+                )));
+            }
+        }
+
+        info!("Spawned daemon process from directory: {}", current_dir.display());
+
+        // Give the daemon a moment to start and create its own PID file
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Check if the daemon created its PID file (indicates successful start)
+        let mut retries = 5;
+        while retries > 0 {
+            if let Some(pid) = Self::get_running_pid().await {
+                info!("Daemon started successfully with PID: {}", pid);
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            retries -= 1;
+        }
+
+        Err(DaemonError::StartFailed(
+            "Daemon failed to start or create PID file within timeout".to_string()
+        ))
+    }
+
+    /// Check if daemon is running and return PID if so.
+    pub async fn get_running_pid() -> Option<u32> {
+        let pid_file = daemon_pid_file();
+
+        if !pid_file.exists() {
+            return None;
+        }
+
+        let pid_str = std::fs::read_to_string(&pid_file).ok()?;
+        let pid = pid_str.trim().parse::<u32>().ok()?;
+
+        if is_process_running(pid) {
+            Some(pid)
+        } else {
+            // Clean up stale PID file
+            std::fs::remove_file(&pid_file).ok();
+            None
+        }
+    }
+
+    /// Check if daemon is running.
+    pub async fn is_running() -> bool {
+        Self::get_running_pid().await.is_some()
     }
 
     /// Stop the daemon service.
@@ -663,4 +755,39 @@ fn get_system_info() -> SystemInfo {
         total_memory_mb: 0, // Would need system query
         available_memory_mb: 0, // Would need system query
     }
+}
+
+/// Find the commander-daemon binary for spawning background process.
+fn find_daemon_binary() -> Option<PathBuf> {
+    // Get current working directory for absolute paths
+    let current_dir = std::env::current_dir().ok()?;
+
+    // Check common binary locations in order of preference (absolute paths)
+    let candidates = [
+        current_dir.join("target/release/commander-daemon"),
+        current_dir.join("target/debug/commander-daemon"),
+    ];
+
+    for candidate in &candidates {
+        if candidate.exists() && candidate.is_file() {
+            return Some(candidate.clone());
+        }
+    }
+
+    // Check if commander-daemon is in PATH
+    if let Ok(output) = std::process::Command::new("which")
+        .arg("commander-daemon")
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(path_str) = String::from_utf8(output.stdout) {
+                let path = PathBuf::from(path_str.trim());
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
 }
