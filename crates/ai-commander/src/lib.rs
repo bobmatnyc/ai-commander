@@ -7,6 +7,7 @@ pub mod agent_cli;
 pub mod chat;
 pub mod cli;
 pub mod commands;
+pub mod daemon_commands;
 pub mod filesystem;
 pub mod repl;
 pub mod tui;

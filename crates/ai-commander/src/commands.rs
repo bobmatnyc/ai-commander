@@ -8,12 +8,17 @@ use commander_persistence::StateStore;
 use tracing::{info, warn};
 
 use crate::cli::{Commands, OutputFormat};
+use crate::daemon_commands;
 
 /// Result type for command operations.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Execute a CLI command.
 pub fn execute(command: Commands, state_dir: &Path) -> Result<()> {
+    // Handle async commands
+    if matches!(command, Commands::Daemon { .. } | Commands::Pair { .. }) {
+        return execute_async(command);
+    }
     let store = StateStore::new(state_dir);
 
     match command {
@@ -39,7 +44,29 @@ pub fn execute(command: Commands, state_dir: &Path) -> Result<()> {
             // Agent commands are handled separately in main.rs
             Ok(())
         }
+        Commands::Daemon { .. } | Commands::Pair { .. } => {
+            // These are handled by execute_async
+            unreachable!("Async commands should be handled by execute_async")
+        }
     }
+}
+
+/// Execute async CLI commands that require tokio runtime.
+fn execute_async(command: Commands) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("Failed to create async runtime: {}", e))?;
+
+    rt.block_on(async {
+        match command {
+            Commands::Daemon { command } => {
+                daemon_commands::execute(command).await
+            }
+            Commands::Pair { session } => {
+                daemon_commands::generate_pairing_code(session).await
+            }
+            _ => unreachable!("Only daemon and pair commands should reach execute_async"),
+        }
+    })
 }
 
 fn cmd_start(store: &StateStore, path: &Path, adapter: &str, name: Option<&str>) -> Result<()> {
