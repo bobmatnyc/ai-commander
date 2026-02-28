@@ -22,6 +22,11 @@ dotenvy = { workspace = true }
 signal-hook = { workspace = true }
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 futures = { workspace = true }
+which = "7.0"
+
+# Platform-specific dependencies
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Commander crates
 commander-core = { path = "../commander-core" }
