@@ -38,6 +38,8 @@ pub struct UserSession {
     pub thread_id: Option<ThreadId>,
     /// Worktree info (if session uses git worktree).
     pub worktree_info: Option<WorktreeInfo>,
+    /// Daemon session ID (if the daemon is running and owns this session).
+    pub daemon_session_id: Option<String>,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -155,6 +157,7 @@ impl UserSession {
             last_incremental_summary_line_count: 0,
             thread_id: None,
             worktree_info: None,
+            daemon_session_id: None,
         }
     }
 
@@ -182,6 +185,7 @@ impl UserSession {
             last_incremental_summary_line_count: 0,
             thread_id: Some(thread_id),
             worktree_info: None,
+            daemon_session_id: None,
         }
     }
 

@@ -20,6 +20,7 @@ use tracing::{debug, error, info, warn};
 use commander_orchestrator::AgentOrchestrator;
 
 use crate::error::{Result, TelegramError};
+use crate::ipc_client::DaemonClient;
 use crate::pairing;
 use crate::session::{PersistedSession, UserSession};
 
@@ -258,6 +259,8 @@ pub struct TelegramState {
     authorized_chats: RwLock<HashSet<i64>>,
     /// Group chat configurations (chat_id -> config).
     group_configs: RwLock<HashMap<i64, GroupChatConfig>>,
+    /// IPC client for communicating with commander-daemon (None if daemon not running).
+    daemon_client: Option<DaemonClient>,
     /// Agent orchestrator for LLM-based message processing (feature-gated).
     #[cfg(feature = "agents")]
     orchestrator: RwLock<Option<AgentOrchestrator>>,
@@ -278,6 +281,18 @@ impl TelegramState {
         let authorized_chats = load_authorized_chats();
         let group_configs = load_group_configs();
 
+        // Initialise daemon IPC client if the socket exists
+        let daemon_client = {
+            let client = DaemonClient::default_path();
+            if client.is_daemon_running() {
+                info!("commander-daemon socket found - IPC client enabled");
+                Some(client)
+            } else {
+                debug!("commander-daemon socket not found - running tmux-only mode");
+                None
+            }
+        };
+
         Self {
             sessions: RwLock::new(HashMap::new()),
             tmux,
@@ -285,6 +300,7 @@ impl TelegramState {
             store,
             authorized_chats: RwLock::new(authorized_chats),
             group_configs: RwLock::new(group_configs),
+            daemon_client,
             #[cfg(feature = "agents")]
             orchestrator: RwLock::new(None),
         }
@@ -629,12 +645,33 @@ impl TelegramState {
             }
 
             // Create user session
-            let session = UserSession::new(
+            let mut session = UserSession::new(
                 chat_id,
                 project.path.clone(),
                 project.name.clone(),
                 session_name,
             );
+
+            // Optionally register with the daemon
+            if let Some(ref daemon) = self.daemon_client {
+                match daemon.session_create(Some(&project.path), Some(&project.name)).await {
+                    Ok(daemon_id) => {
+                        info!(
+                            project = %project.name,
+                            daemon_session_id = %daemon_id,
+                            "Registered session with commander-daemon"
+                        );
+                        session.daemon_session_id = Some(daemon_id);
+                    }
+                    Err(e) => {
+                        warn!(
+                            project = %project.name,
+                            error = %e,
+                            "Failed to register session with daemon, falling back to tmux-only"
+                        );
+                    }
+                }
+            }
 
             let mut sessions = self.sessions.write().await;
             sessions.insert(chat_id.0, session);
@@ -1044,14 +1081,20 @@ impl TelegramState {
             .get_mut(&chat_id.0)
             .ok_or(TelegramError::NotConnected)?;
 
-        // Capture initial output for comparison
+        // Capture initial output for comparison (always via tmux for polling)
         let last_output = tmux
             .capture_output(&session.tmux_session, None, Some(200))
             .unwrap_or_default();
 
-        // Send the user's message directly without LLM processing
-        tmux.send_line(&session.tmux_session, None, message)
-            .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+        // Send via daemon if available, otherwise fall back to tmux
+        if let (Some(ref daemon), Some(ref session_id)) =
+            (&self.daemon_client, &session.daemon_session_id)
+        {
+            daemon.session_send(session_id, message).await?;
+        } else {
+            tmux.send_line(&session.tmux_session, None, message)
+                .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+        }
 
         // Start response collection with message ID for reply threading
         session.start_response_collection(message, last_output, message_id);
@@ -1080,14 +1123,20 @@ impl TelegramState {
             .get_mut(&chat_id.0)
             .ok_or(TelegramError::NotConnected)?;
 
-        // Capture initial output for comparison
+        // Capture initial output for comparison (always via tmux for polling)
         let last_output = tmux
             .capture_output(&session.tmux_session, None, Some(200))
             .unwrap_or_default();
 
-        // Send message directly without orchestrator processing
-        tmux.send_line(&session.tmux_session, None, message)
-            .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+        // Send via daemon if available, otherwise fall back to tmux
+        if let (Some(ref daemon), Some(ref session_id)) =
+            (&self.daemon_client, &session.daemon_session_id)
+        {
+            daemon.session_send(session_id, message).await?;
+        } else {
+            tmux.send_line(&session.tmux_session, None, message)
+                .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+        }
 
         // Start response collection with message ID for reply threading
         session.start_response_collection(message, last_output, message_id);

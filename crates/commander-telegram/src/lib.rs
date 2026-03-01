@@ -64,6 +64,7 @@ pub mod bot;
 pub mod daemon;
 pub mod error;
 pub mod handlers;
+pub mod ipc_client;
 pub mod ngrok;
 pub mod notifications;
 pub mod pairing;
