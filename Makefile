@@ -1,8 +1,8 @@
 # AI Commander — project shortcuts
 # Usage: make <target>
 
-SERVICES    := ~/.ai-commander/services.sh
-DAEMON      := ~/.ai-commander/bin/commander-daemon
+SERVICES    := $(HOME)/.ai-commander/services.sh
+DAEMON      := $(HOME)/.ai-commander/bin/commander-daemon
 BOLD        := \033[1m
 GREEN       := \033[0;32m
 BLUE        := \033[0;34m
