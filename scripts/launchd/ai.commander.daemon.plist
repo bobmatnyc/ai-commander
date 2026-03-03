@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.commander.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>HOME_DIR/bin/start-daemon.sh</string>
+    </array>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>HOME_DIR</string>
+
+    <key>StandardOutPath</key>
+    <string>HOME_DIR/logs/daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>HOME_DIR/logs/daemon.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>REAL_HOME</string>
+    </dict>
+</dict>
+</plist>
