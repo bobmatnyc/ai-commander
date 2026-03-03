@@ -69,6 +69,7 @@ pub mod ngrok;
 pub mod notifications;
 pub mod pairing;
 pub mod session;
+pub mod session_log;
 pub mod state;
 pub mod version;
 

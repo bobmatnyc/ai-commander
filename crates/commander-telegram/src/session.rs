@@ -40,6 +40,8 @@ pub struct UserSession {
     pub worktree_info: Option<WorktreeInfo>,
     /// Daemon session ID (if the daemon is running and owns this session).
     pub daemon_session_id: Option<String>,
+    /// Timestamp when the most recent user message was sent (for latency calculation).
+    pub send_time: Option<std::time::Instant>,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -158,6 +160,7 @@ impl UserSession {
             thread_id: None,
             worktree_info: None,
             daemon_session_id: None,
+            send_time: None,
         }
     }
 
@@ -186,6 +189,7 @@ impl UserSession {
             thread_id: Some(thread_id),
             worktree_info: None,
             daemon_session_id: None,
+            send_time: None,
         }
     }
 
@@ -199,6 +203,7 @@ impl UserSession {
         self.last_progress_line_count = 0;
         self.is_summarizing = false;
         self.last_incremental_summary_line_count = 0;
+        self.send_time = None;
     }
 
     /// Start collecting a response for a query.
@@ -212,6 +217,7 @@ impl UserSession {
         self.last_progress_line_count = 0;
         self.is_summarizing = false;
         self.last_incremental_summary_line_count = 0;
+        self.send_time = Some(Instant::now());
     }
 
     /// Add new lines to the response buffer.

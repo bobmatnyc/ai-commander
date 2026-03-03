@@ -23,6 +23,7 @@ use crate::error::{Result, TelegramError};
 use crate::ipc_client::DaemonClient;
 use crate::pairing;
 use crate::session::{PersistedSession, UserSession};
+use crate::session_log::SessionLogger;
 
 /// Result from polling output - represents different stages of output collection.
 #[derive(Debug)]
@@ -261,6 +262,8 @@ pub struct TelegramState {
     group_configs: RwLock<HashMap<i64, GroupChatConfig>>,
     /// IPC client for communicating with commander-daemon (None if daemon not running).
     daemon_client: Option<DaemonClient>,
+    /// Session logger for writing user↔assistant exchanges to sessions.jsonl.
+    session_logger: SessionLogger,
     /// Agent orchestrator for LLM-based message processing (feature-gated).
     #[cfg(feature = "agents")]
     orchestrator: RwLock<Option<AgentOrchestrator>>,
@@ -293,6 +296,8 @@ impl TelegramState {
             }
         };
 
+        let session_logger = SessionLogger::new(commander_core::config::logs_dir());
+
         Self {
             sessions: RwLock::new(HashMap::new()),
             tmux,
@@ -301,6 +306,7 @@ impl TelegramState {
             authorized_chats: RwLock::new(authorized_chats),
             group_configs: RwLock::new(group_configs),
             daemon_client,
+            session_logger,
             #[cfg(feature = "agents")]
             orchestrator: RwLock::new(None),
         }
@@ -969,6 +975,16 @@ impl TelegramState {
         // Start response collection with message ID for reply threading
         session.start_response_collection(&processed_message, last_output, message_id);
 
+        // Log the user message for evals and debugging
+        self.session_logger.log_user_message(
+            chat_id.0,
+            &session.tmux_session,
+            &session.project_name,
+            &processed_message,
+            session.daemon_session_id.is_some(),
+            message_id.map(|m| m.0).unwrap_or(0),
+        );
+
         debug!(
             chat_id = %chat_id.0,
             thread_id = ?thread_id,
@@ -1052,6 +1068,12 @@ impl TelegramState {
             let query = session.pending_query.clone().unwrap_or_default();
             let message_id = session.pending_message_id;
             let sess_thread_id = session.thread_id;
+            // Capture logging context before reset clears it
+            let log_chat_id = session.chat_id.0;
+            let log_session_id = session.tmux_session.clone();
+            let log_project = session.project_name.clone();
+            let log_send_time = session.send_time;
+            let log_msg_id = message_id.map(|m| m.0).unwrap_or(0);
             session.reset_response_state();
 
             let response = if needs_summarization {
@@ -1059,6 +1081,19 @@ impl TelegramState {
             } else {
                 clean_response(&raw_response)
             };
+
+            // Log assistant response
+            let latency_ms = log_send_time
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            self.session_logger.log_assistant_response(
+                log_chat_id,
+                &log_session_id,
+                &log_project,
+                &response,
+                latency_ms,
+                log_msg_id,
+            );
 
             return Ok(PollResult::Complete(response, message_id, sess_thread_id));
         }
@@ -1098,6 +1133,16 @@ impl TelegramState {
 
         // Start response collection with message ID for reply threading
         session.start_response_collection(message, last_output, message_id);
+
+        // Log the user message for evals and debugging
+        self.session_logger.log_user_message(
+            chat_id.0,
+            &session.tmux_session,
+            &session.project_name,
+            message,
+            session.daemon_session_id.is_some(),
+            message_id.map(|m| m.0).unwrap_or(0),
+        );
 
         debug!(
             chat_id = %chat_id.0,
@@ -1140,6 +1185,16 @@ impl TelegramState {
 
         // Start response collection with message ID for reply threading
         session.start_response_collection(message, last_output, message_id);
+
+        // Log the user message for evals and debugging
+        self.session_logger.log_user_message(
+            chat_id.0,
+            &session.tmux_session,
+            &session.project_name,
+            message,
+            session.daemon_session_id.is_some(),
+            message_id.map(|m| m.0).unwrap_or(0),
+        );
 
         debug!(
             chat_id = %chat_id.0,
@@ -1222,6 +1277,12 @@ impl TelegramState {
             let query = session.pending_query.clone().unwrap_or_default();
             let message_id = session.pending_message_id;
             let thread_id = session.thread_id;
+            // Capture logging context before reset clears it
+            let log_chat_id = session.chat_id.0;
+            let log_session_id = session.tmux_session.clone();
+            let log_project = session.project_name.clone();
+            let log_send_time = session.send_time;
+            let log_msg_id = message_id.map(|m| m.0).unwrap_or(0);
             session.reset_response_state();
 
             // Summarize or clean the response using commander-core
@@ -1230,6 +1291,19 @@ impl TelegramState {
             } else {
                 clean_response(&raw_response)
             };
+
+            // Log assistant response
+            let latency_ms = log_send_time
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            self.session_logger.log_assistant_response(
+                log_chat_id,
+                &log_session_id,
+                &log_project,
+                &response,
+                latency_ms,
+                log_msg_id,
+            );
 
             return Ok(PollResult::Complete(response, message_id, thread_id));
         }
