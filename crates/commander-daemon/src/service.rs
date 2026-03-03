@@ -520,7 +520,8 @@ impl DaemonService {
     /// Generate a pairing code.
     pub async fn generate_pairing_code(session_id: Option<&str>) -> Result<String> {
         let mut pairing_manager = PairingManager::new()?;
-        let code = pairing_manager.generate_code(session_id.map(|s| s.to_string()), None)?;
+        let project_path = std::env::current_dir().ok();
+        let code = pairing_manager.generate_code(session_id.map(|s| s.to_string()), project_path)?;
         Ok(code)
     }
 
@@ -753,11 +754,21 @@ fn find_daemon_binary() -> Option<PathBuf> {
     // Get current working directory for absolute paths
     let current_dir = std::env::current_dir().ok()?;
 
-    // Check common binary locations in order of preference (absolute paths)
-    let candidates = [
-        current_dir.join("target/release/commander-daemon"),
-        current_dir.join("target/debug/commander-daemon"),
-    ];
+    // Build installed-path candidate from $HOME (may not be set; skip gracefully)
+    let home_candidate = std::env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".ai-commander/bin/commander-daemon"));
+
+    // Check common binary locations in order of preference (absolute paths):
+    //  1. Installed path  (~/.ai-commander/bin/commander-daemon)
+    //  2. Release dev build
+    //  3. Debug dev build
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(p) = home_candidate {
+        candidates.push(p);
+    }
+    candidates.push(current_dir.join("target/release/commander-daemon"));
+    candidates.push(current_dir.join("target/debug/commander-daemon"));
 
     for candidate in &candidates {
         if candidate.exists() && candidate.is_file() {
