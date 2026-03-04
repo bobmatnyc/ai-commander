@@ -527,20 +527,6 @@ impl TelegramState {
             .map(|s| (s.project_name.clone(), s.project_path.clone()))
     }
 
-    /// Store the spinner/status message ID for a session.
-    pub async fn set_status_message_id(&self, chat_id: ChatId, msg_id: MessageId) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&chat_id.0) {
-            session.status_message_id = Some(msg_id);
-        }
-    }
-
-    /// Take (and clear) the spinner/status message ID for a session.
-    pub async fn take_status_message_id(&self, chat_id: ChatId) -> Option<MessageId> {
-        let mut sessions = self.sessions.write().await;
-        sessions.get_mut(&chat_id.0).and_then(|s| s.status_message_id.take())
-    }
-
     /// Get worktree info for a session if it exists.
     pub async fn get_worktree_info(&self, chat_id: ChatId) -> Option<crate::session::WorktreeInfo> {
         let sessions = self.sessions.read().await;
