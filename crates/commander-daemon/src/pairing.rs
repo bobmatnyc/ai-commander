@@ -25,6 +25,8 @@ pub struct PairingEntry {
     pub session_id: Option<String>,
     /// Project path associated with the pairing
     pub project_path: Option<PathBuf>,
+    /// Project name derived from project_path
+    pub project_name: Option<String>,
     /// When the code was created
     pub created_at: DateTime<Utc>,
     /// When the code expires
@@ -41,11 +43,17 @@ impl PairingEntry {
         let code = generate_pairing_code();
         let created_at = Utc::now();
         let expires_at = created_at + PAIRING_CODE_DURATION;
+        let project_name = project_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
 
         Self {
             code,
             session_id,
             project_path,
+            project_name,
             created_at,
             expires_at,
             used: false,

@@ -302,6 +302,9 @@ fn create_option_keyboard(options: &DetectedOptions) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(buttons)
 }
 
+/// Spinner frames used to animate the status message while waiting for a response.
+const SPINNER_FRAMES: [&str; 4] = ["⏳", "🔄", "⏳", "🔄"];
+
 /// Background task to poll for output from connected sessions and send responses.
 async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
     use teloxide::types::{ChatAction, MessageId, ReplyParameters};
@@ -313,6 +316,8 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
     let mut progress_messages: HashMap<i64, MessageId> = HashMap::new();
     // Track summary message IDs per session key
     let mut summary_messages: HashMap<i64, MessageId> = HashMap::new();
+    // Track spinner state per session key: (spin_index, ticks_since_last_spin)
+    let mut spinner_state: HashMap<i64, (usize, u32)> = HashMap::new();
 
     loop {
         poll_interval.tick().await;
@@ -332,6 +337,40 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
             } else {
                 if let Err(e) = bot.send_chat_action(chat_id, ChatAction::Typing).await {
                     warn!(chat_id = %chat_id, error = %e, "Failed to send typing indicator");
+                }
+            }
+
+            // Send spinner message on first tick for this session, then animate it
+            let spinner = spinner_state.entry(session_key).or_insert((0, 0));
+            spinner.1 += 1; // increment tick count
+            if spinner.1 == 1 {
+                // First tick: send initial status message
+                let mut req = bot.send_message(chat_id, SPINNER_FRAMES[0]);
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                match req.await {
+                    Ok(sent) => {
+                        state.set_status_message_id(chat_id, sent.id).await;
+                    }
+                    Err(e) => {
+                        warn!(chat_id = %chat_id.0, error = %e, "Failed to send spinner message");
+                    }
+                }
+            } else if spinner.1 % 2 == 0 {
+                // Every 2 ticks (~1 second), advance spinner frame and edit message
+                spinner.0 = (spinner.0 + 1) % SPINNER_FRAMES.len();
+                let frame = SPINNER_FRAMES[spinner.0];
+                if let Some(status_id) = state.take_status_message_id(chat_id).await {
+                    match bot.edit_message_text(chat_id, status_id, frame).await {
+                        Ok(_) => {
+                            // Re-store after successful edit
+                            state.set_status_message_id(chat_id, status_id).await;
+                        }
+                        Err(_) => {
+                            // Message was deleted or edit failed; ignore
+                        }
+                    }
                 }
             }
 
@@ -421,6 +460,12 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                         let _ = bot.delete_message(chat_id, sum_msg_id).await;
                     }
 
+                    // Delete spinner status message if it exists
+                    spinner_state.remove(&session_key);
+                    if let Some(status_id) = state.take_status_message_id(chat_id).await {
+                        let _ = bot.delete_message(chat_id, status_id).await;
+                    }
+
                     // Determine which thread to send to (prefer response's thread_id)
                     let target_thread_id = response_thread_id.or(thread_id);
 
@@ -477,6 +522,12 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     // Clean up progress message on error
                     if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, prog_msg_id).await;
+                    }
+
+                    // Clean up spinner message on error
+                    spinner_state.remove(&session_key);
+                    if let Some(status_id) = state.take_status_message_id(chat_id).await {
+                        let _ = bot.delete_message(chat_id, status_id).await;
                     }
                 }
             }

@@ -33,6 +33,7 @@ fn main() {
             commands::stop_bot,
             commands::get_bot_status,
             commands::generate_pairing_code,
+            commands::check_telegram_connection,
             commands::list_project_directories,
             commands::create_session,
         ])

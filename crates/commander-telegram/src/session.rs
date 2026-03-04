@@ -42,6 +42,10 @@ pub struct UserSession {
     pub daemon_session_id: Option<String>,
     /// Timestamp when the most recent user message was sent (for latency calculation).
     pub send_time: Option<std::time::Instant>,
+    /// Adapter type for this session (e.g. "claude-code", "mpm", "unknown").
+    pub adapter_type: String,
+    /// Message ID of the spinner/status message shown while waiting for a response.
+    pub status_message_id: Option<MessageId>,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -161,6 +165,8 @@ impl UserSession {
             worktree_info: None,
             daemon_session_id: None,
             send_time: None,
+            adapter_type: "claude-code".to_string(),
+            status_message_id: None,
         }
     }
 
@@ -190,6 +196,8 @@ impl UserSession {
             worktree_info: None,
             daemon_session_id: None,
             send_time: None,
+            adapter_type: "claude-code".to_string(),
+            status_message_id: None,
         }
     }
 
@@ -204,6 +212,7 @@ impl UserSession {
         self.is_summarizing = false;
         self.last_incremental_summary_line_count = 0;
         self.send_time = None;
+        self.status_message_id = None;
     }
 
     /// Start collecting a response for a query.

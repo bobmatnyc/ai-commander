@@ -8,5 +8,4 @@ pub use commander_core::options::{
     DetectedOptions,
     OptionDetector,
     OptionFormat,
-    ParsedOption,
 };

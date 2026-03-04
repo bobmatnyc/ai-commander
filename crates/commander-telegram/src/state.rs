@@ -7,8 +7,8 @@ use std::sync::Arc;
 use commander_adapters::AdapterRegistry;
 use commander_core::{
     clean_response, clean_screen_preview, config::authorized_chats_file, find_new_lines,
-    is_claude_ready, is_summarization_available, summarize_incremental, summarize_with_fallback,
-    config::runtime_state_dir,
+    is_claude_ready, is_mpm_ready, is_summarization_available, summarize_incremental,
+    summarize_with_fallback, config::runtime_state_dir,
 };
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
@@ -527,6 +527,20 @@ impl TelegramState {
             .map(|s| (s.project_name.clone(), s.project_path.clone()))
     }
 
+    /// Store the spinner/status message ID for a session.
+    pub async fn set_status_message_id(&self, chat_id: ChatId, msg_id: MessageId) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&chat_id.0) {
+            session.status_message_id = Some(msg_id);
+        }
+    }
+
+    /// Take (and clear) the spinner/status message ID for a session.
+    pub async fn take_status_message_id(&self, chat_id: ChatId) -> Option<MessageId> {
+        let mut sessions = self.sessions.write().await;
+        sessions.get_mut(&chat_id.0).and_then(|s| s.status_message_id.take())
+    }
+
     /// Get worktree info for a session if it exists.
     pub async fn get_worktree_info(&self, chat_id: ChatId) -> Option<crate::session::WorktreeInfo> {
         let sessions = self.sessions.read().await;
@@ -657,6 +671,7 @@ impl TelegramState {
                 project.name.clone(),
                 session_name,
             );
+            session.adapter_type = tool_id.clone();
 
             // Optionally register with the daemon
             if let Some(ref daemon) = self.daemon_client {
@@ -819,13 +834,14 @@ impl TelegramState {
             }
 
             // Create user session with thread_id
-            let session = UserSession::with_thread_id(
+            let mut session = UserSession::with_thread_id(
                 chat_id,
                 project.path.clone(),
                 project.name.clone(),
                 tmux_session_name.clone(),
                 thread_id,
             );
+            session.adapter_type = tool_id.clone();
 
             // Use combined key for topic sessions
             let session_key = Self::session_key(chat_id.0, Some(thread_id));
@@ -1052,9 +1068,13 @@ impl TelegramState {
             }
         }
 
-        // Check if Claude Code is idle (prompt visible and no activity for 1.5s)
+        // Check if the adapter is idle (prompt visible and no activity for 1.5s)
         let is_idle = session.is_idle(1500);
-        let has_prompt = is_claude_ready(&current_output);
+        let has_prompt = if session.adapter_type == "mpm" {
+            is_mpm_ready(&current_output)
+        } else {
+            is_claude_ready(&current_output)
+        };
 
         if is_idle && has_prompt && !session.response_buffer.is_empty() {
             let needs_summarization = is_summarization_available();
@@ -1258,9 +1278,13 @@ impl TelegramState {
             }
         }
 
-        // Check if Claude Code is idle (prompt visible and no activity for 1.5s)
+        // Check if the adapter is idle (prompt visible and no activity for 1.5s)
         let is_idle = session.is_idle(1500);
-        let has_prompt = is_claude_ready(&current_output);
+        let has_prompt = if session.adapter_type == "mpm" {
+            is_mpm_ready(&current_output)
+        } else {
+            is_claude_ready(&current_output)
+        };
 
         if is_idle && has_prompt && !session.response_buffer.is_empty() {
             // Check if we need to summarize (only if API key available)
