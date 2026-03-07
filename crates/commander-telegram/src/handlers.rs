@@ -1959,7 +1959,7 @@ async fn handle_option_selection(
     match state.send_message_direct(chat_id, option_key, Some(msg.id())).await {
         Ok(()) => {
             // Confirm selection with a notification (not a full message)
-            if let Err(e) = bot.answer_callback_query(&q.id)
+            if let Err(e) = bot.answer_callback_query(q.id.clone())
                 .text(format!("Selected: {}", option_key))
                 .await
             {
@@ -1996,7 +1996,7 @@ pub async fn handle_callback(
     );
 
     // Always acknowledge callback to remove loading state, even if data is missing
-    if let Err(e) = bot.answer_callback_query(&q.id).await {
+    if let Err(e) = bot.answer_callback_query(q.id.clone()).await {
         error!(callback_id = %q.id, error = %e, "Failed to acknowledge callback");
         return Err(e);
     }
@@ -2095,17 +2095,17 @@ pub async fn handle_groupmode(
 
     // Extract is_forum from the supergroup struct
     let is_forum = match &chat.kind {
-        teloxide::types::ChatKind::Public(public) => {
+        teloxide::types::ChatFullInfoKind::Public(public) => {
             match &public.kind {
-                teloxide::types::PublicChatKind::Supergroup(sg) => sg.is_forum,
+                teloxide::types::ChatFullInfoPublicKind::Supergroup(sg) => sg.is_forum,
                 _ => false,
             }
         }
         _ => false,
     };
 
-    let is_supergroup = matches!(&chat.kind, teloxide::types::ChatKind::Public(ref p)
-        if matches!(p.kind, teloxide::types::PublicChatKind::Supergroup(_)));
+    let is_supergroup = matches!(&chat.kind, teloxide::types::ChatFullInfoKind::Public(ref p)
+        if matches!(p.kind, teloxide::types::ChatFullInfoPublicKind::Supergroup(_)));
 
     if !is_supergroup {
         bot.send_message(
@@ -2199,12 +2199,7 @@ pub async fn handle_topic(
     }
 
     // Create the forum topic
-    // Default icon color: 0x6FB9F0 (blue) = 7322096
-    let icon_color: u32 = 7322096;
-
-    // teloxide 0.13 create_forum_topic requires icon_custom_emoji_id
-    // We'll use an empty string to get the default icon
-    let topic_result = bot.create_forum_topic(msg.chat.id, session_name, icon_color, "")
+    let topic_result = bot.create_forum_topic(msg.chat.id, session_name)
         .await;
 
     match topic_result {

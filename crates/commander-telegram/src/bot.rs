@@ -361,11 +361,7 @@ async fn send_long_message(
                 req = req.reply_markup(kb.clone());
             }
             if let Some(effect_id) = message_effect_id {
-                // message_effect_id is not available in teloxide 0.13 / teloxide-core 0.10.
-                // When the teloxide API exposes it, replace this comment with:
-                //   req = req.message_effect_id(effect_id);
-                // For now log it so it is not silently lost.
-                debug!(effect_id = %effect_id, "message_effect_id skipped (not in teloxide 0.13 API)");
+                req = req.message_effect_id(teloxide::types::EffectId(effect_id.to_owned()));
             }
         }
 
