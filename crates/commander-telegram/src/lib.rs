@@ -63,6 +63,7 @@
 pub mod bot;
 pub mod daemon;
 pub mod error;
+pub mod features;
 pub mod handlers;
 pub mod ipc_client;
 pub mod ngrok;

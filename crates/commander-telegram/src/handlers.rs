@@ -1318,9 +1318,12 @@ pub async fn handle_message(
         .await?;
 
     // Send message to the project with message ID for reply threading
+    let is_private = msg.chat.is_private();
     match state.send_message(msg.chat.id, &text, Some(msg.id)).await {
         Ok(()) => {
             debug!(chat_id = %msg.chat.id, message = %text, "Message sent to project");
+            // Store reaction metadata so the poll loop can react to the user's message on completion.
+            state.set_session_reaction_meta(msg.chat.id.0, Some(msg.id), is_private).await;
             // Response will be polled and sent back by the polling task
         }
         Err(e) => {
@@ -1406,6 +1409,7 @@ async fn handle_topic_message(
     }
 
     // Send message to the topic's session
+    let session_key = TelegramState::session_key(msg.chat.id.0, Some(thread_id));
     match state.send_message_to_topic(msg.chat.id, thread_id, text, Some(msg.id)).await {
         Ok(()) => {
             debug!(
@@ -1414,6 +1418,8 @@ async fn handle_topic_message(
                 message = %text,
                 "Message sent to topic session"
             );
+            // Store reaction metadata (topics are group chats — not private).
+            state.set_session_reaction_meta(session_key, Some(msg.id), false).await;
         }
         Err(e) => {
             bot.send_message(msg.chat.id, format!("❌ Error: {}", e))

@@ -12,7 +12,7 @@ use commander_core::{
 };
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
-use teloxide::types::{ChatId, MessageId, ThreadId};
+use teloxide::types::{ChatId, Me, MessageId, ThreadId};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -264,6 +264,8 @@ pub struct TelegramState {
     daemon_client: Option<DaemonClient>,
     /// Session logger for writing user↔assistant exchanges to sessions.jsonl.
     session_logger: SessionLogger,
+    /// Cached bot identity (populated once at startup, avoids repeated get_me() calls).
+    pub bot_info: RwLock<Option<Me>>,
     /// Agent orchestrator for LLM-based message processing (feature-gated).
     #[cfg(feature = "agents")]
     orchestrator: RwLock<Option<AgentOrchestrator>>,
@@ -307,9 +309,25 @@ impl TelegramState {
             group_configs: RwLock::new(group_configs),
             daemon_client,
             session_logger,
+            bot_info: RwLock::new(None),
             #[cfg(feature = "agents")]
             orchestrator: RwLock::new(None),
         }
+    }
+
+    /// Cache the bot identity. Call once at startup.
+    pub async fn set_bot_info(&self, me: Me) {
+        *self.bot_info.write().await = Some(me);
+    }
+
+    /// Return the cached bot username, or a fallback string if not yet populated.
+    pub async fn bot_username(&self) -> String {
+        self.bot_info
+            .read()
+            .await
+            .as_ref()
+            .map(|me| me.username().to_string())
+            .unwrap_or_else(|| "commander".to_string())
     }
 
     /// Initialize the agent orchestrator asynchronously (when agents feature is enabled).
@@ -517,6 +535,32 @@ impl TelegramState {
     pub async fn has_session(&self, chat_id: ChatId) -> bool {
         let sessions = self.sessions.read().await;
         sessions.contains_key(&chat_id.0)
+    }
+
+    /// Set the original message ID and private-chat flag for a session.
+    /// Call immediately after `send_message` / `send_message_to_topic` so the poll loop can
+    /// attach reactions and effects when the response completes.
+    pub async fn set_session_reaction_meta(
+        &self,
+        session_key: i64,
+        original_message_id: Option<MessageId>,
+        is_private_chat: bool,
+    ) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_key) {
+            session.original_message_id = original_message_id;
+            session.is_private_chat = is_private_chat;
+        }
+    }
+
+    /// Get the original_message_id and is_private_chat flag for a session key.
+    /// Used by poll_output_loop to determine whether to add reactions / effects.
+    pub async fn get_session_reaction_meta(&self, session_key: i64) -> (Option<MessageId>, bool) {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(&session_key)
+            .map(|s| (s.original_message_id, s.is_private_chat))
+            .unwrap_or((None, false))
     }
 
     /// Get a user's session info (project name).
