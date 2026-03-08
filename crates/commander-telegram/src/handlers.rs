@@ -116,7 +116,16 @@ pub async fn handle_start(
         return handle_deep_link_stop(bot, msg, state, session_name).await;
     }
 
-    // Default welcome message
+    // Show status if authorized
+    if state.is_authorized(msg.chat.id.0).await {
+        if state.get_session_info(msg.chat.id).await.is_some() {
+            return handle_status(bot, msg, state).await;
+        } else {
+            return handle_list(bot, msg, state).await;
+        }
+    }
+
+    // Not authorized — show welcome/pairing instructions
     let welcome = format!(
         "Welcome to Commander Bot! 🚀\n\n\
         I can help you interact with AI coding sessions from anywhere.\n\n\
