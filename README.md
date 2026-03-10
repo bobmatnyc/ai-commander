@@ -58,7 +58,7 @@ cd crates/commander-gui/ui && npm run build && cd .. && cargo tauri build && cd 
 ./scripts/setup-telegram-service.sh
 ```
 
-**See [DEPLOYMENT_QUICKSTART.md](DEPLOYMENT_QUICKSTART.md) for complete setup guide.**
+**See [docs/QUICKSTART.md](docs/QUICKSTART.md) for complete setup guide.**
 
 ### Homebrew (macOS)
 

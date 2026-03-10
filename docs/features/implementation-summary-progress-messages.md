@@ -241,7 +241,7 @@ Err(e) => {
 ### Optional: Enable Summarization
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
+export OPENROUTER_API_KEY="sk-or-v1-..."  # pragma: allowlist secret
 export OPENROUTER_MODEL="anthropic/claude-sonnet-4"  # Optional
 ```
 

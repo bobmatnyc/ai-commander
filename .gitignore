@@ -39,3 +39,7 @@ __pycache__/
 
 # Gemini CLI
 .gemini/
+
+# AI development tooling (local only, not for repo)
+.claude-mpm/
+.ai-trackdown/
