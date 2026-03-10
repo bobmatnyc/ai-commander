@@ -16,6 +16,7 @@ pub mod config;
 pub mod migration;
 pub mod notification_parser;
 pub mod onboarding;
+pub mod options;
 pub mod output_filter;
 pub mod summarizer;
 
@@ -28,7 +29,7 @@ pub use config::{
 };
 pub use migration::migrate_if_needed;
 pub use onboarding::{load_config, needs_onboarding, run_onboarding};
-pub use output_filter::{clean_response, clean_screen_preview, detect_adapter, find_new_lines, is_claude_ready, is_ui_noise, Adapter};
+pub use output_filter::{clean_response, clean_screen_preview, detect_adapter, find_new_lines, is_claude_ready, is_mpm_ready, is_ui_noise, Adapter};
 pub use summarizer::{
     interpret_screen_context, is_available as is_summarization_available, summarize_async,
     summarize_blocking, summarize_blocking_with_fallback, summarize_incremental, summarize_with_fallback, SummarizerError,
@@ -41,3 +42,6 @@ pub use change_detector::{
 
 // Re-export notification parsing
 pub use notification_parser::{parse_notification, parse_session_preview, strip_ansi, ParsedSessionStatus};
+
+// Re-export option detection
+pub use options::{DetectedOptions, OptionDetector, OptionFormat, ParsedOption};

@@ -1,0 +1,343 @@
+<script lang="ts">
+  import { createEventDispatcher } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
+  import { X } from 'lucide-svelte';
+
+  export let show = false;
+
+  const dispatch = createEventDispatcher();
+
+  interface ProjectDirectory {
+    name: string;
+    path: string;
+    project_type: string;
+  }
+
+  let directories: ProjectDirectory[] = [];
+  let selectedDirectory: ProjectDirectory | null = null;
+  let sessionName = '';
+  let loading = false;
+  let error = '';
+
+  async function loadDirectories() {
+    try {
+      directories = await invoke('list_project_directories');
+      error = '';
+    } catch (err) {
+      error = `Failed to load directories: ${err}`;
+    }
+  }
+
+  $: if (show) {
+    loadDirectories();
+  }
+
+  async function handleCreate() {
+    if (!sessionName || !selectedDirectory) {
+      error = 'Please select a directory and enter a session name';
+      return;
+    }
+
+    loading = true;
+    error = '';
+
+    try {
+      await invoke('create_session', {
+        name: `commander-${sessionName}`,
+        directory: selectedDirectory.path
+      });
+
+      dispatch('created');
+      close();
+    } catch (err) {
+      error = `Failed to create session: ${err}`;
+    } finally {
+      loading = false;
+    }
+  }
+
+  function close() {
+    show = false;
+    sessionName = '';
+    selectedDirectory = null;
+    error = '';
+  }
+
+  function handleOverlayClick(event: MouseEvent) {
+    if (event.target === event.currentTarget) {
+      close();
+    }
+  }
+</script>
+
+{#if show}
+  <div class="modal-overlay" on:click={handleOverlayClick} on:keydown={(e) => e.key === 'Escape' && close()} role="presentation">
+    <div class="modal-content" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-header">
+        <h2 id="modal-title">Create New Session</h2>
+        <button class="close-btn" on:click={close}>
+          <X size={20} />
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Session Name</label>
+          <input
+            type="text"
+            bind:value={sessionName}
+            placeholder="my-session"
+            class="input"
+          />
+          <p class="hint">Will be created as: commander-{sessionName || '...'}</p>
+        </div>
+
+        <div class="form-group">
+          <label for="directory-list">Project Directory</label>
+          <div class="directory-list" id="directory-list" role="listbox">
+            {#each directories as dir}
+              <button
+                class="directory-item"
+                class:selected={selectedDirectory?.path === dir.path}
+                on:click={() => selectedDirectory = dir}
+                role="option"
+                aria-selected={selectedDirectory?.path === dir.path}
+              >
+                <div class="dir-info">
+                  <span class="dir-name">{dir.name}</span>
+                  <span class="dir-type">{dir.project_type}</span>
+                </div>
+                <span class="dir-path">{dir.path}</span>
+              </button>
+            {/each}
+
+            {#if directories.length === 0}
+              <p class="no-dirs">No project directories found</p>
+            {/if}
+          </div>
+        </div>
+
+        {#if error}
+          <div class="error-message">{error}</div>
+        {/if}
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" on:click={close} disabled={loading}>
+          Cancel
+        </button>
+        <button
+          class="btn btn-primary"
+          on:click={handleCreate}
+          disabled={loading || !sessionName || !selectedDirectory}
+        >
+          {loading ? 'Creating...' : 'Create Session'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<style>
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal-content {
+    background: white;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 600px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .modal-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+  }
+
+  .close-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.25rem;
+    display: flex;
+    align-items: center;
+    color: #6b7280;
+  }
+
+  .close-btn:hover {
+    color: #1f2937;
+  }
+
+  .modal-body {
+    padding: 1.5rem;
+    overflow-y: auto;
+  }
+
+  .form-group {
+    margin-bottom: 1.5rem;
+  }
+
+  .form-group label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+    font-size: 0.875rem;
+    color: #374151;
+  }
+
+  .input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 0.875rem;
+  }
+
+  .input:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  }
+
+  .hint {
+    margin-top: 0.25rem;
+    font-size: 0.75rem;
+    color: #6b7280;
+  }
+
+  .directory-list {
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .directory-item {
+    width: 100%;
+    padding: 0.75rem;
+    border: none;
+    border-bottom: 1px solid #e5e7eb;
+    background: white;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.2s;
+  }
+
+  .directory-item:hover {
+    background: #f9fafb;
+  }
+
+  .directory-item.selected {
+    background: #dbeafe;
+    border-left: 3px solid #3b82f6;
+  }
+
+  .directory-item:last-child {
+    border-bottom: none;
+  }
+
+  .dir-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+  }
+
+  .dir-name {
+    font-weight: 500;
+    font-size: 0.875rem;
+    color: #1f2937;
+  }
+
+  .dir-type {
+    font-size: 0.75rem;
+    padding: 0.125rem 0.5rem;
+    background: #f3f4f6;
+    border-radius: 9999px;
+    color: #6b7280;
+  }
+
+  .dir-path {
+    font-size: 0.75rem;
+    color: #6b7280;
+  }
+
+  .no-dirs {
+    padding: 2rem;
+    text-align: center;
+    color: #6b7280;
+    font-size: 0.875rem;
+  }
+
+  .error-message {
+    padding: 0.75rem;
+    background: #fee2e2;
+    color: #991b1b;
+    border-radius: 6px;
+    margin-top: 1rem;
+    font-size: 0.875rem;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    padding: 1.5rem;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  .btn {
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 0.875rem;
+    transition: all 0.2s;
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn-secondary {
+    background: #f3f4f6;
+    color: #374151;
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    background: #e5e7eb;
+  }
+
+  .btn-primary {
+    background: #3b82f6;
+    color: white;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: #2563eb;
+  }
+</style>

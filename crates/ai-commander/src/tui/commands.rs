@@ -27,6 +27,8 @@ impl App {
                 self.messages.push(Message::system("  /rename <new-name>                 Rename current tmux session"));
                 self.messages.push(Message::system("  /send <msg>                        Send message to connected session"));
                 self.messages.push(Message::system("  /telegram                          Generate Telegram pairing code"));
+                self.messages.push(Message::system("  /alias [project] [alias]           List or add project aliases"));
+                self.messages.push(Message::system("  /unalias <alias>                   Remove project alias"));
                 self.messages.push(Message::system("  /clear                             Clear output"));
                 self.messages.push(Message::system(""));
                 self.messages.push(Message::system("=== Message Routing ==="));
@@ -102,6 +104,9 @@ impl App {
                 if tmux_sessions.as_ref().map_or(true, |s| s.is_empty()) {
                     self.messages.push(Message::system("No sessions found."));
                 } else if let Some(sessions) = tmux_sessions {
+                    // Load projects for alias display
+                    let projects = self.store.load_all_projects().ok();
+
                     self.messages.push(Message::system("Sessions:"));
                     for session in &sessions {
                         let is_connected = self.sessions.values().any(|n| n == &session.name);
@@ -116,9 +121,26 @@ impl App {
                         // Get activity summary for this session (now works for all types)
                         let activity = self.get_session_activity(&session.name, &adapter);
 
+                        // Check for project aliases
+                        let alias_info = if let Some(ref projs) = projects {
+                            let project_name = session.name.strip_prefix("commander-").unwrap_or(&session.name);
+                            projs.values()
+                                .find(|p| p.name == project_name)
+                                .and_then(|p| {
+                                    if p.aliases.is_empty() {
+                                        None
+                                    } else {
+                                        Some(format!(" [aliases: {}]", p.aliases.join(", ")))
+                                    }
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+
                         self.messages.push(Message::system(format!(
-                            "  {} {}{} - {}",
-                            indicator, session.name, connected_marker, activity
+                            "  {} {}{}{} - {}",
+                            indicator, session.name, connected_marker, alias_info, activity
                         )));
                     }
                 }
@@ -187,6 +209,16 @@ impl App {
                     self.messages.push(Message::system("Usage: /send <message>"));
                 }
             }
+            "alias" => {
+                self.handle_alias(arg.unwrap_or(""));
+            }
+            "unalias" => {
+                if let Some(alias) = arg {
+                    self.handle_unalias(alias);
+                } else {
+                    self.messages.push(Message::system("Usage: /unalias <alias>"));
+                }
+            }
             _ => {
                 self.messages.push(Message::system(format!("Unknown command: /{}", command)));
             }
@@ -231,6 +263,13 @@ impl App {
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
                     self.messages.push(Message::system(format!("  Adapter: {}", adapter)));
+
+                    // Show aliases if any
+                    if !info.aliases.is_empty() {
+                        self.messages.push(Message::system(
+                            format!("  Aliases: {}", info.aliases.join(", "))
+                        ));
+                    }
                 }
 
                 let status = if session_exists { "Running" } else { "Stopped" };
@@ -524,5 +563,178 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
+impl App {
+    /// Handle /alias command - list, show, or add aliases.
+    ///
+    /// Usage:
+    /// - `/alias` - List all aliases
+    /// - `/alias <project>` - Show aliases for project
+    /// - `/alias <project> <alias>` - Add alias to project
+    pub(super) fn handle_alias(&mut self, arg: &str) {
+        let parts: Vec<&str> = arg.split_whitespace().collect();
+
+        match parts.as_slice() {
+            // List all aliases
+            [] => {
+                match self.store.load_all_projects() {
+                    Ok(projects) => {
+                        let mut aliases = Vec::new();
+
+                        for project in projects.values() {
+                            for alias in &project.aliases {
+                                aliases.push((alias.clone(), project.name.clone()));
+                            }
+                        }
+
+                        if aliases.is_empty() {
+                            self.messages.push(Message::system("No aliases defined"));
+                        } else {
+                            self.messages.push(Message::system("Project aliases:"));
+                            aliases.sort_by(|a, b| a.0.cmp(&b.0));
+                            for (alias, project_name) in aliases {
+                                self.messages.push(Message::system(format!("  {} → {}", alias, project_name)));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.messages.push(Message::system(format!("Error loading projects: {}", e)));
+                    }
+                }
+            }
+
+            // Show aliases for project
+            [project_name] => {
+                match self.store.find_project_by_name_or_alias(project_name) {
+                    Ok(Some(project)) => {
+                        if project.aliases.is_empty() {
+                            self.messages.push(Message::system(
+                                format!("No aliases for '{}'", project.name)
+                            ));
+                        } else {
+                            self.messages.push(Message::system(
+                                format!("Aliases for '{}':", project.name)
+                            ));
+                            for alias in &project.aliases {
+                                self.messages.push(Message::system(format!("  {}", alias)));
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        self.messages.push(Message::system(
+                            format!("Project not found: {}", project_name)
+                        ));
+                    }
+                    Err(e) => {
+                        self.messages.push(Message::system(format!("Error: {}", e)));
+                    }
+                }
+            }
+
+            // Add alias: /alias <project> <alias>
+            [project_name, alias] => {
+                // Check if alias conflicts with existing project name or alias
+                match self.store.alias_exists(alias) {
+                    Ok(true) => {
+                        self.messages.push(Message::system(
+                            format!("Alias '{}' is already in use", alias)
+                        ));
+                        return;
+                    }
+                    Err(e) => {
+                        self.messages.push(Message::system(format!("Error checking alias: {}", e)));
+                        return;
+                    }
+                    Ok(false) => {}
+                }
+
+                // Load project
+                match self.store.find_project_by_name_or_alias(project_name) {
+                    Ok(Some(mut project)) => {
+                        // Add alias
+                        match project.add_alias(alias.to_string()) {
+                            Ok(_) => {
+                                // Save project
+                                match self.store.save_project(&project) {
+                                    Ok(_) => {
+                                        self.messages.push(Message::system(
+                                            format!("Added alias '{}' for '{}'", alias, project.name)
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.messages.push(Message::system(
+                                            format!("Failed to save project: {}", e)
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.messages.push(Message::system(format!("Error: {}", e)));
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        self.messages.push(Message::system(
+                            format!("Project not found: {}", project_name)
+                        ));
+                    }
+                    Err(e) => {
+                        self.messages.push(Message::system(format!("Error: {}", e)));
+                    }
+                }
+            }
+
+            // Invalid syntax
+            _ => {
+                self.messages.push(Message::system("Usage: /alias [project] [alias]"));
+            }
+        }
+    }
+
+    /// Handle /unalias command - remove an alias.
+    ///
+    /// Usage: `/unalias <alias>`
+    pub(super) fn handle_unalias(&mut self, alias: &str) {
+        if alias.is_empty() {
+            self.messages.push(Message::system("Usage: /unalias <alias>"));
+            return;
+        }
+
+        match self.store.load_all_projects() {
+            Ok(projects) => {
+                let mut found = false;
+
+                for mut project in projects.into_values() {
+                    if project.remove_alias(alias) {
+                        found = true;
+
+                        match self.store.save_project(&project) {
+                            Ok(_) => {
+                                self.messages.push(Message::system(
+                                    format!("Removed alias '{}' from '{}'", alias, project.name)
+                                ));
+                            }
+                            Err(e) => {
+                                self.messages.push(Message::system(
+                                    format!("Failed to save project: {}", e)
+                                ));
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                if !found {
+                    self.messages.push(Message::system(
+                        format!("Alias not found: {}", alias)
+                    ));
+                }
+            }
+            Err(e) => {
+                self.messages.push(Message::system(format!("Error loading projects: {}", e)));
+            }
+        }
     }
 }

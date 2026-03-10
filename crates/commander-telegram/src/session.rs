@@ -38,6 +38,16 @@ pub struct UserSession {
     pub thread_id: Option<ThreadId>,
     /// Worktree info (if session uses git worktree).
     pub worktree_info: Option<WorktreeInfo>,
+    /// Daemon session ID (if the daemon is running and owns this session).
+    pub daemon_session_id: Option<String>,
+    /// Timestamp when the most recent user message was sent (for latency calculation).
+    pub send_time: Option<std::time::Instant>,
+    /// Adapter type for this session (e.g. "claude-code", "mpm", "unknown").
+    pub adapter_type: String,
+    /// Message ID of the original user message for this response cycle (for reactions).
+    pub original_message_id: Option<MessageId>,
+    /// Whether the chat context is a private chat (for message effects).
+    pub is_private_chat: bool,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -155,6 +165,11 @@ impl UserSession {
             last_incremental_summary_line_count: 0,
             thread_id: None,
             worktree_info: None,
+            daemon_session_id: None,
+            send_time: None,
+            adapter_type: "claude-code".to_string(),
+            original_message_id: None,
+            is_private_chat: false,
         }
     }
 
@@ -182,6 +197,11 @@ impl UserSession {
             last_incremental_summary_line_count: 0,
             thread_id: Some(thread_id),
             worktree_info: None,
+            daemon_session_id: None,
+            send_time: None,
+            adapter_type: "claude-code".to_string(),
+            original_message_id: None,
+            is_private_chat: false,
         }
     }
 
@@ -195,6 +215,8 @@ impl UserSession {
         self.last_progress_line_count = 0;
         self.is_summarizing = false;
         self.last_incremental_summary_line_count = 0;
+        self.send_time = None;
+        self.original_message_id = None;
     }
 
     /// Start collecting a response for a query.
@@ -208,6 +230,7 @@ impl UserSession {
         self.last_progress_line_count = 0;
         self.is_summarizing = false;
         self.last_incremental_summary_line_count = 0;
+        self.send_time = Some(Instant::now());
     }
 
     /// Add new lines to the response buffer.

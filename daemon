@@ -1,0 +1,8 @@
+#!/bin/bash
+# Daemon-specific convenience script
+# Usage: ./daemon start, ./daemon stop, ./daemon status
+
+set -euo pipefail
+
+# Just delegate to the ai script with daemon prefix
+exec ./ai daemon "$@"

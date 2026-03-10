@@ -18,6 +18,7 @@ mod helpers;
 mod input;
 mod inspect;
 mod messaging;
+mod options;
 mod scroll;
 mod sessions;
 mod ui;

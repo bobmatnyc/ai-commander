@@ -236,6 +236,34 @@ pub fn is_claude_ready(output: &str) -> bool {
     has_ready_indicator || has_bypass_hint
 }
 
+/// Check if an MPM (claude-mpm) session is ready for input (idle at prompt).
+///
+/// Detects MPM-specific idle patterns:
+/// - "PM ready" — explicit ready message
+/// - "awaiting instructions" — explicit idle message
+/// - "[IDLE]" — explicit idle marker
+/// - A bare `>` prompt on its own line
+pub fn is_mpm_ready(output: &str) -> bool {
+    let lines: Vec<&str> = output
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(10)
+        .collect();
+
+    if lines.is_empty() {
+        return false;
+    }
+
+    lines.iter().take(5).any(|l| {
+        let lower = l.to_lowercase();
+        lower.contains("pm ready")
+            || lower.contains("awaiting instructions")
+            || l.contains("[IDLE]")
+            || l.trim() == ">"
+    })
+}
+
 /// Detect the adapter type from screen content.
 ///
 /// Examines the output to determine if this is a Claude Code session,

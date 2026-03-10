@@ -29,9 +29,20 @@ impl App {
         let projects = self.store.load_all_projects()
             .map_err(|e| format!("Failed to load projects: {}", e))?;
 
-        // Try 1: Find registered project by name
+        // Try 1: Find registered project by name, ID, or alias
+        let connected_via_alias = if projects.values()
+            .any(|p| p.name == base_name || p.id.as_str() == base_name)
+        {
+            None
+        } else {
+            // Check if it's an alias
+            projects.values()
+                .find(|p| p.aliases.contains(&base_name.to_string()))
+                .map(|_| base_name.to_string())
+        };
+
         if let Some(project) = projects.values()
-            .find(|p| p.name == base_name || p.id.as_str() == base_name)
+            .find(|p| p.matches(base_name))
         {
             // Validate project path still exists and is accessible
             validate_project_path(&project.path)?;
@@ -48,7 +59,13 @@ impl App {
                     let adapter = tmux.capture_output(&session_name, None, Some(50))
                         .map(|output| commander_core::detect_adapter(&output))
                         .unwrap_or(commander_core::Adapter::Unknown);
-                    self.messages.push(Message::system(format!("{} Connected to '{}'", adapter.indicator(), project.name)));
+
+                    let connection_msg = if let Some(alias) = &connected_via_alias {
+                        format!("{} Connected to '{}' (alias: {})", adapter.indicator(), project.name, alias)
+                    } else {
+                        format!("{} Connected to '{}'", adapter.indicator(), project.name)
+                    };
+                    self.messages.push(Message::system(connection_msg));
                     return Ok(());
                 }
 
@@ -79,7 +96,12 @@ impl App {
                     self.project = Some(project.name.clone());
                     self.project_path = Some(project.path.clone());
                     // New session likely Claude adapter (just started an adapter)
-                    self.messages.push(Message::system(format!("[Claude] Started and connected to '{}'", project.name)));
+                    let connection_msg = if let Some(alias) = &connected_via_alias {
+                        format!("[Claude] Started and connected to '{}' (alias: {})", project.name, alias)
+                    } else {
+                        format!("[Claude] Started and connected to '{}'", project.name)
+                    };
+                    self.messages.push(Message::system(connection_msg));
                     return Ok(());
                 }
             }
