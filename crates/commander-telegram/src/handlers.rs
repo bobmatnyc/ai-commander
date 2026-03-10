@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, ThreadId};
+use teloxide::types::{CallbackQuery, ThreadId};
 use teloxide::utils::command::BotCommands;
 use tracing::{debug, error, info, warn};
 
@@ -15,7 +15,7 @@ use crate::state::TelegramState;
 #[command(rename_rule = "lowercase", description = "Available commands:")]
 pub enum Command {
     #[command(description = "Start the bot and get help")]
-    Start,
+    Start(String),
 
     #[command(description = "Show help message")]
     Help,
@@ -47,11 +47,14 @@ pub enum Command {
     #[command(description = "Show current connection status")]
     Status,
 
-    #[command(description = "List available projects and sessions")]
+    #[command(description = "List available projects and sessions with deep links")]
     List,
 
     #[command(description = "List available projects and sessions (alias for /list)")]
     Ls,
+
+    #[command(description = "Generate a shareable deep link for a session: /link <session>")]
+    Link(String),
 
     #[command(description = "Enable group mode for this supergroup")]
     GroupMode,
@@ -63,12 +66,66 @@ pub enum Command {
     Topics,
 }
 
-/// Handle the /start command.
+/// Handle the /start command with optional deep link parameter.
 pub async fn handle_start(
     bot: Bot,
     msg: Message,
     state: Arc<TelegramState>,
+    args: String,
 ) -> ResponseResult<()> {
+    // Parse deep link payload
+    let payload = args.trim();
+
+    // Check if this is a deep link connection
+    if let Some(session_name) = payload.strip_prefix("connect_") {
+        info!(chat_id = %msg.chat.id.0, session = %session_name, "Deep link connection attempt");
+
+        // Check authorization first
+        if !state.is_authorized(msg.chat.id.0).await {
+            bot.send_message(
+                msg.chat.id,
+                "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+                Get a pairing code by running <code>/telegram</code> in the Commander CLI.\n\n\
+                After pairing, you can click the link again to connect.",
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+            return Ok(());
+        }
+
+        return handle_deep_link_connect(bot, msg, state, session_name).await;
+    }
+
+    // Check if this is a deep link stop
+    if let Some(session_name) = payload.strip_prefix("stop_") {
+        info!(chat_id = %msg.chat.id.0, session = %session_name, "Deep link stop attempt");
+
+        // Check authorization first
+        if !state.is_authorized(msg.chat.id.0).await {
+            bot.send_message(
+                msg.chat.id,
+                "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+                Get a pairing code by running <code>/telegram</code> in the Commander CLI.\n\n\
+                After pairing, you can click the link again to stop the session.",
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+            return Ok(());
+        }
+
+        return handle_deep_link_stop(bot, msg, state, session_name).await;
+    }
+
+    // Show status if authorized
+    if state.is_authorized(msg.chat.id.0).await {
+        if state.get_session_info(msg.chat.id).await.is_some() {
+            return handle_status(bot, msg, state).await;
+        } else {
+            return handle_list(bot, msg, state).await;
+        }
+    }
+
+    // Not authorized — show welcome/pairing instructions
     let welcome = format!(
         "Welcome to Commander Bot! 🚀\n\n\
         I can help you interact with AI coding sessions from anywhere.\n\n\
@@ -90,6 +147,179 @@ pub async fn handle_start(
         .await?;
 
     info!(chat_id = %msg.chat.id, user = ?msg.from.as_ref().map(|u| &u.username), "User started bot");
+    Ok(())
+}
+
+/// Handle deep link connection from /start command.
+async fn handle_deep_link_connect(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    session_name: &str,
+) -> ResponseResult<()> {
+    // Validate session name (alphanumeric, dash, underscore only)
+    if !session_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Invalid session name: '{}'\n\nSession names can only contain letters, numbers, dashes, and underscores.", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Get list of sessions and validate the session exists
+    let sessions = state.list_tmux_sessions_with_status();
+    let session_exists = sessions.iter().any(|(name, _, _, _)| {
+        let display_name = name.strip_prefix("commander-").unwrap_or(name);
+        display_name == session_name
+    });
+
+    if !session_exists {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Session '{}' not found.\n\nUse /list to see available sessions.", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Check if already connected to this session
+    if let Some((current_project, _)) = state.get_session_info(msg.chat.id).await {
+        if current_project == session_name {
+            bot.send_message(
+                msg.chat.id,
+                format!("✅ Already connected to <b>{}</b>", session_name)
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+            return Ok(());
+        }
+
+        // Disconnect from current session
+        let _ = state.disconnect(msg.chat.id).await;
+    }
+
+    // Connect to the session
+    match state.connect_session(msg.chat.id, session_name).await {
+        Ok((connected_name, tool_id)) => {
+            let adapter_name = adapter_display_name(&tool_id);
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "✅ Connected to <b>{}</b> via deep link!\n\n\
+                    You can now send messages to interact with {}.",
+                    connected_name, adapter_name
+                )
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+
+            info!(
+                chat_id = %msg.chat.id.0,
+                session = %session_name,
+                "Deep link connection successful"
+            );
+        }
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Failed to connect to '{}': {}", session_name, e)
+            ).await?;
+
+            error!(
+                chat_id = %msg.chat.id.0,
+                session = %session_name,
+                error = %e,
+                "Deep link connection failed"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle deep link stop from /start command.
+async fn handle_deep_link_stop(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    session_name: &str,
+) -> ResponseResult<()> {
+    // Validate session name (alphanumeric, dash, underscore only)
+    if !session_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Invalid session name: '{}'", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Get list of sessions and validate the session exists
+    let sessions = state.list_tmux_sessions_with_status();
+    let session_exists = sessions.iter().any(|(name, _, _, _)| {
+        let display_name = name.strip_prefix("commander-").unwrap_or(name);
+        display_name == session_name
+    });
+
+    if !session_exists {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Session '{}' not found.", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Get tmux orchestrator
+    let tmux = match state.tmux() {
+        Some(t) => t,
+        None => {
+            bot.send_message(msg.chat.id, "❌ tmux not available.").await?;
+            return Ok(());
+        }
+    };
+
+    // Stop the session
+    let full_session = format!("commander-{}", session_name);
+
+    // Check if session exists
+    if !tmux.session_exists(&full_session) {
+        bot.send_message(
+            msg.chat.id,
+            format!("❌ Session '{}' not found.", session_name)
+        ).await?;
+        return Ok(());
+    }
+
+    // Destroy the tmux session
+    match tmux.destroy_session(&full_session) {
+        Ok(_) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("🛑 Stopped session <b>{}</b>", html_escape(session_name))
+            )
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await?;
+
+            info!(
+                chat_id = %msg.chat.id.0,
+                session = %session_name,
+                "Deep link stop successful"
+            );
+        }
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Failed to stop '{}': {}", session_name, e)
+            )
+            .await?;
+
+            error!(
+                chat_id = %msg.chat.id.0,
+                session = %session_name,
+                error = %e,
+                "Deep link stop failed"
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -475,6 +705,18 @@ pub async fn handle_disconnect(
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     match state.disconnect(msg.chat.id).await {
         Ok(Some(project_name)) => {
             bot.send_message(
@@ -704,6 +946,18 @@ pub async fn handle_status(
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     let status = if let Some((project_name, project_path, tool_id, is_waiting, pending_query, screen_preview)) =
         state.get_session_status(msg.chat.id).await
     {
@@ -794,12 +1048,42 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Handle the /list command - list tmux sessions with status info.
+/// Generate a deep link for connecting to a session.
+async fn generate_session_link(bot: &Bot, session_name: &str) -> String {
+    let bot_username = match bot.get_me().await {
+        Ok(me) => me.username().to_string(),
+        Err(_) => "commander".to_string(), // Fallback if can't get username
+    };
+    format!("https://t.me/{}?start=connect_{}", bot_username, session_name)
+}
+
+/// Generate a deep link for stopping a session.
+async fn generate_stop_link(bot: &Bot, session_name: &str) -> String {
+    let bot_username = match bot.get_me().await {
+        Ok(me) => me.username().to_string(),
+        Err(_) => "commander".to_string(), // Fallback if can't get username
+    };
+    format!("https://t.me/{}?start=stop_{}", bot_username, session_name)
+}
+
+/// Handle the /list command - list tmux sessions with status info and deep links.
 pub async fn handle_list(
     bot: Bot,
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     let sessions = state.list_tmux_sessions_with_status();
 
     if sessions.is_empty() {
@@ -813,8 +1097,7 @@ pub async fn handle_list(
         .await
         .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
 
-    let mut text = String::from("<b>Sessions:</b>\n\n");
-    let mut keyboard_buttons = Vec::new();
+    let mut text = String::from("🤖 <b>Available Sessions</b>\n\nTap a link to connect or stop:\n\n");
 
     for (name, is_commander, created_at, preview) in &sessions {
         let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
@@ -849,41 +1132,107 @@ pub async fn handle_list(
 
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
 
-        // Add session info to text
+        // Generate deep links for this session
+        let connect_link = generate_session_link(&bot, display_name).await;
+        let stop_link = generate_stop_link(&bot, display_name).await;
+
+        // Add session info to text with prominent deep links for both connect and stop
         text.push_str(&format!(
-            "{} <b>{}</b>\n   {} | started {}\n\n",
-            marker,
+            "• <b>{}</b> {} {}\n  Started {}\n  👉 <a href=\"{}\">Connect</a> | 🛑 <a href=\"{}\">Stop</a>\n\n",
             html_escape(display_name),
             status,
-            age_str
+            marker,
+            age_str,
+            connect_link,
+            stop_link
         ));
-
-        // Create inline keyboard button with stripped session name
-        // Strip "commander-" prefix for the callback data so /connect works correctly
-        let button_text = format!("{} {}", marker, display_name);
-        let callback_data = format!("connect:{}", display_name);
-
-        info!(
-            session_name = %name,
-            display_name = %display_name,
-            callback_data = %callback_data,
-            "Creating inline button for session"
-        );
-
-        keyboard_buttons.push(vec![InlineKeyboardButton::callback(
-            button_text,
-            callback_data,
-        )]);
     }
 
-    text.push_str("Tap a button to connect:");
-
-    let keyboard = InlineKeyboardMarkup::new(keyboard_buttons);
+    text.push_str("<i>💡 Tip: Bookmark these links for quick access!</i>");
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(keyboard)
         .await?;
+
+    Ok(())
+}
+
+/// Handle the /link command - generate a shareable deep link for a session.
+pub async fn handle_link(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    args: String,
+) -> ResponseResult<()> {
+    // Check authorization first
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Parse session name from command
+    let session_name = args.trim();
+
+    if session_name.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "Usage: <code>/link &lt;session&gt;</code>\n\n\
+            Example: <code>/link production</code>\n\n\
+            This will generate a shareable deep link that auto-connects to the session.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Validate session exists
+    let sessions = state.list_tmux_sessions_with_status();
+    let session_exists = sessions.iter().any(|(name, _, _, _)| {
+        let display_name = name.strip_prefix("commander-").unwrap_or(name);
+        display_name == session_name
+    });
+
+    if !session_exists {
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "❌ Session '{}' not found.\n\nUse /list to see available sessions.",
+                html_escape(session_name)
+            ),
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Generate and send link
+    let link = generate_session_link(&bot, session_name).await;
+
+    bot.send_message(
+        msg.chat.id,
+        format!(
+            "🔗 <b>Deep Link for '{}'</b>\n\n\
+            <a href=\"{}\">{}</a>\n\n\
+            <i>Click to connect, or copy and share this link!</i>",
+            html_escape(session_name),
+            link,
+            link
+        ),
+    )
+    .parse_mode(teloxide::types::ParseMode::Html)
+    .await?;
+
+    info!(
+        chat_id = %msg.chat.id.0,
+        session = %session_name,
+        "Generated deep link for session"
+    );
 
     Ok(())
 }
@@ -894,6 +1243,18 @@ pub async fn handle_message(
     msg: Message,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
+    // Check authorization first (defense-in-depth)
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "⛔ Not authorized. Use <code>/pair &lt;code&gt;</code> first.\n\n\
+            Get a pairing code by running <code>/telegram</code> in the Commander CLI.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
     // Extract text and thread_id early to avoid borrow issues
     let text = match msg.text() {
         Some(t) => t.to_string(),
@@ -966,9 +1327,12 @@ pub async fn handle_message(
         .await?;
 
     // Send message to the project with message ID for reply threading
+    let is_private = msg.chat.is_private();
     match state.send_message(msg.chat.id, &text, Some(msg.id)).await {
         Ok(()) => {
             debug!(chat_id = %msg.chat.id, message = %text, "Message sent to project");
+            // Store reaction metadata so the poll loop can react to the user's message on completion.
+            state.set_session_reaction_meta(msg.chat.id.0, Some(msg.id), is_private).await;
             // Response will be polled and sent back by the polling task
         }
         Err(e) => {
@@ -1046,11 +1410,15 @@ async fn handle_topic_message(
     }
 
     // Send typing indicator to the topic
-    let _ = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+    if let Err(e) = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .message_thread_id(thread_id)
-        .await;
+        .await
+    {
+        warn!(chat_id = %msg.chat.id, thread_id = ?thread_id, error = %e, "Failed to send typing indicator");
+    }
 
     // Send message to the topic's session
+    let session_key = TelegramState::session_key(msg.chat.id.0, Some(thread_id));
     match state.send_message_to_topic(msg.chat.id, thread_id, text, Some(msg.id)).await {
         Ok(()) => {
             debug!(
@@ -1059,6 +1427,8 @@ async fn handle_topic_message(
                 message = %text,
                 "Message sent to topic session"
             );
+            // Store reaction metadata (topics are group chats — not private).
+            state.set_session_reaction_meta(session_key, Some(msg.id), false).await;
         }
         Err(e) => {
             bot.send_message(msg.chat.id, format!("❌ Error: {}", e))
@@ -1570,20 +1940,88 @@ pub async fn handle_send(
     Ok(())
 }
 
+/// Handle option selection from inline keyboard buttons.
+async fn handle_option_selection(
+    bot: Bot,
+    q: CallbackQuery,
+    state: Arc<TelegramState>,
+    option_key: &str,
+) -> ResponseResult<()> {
+    let Some(msg) = q.message.as_ref() else {
+        return Ok(());
+    };
+
+    let chat_id = msg.chat().id;
+
+    // Check if user has active session
+    if !state.has_session(chat_id).await {
+        bot.send_message(
+            chat_id,
+            "Not connected to a session. Use /connect first.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Send the selected option to Claude
+    // Just send the key (A, B, 1, 2, y, n) - Claude understands
+    match state.send_message_direct(chat_id, option_key, Some(msg.id())).await {
+        Ok(()) => {
+            // Confirm selection with a notification (not a full message)
+            if let Err(e) = bot.answer_callback_query(q.id.clone())
+                .text(format!("Selected: {}", option_key))
+                .await
+            {
+                warn!(error = %e, "Failed to send callback notification");
+            }
+
+            info!(chat_id = %chat_id.0, option = %option_key, "Option selected");
+        }
+        Err(e) => {
+            bot.send_message(
+                chat_id,
+                format!("Failed to send selection: {}", e),
+            )
+            .await?;
+
+            error!(chat_id = %chat_id.0, error = %e, "Failed to send option selection");
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle callback queries from inline keyboard buttons.
 pub async fn handle_callback(
     bot: Bot,
     q: CallbackQuery,
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
-    let Some(data) = &q.data else {
+    info!(
+        callback_id = %q.id,
+        data = ?q.data,
+        user_id = ?q.from.id,
+        "Callback query received"
+    );
+
+    // Always acknowledge callback to remove loading state, even if data is missing
+    if let Err(e) = bot.answer_callback_query(q.id.clone()).await {
+        error!(callback_id = %q.id, error = %e, "Failed to acknowledge callback");
+        return Err(e);
+    }
+
+    let Some(data) = q.data.clone() else {
+        warn!(callback_id = %q.id, "Callback has no data");
         return Ok(());
     };
 
-    // Acknowledge callback immediately to remove loading state
-    bot.answer_callback_query(&q.id).await?;
-
     // Parse callback data
+
+    // Handle option selection
+    if let Some(option_key) = data.strip_prefix("option:") {
+        return handle_option_selection(bot, q, state, option_key).await;
+    }
+
     if let Some(session) = data.strip_prefix("connect:") {
         let Some(msg) = q.message.as_ref() else {
             return Ok(());
@@ -1666,17 +2104,17 @@ pub async fn handle_groupmode(
 
     // Extract is_forum from the supergroup struct
     let is_forum = match &chat.kind {
-        teloxide::types::ChatKind::Public(public) => {
+        teloxide::types::ChatFullInfoKind::Public(public) => {
             match &public.kind {
-                teloxide::types::PublicChatKind::Supergroup(sg) => sg.is_forum,
+                teloxide::types::ChatFullInfoPublicKind::Supergroup(sg) => sg.is_forum,
                 _ => false,
             }
         }
         _ => false,
     };
 
-    let is_supergroup = matches!(&chat.kind, teloxide::types::ChatKind::Public(ref p)
-        if matches!(p.kind, teloxide::types::PublicChatKind::Supergroup(_)));
+    let is_supergroup = matches!(&chat.kind, teloxide::types::ChatFullInfoKind::Public(ref p)
+        if matches!(p.kind, teloxide::types::ChatFullInfoPublicKind::Supergroup(_)));
 
     if !is_supergroup {
         bot.send_message(
@@ -1770,12 +2208,7 @@ pub async fn handle_topic(
     }
 
     // Create the forum topic
-    // Default icon color: 0x6FB9F0 (blue) = 7322096
-    let icon_color: u32 = 7322096;
-
-    // teloxide 0.13 create_forum_topic requires icon_custom_emoji_id
-    // We'll use an empty string to get the default icon
-    let topic_result = bot.create_forum_topic(msg.chat.id, session_name, icon_color, "")
+    let topic_result = bot.create_forum_topic(msg.chat.id, session_name)
         .await;
 
     match topic_result {
@@ -1890,7 +2323,7 @@ pub async fn handle_command(
     state: Arc<TelegramState>,
 ) -> ResponseResult<()> {
     match cmd {
-        Command::Start => handle_start(bot, msg, state).await,
+        Command::Start(args) => handle_start(bot, msg, state, args).await,
         Command::Help => handle_help(bot, msg).await,
         Command::Pair(code) => handle_pair(bot, msg, state, code).await,
         Command::Connect(project) => handle_connect(bot, msg, state, project).await,
@@ -1904,6 +2337,7 @@ pub async fn handle_command(
         Command::Status => handle_status(bot, msg, state).await,
         Command::List => handle_list(bot, msg, state).await,
         Command::Ls => handle_list(bot, msg, state).await,
+        Command::Link(session) => handle_link(bot, msg, state, session).await,
         Command::GroupMode => handle_groupmode(bot, msg, state).await,
         Command::Topic(session) => handle_topic(bot, msg, state, session).await,
         Command::Topics => handle_topics(bot, msg, state).await,

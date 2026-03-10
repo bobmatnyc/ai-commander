@@ -1,0 +1,7 @@
+#!/bin/bash
+# Quick pairing code generator
+# Usage: ./pair
+
+set -euo pipefail
+
+exec ./ai pair "$@"

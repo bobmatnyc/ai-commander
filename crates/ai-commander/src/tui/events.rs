@@ -221,38 +221,76 @@ fn run_loop(
                             }
                         }
                         ViewMode::Normal => {
-                            // Normal mode key handling
-                            match key.code {
-                                KeyCode::Enter => app.submit(),
-                                KeyCode::Tab => app.complete_command(),
-                                KeyCode::Char(c) => {
-                                    app.reset_completions();
-                                    app.enter_char(c);
-                                }
-                                KeyCode::Backspace => {
-                                    app.reset_completions();
-                                    app.delete_char();
-                                }
-                                KeyCode::Left => app.move_cursor_left(),
-                                KeyCode::Right => app.move_cursor_right(),
-                                KeyCode::Up => app.history_prev(),
-                                KeyCode::Down => app.history_next(),
-                                KeyCode::PageUp => app.scroll_page_up(10),
-                                KeyCode::PageDown => app.scroll_page_down(10),
-                                KeyCode::Esc => {
-                                    if app.is_working {
-                                        app.stop_working();
-                                    } else {
-                                        app.should_quit = true;
+                            // Check if in option selection mode first
+                            if app.option_mode {
+                                match key.code {
+                                    KeyCode::Up | KeyCode::Char('k') => {
+                                        app.option_select_prev();
                                     }
+                                    KeyCode::Down | KeyCode::Char('j') => {
+                                        app.option_select_next();
+                                    }
+                                    KeyCode::Enter => {
+                                        if let Some(selection) = app.confirm_option_selection() {
+                                            // Send selection to Claude
+                                            if let Err(e) = app.send_message(&selection) {
+                                                app.messages.push(super::app::Message::system(
+                                                    format!("Error sending selection: {}", e)
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Esc => {
+                                        app.exit_option_mode();
+                                    }
+                                    KeyCode::Char(c) if c.is_alphanumeric() => {
+                                        // Quick-select by letter/number
+                                        if app.option_quick_select(c) {
+                                            if let Some(selection) = app.confirm_option_selection() {
+                                                if let Err(e) = app.send_message(&selection) {
+                                                    app.messages.push(super::app::Message::system(
+                                                        format!("Error sending selection: {}", e)
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::Home => {
-                                    app.cursor_pos = 0;
+                            } else {
+                                // Normal mode key handling
+                                match key.code {
+                                    KeyCode::Enter => app.submit(),
+                                    KeyCode::Tab => app.complete_command(),
+                                    KeyCode::Char(c) => {
+                                        app.reset_completions();
+                                        app.enter_char(c);
+                                    }
+                                    KeyCode::Backspace => {
+                                        app.reset_completions();
+                                        app.delete_char();
+                                    }
+                                    KeyCode::Left => app.move_cursor_left(),
+                                    KeyCode::Right => app.move_cursor_right(),
+                                    KeyCode::Up => app.history_prev(),
+                                    KeyCode::Down => app.history_next(),
+                                    KeyCode::PageUp => app.scroll_page_up(10),
+                                    KeyCode::PageDown => app.scroll_page_down(10),
+                                    KeyCode::Esc => {
+                                        if app.is_working {
+                                            app.stop_working();
+                                        } else {
+                                            app.should_quit = true;
+                                        }
+                                    }
+                                    KeyCode::Home => {
+                                        app.cursor_pos = 0;
+                                    }
+                                    KeyCode::End => {
+                                        app.cursor_pos = app.input.len();
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::End => {
-                                    app.cursor_pos = app.input.len();
-                                }
-                                _ => {}
                             }
                         }
                     }

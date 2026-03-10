@@ -27,22 +27,40 @@ fn draw_normal(frame: &mut Frame, app: &mut App) {
     // Check if we need extra space for command hint
     let hint_height = if app.get_command_hint().is_some() { 1 } else { 0 };
 
+    // Check if we need extra space for option selector
+    let option_height = if app.option_mode && app.pending_options.is_some() {
+        let num_options = app.pending_options.as_ref().unwrap().options.len();
+        // 2 lines for borders + number of options, capped at 10
+        (num_options + 2).min(10) as u16
+    } else {
+        0
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                       // Header
-            Constraint::Min(5),                          // Output area
-            Constraint::Length(1),                       // Status/Progress bar
-            Constraint::Length(5 + hint_height),         // Input area + hint (increased for wrapping)
-            Constraint::Length(1),                       // Footer
+            Constraint::Length(1),                                      // Header
+            Constraint::Min(5),                                         // Output area
+            Constraint::Length(1),                                      // Status/Progress bar
+            Constraint::Length(option_height),                          // Option selector (if active)
+            Constraint::Length(5 + hint_height),                        // Input area + hint (increased for wrapping)
+            Constraint::Length(1),                                      // Footer
         ])
         .split(frame.area());
 
     draw_header(frame, app, chunks[0]);
     draw_output(frame, app, chunks[1]);
     draw_status(frame, app, chunks[2]);
-    draw_input(frame, app, chunks[3]);
-    draw_footer(frame, app, chunks[4]);
+
+    // Draw option selector if active
+    if app.option_mode && option_height > 0 {
+        draw_option_selector(frame, app, chunks[3]);
+        draw_input(frame, app, chunks[4]);
+        draw_footer(frame, app, chunks[5]);
+    } else {
+        draw_input(frame, app, chunks[4]);
+        draw_footer(frame, app, chunks[5]);
+    }
 
     // Store output area rect for click detection
     app.output_area = Some(chunks[1]);
@@ -363,6 +381,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let input_style = match app.input_mode {
         InputMode::Normal => Style::default(),
         InputMode::Scrolling => Style::default().fg(Color::DarkGray),
+        InputMode::SelectingOption => Style::default().fg(Color::Cyan),
     };
 
     let prompt = match &app.project {
@@ -432,7 +451,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         "no project"
     };
 
-    let keys = if app.input_mode == InputMode::Scrolling {
+    let keys = if app.option_mode {
+        "↑/↓: navigate | Enter: confirm | Esc: cancel | A/B/1/2: quick select"
+    } else if app.input_mode == InputMode::Scrolling {
         "j/k scroll | Enter: back to input | q: quit"
     } else {
         "↑/↓: history | PgUp/PgDn: scroll | /help | Ctrl+C: quit"
@@ -443,6 +464,59 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
     frame.render_widget(footer, area);
+}
+
+/// Draw the option selector when in option selection mode.
+fn draw_option_selector(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(opts) = &app.pending_options {
+        // Create bordered block
+        let title = if let Some(q) = &opts.question {
+            format!(" {} ", q.chars().take(60).collect::<String>())
+        } else {
+            " Select an option ".to_string()
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(title);
+
+        // Build option items
+        let items: Vec<ListItem> = opts.options
+            .iter()
+            .enumerate()
+            .map(|(i, opt)| {
+                let is_selected = i == app.option_selected_index;
+
+                // Format based on option format
+                let prefix = match opts.format {
+                    super::options::OptionFormat::Letters => format!("{})", opt.key),
+                    super::options::OptionFormat::Numbers => format!("{}.", opt.key),
+                    super::options::OptionFormat::YesNo => opt.key.clone(),
+                };
+
+                // Selection marker
+                let marker = if is_selected { ">" } else { " " };
+
+                // Full text
+                let text = format!("{} [{}] {}", marker, prefix, opt.label);
+
+                // Style
+                let style = if is_selected {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+
+                ListItem::new(text).style(style)
+            })
+            .collect();
+
+        let list = List::new(items).block(block);
+        frame.render_widget(list, area);
+    }
 }
 
 #[cfg(test)]

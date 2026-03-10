@@ -187,6 +187,12 @@ pub struct Project {
     #[serde(default)]
     pub thread: Vec<ThreadMessage>,
 
+    /// Aliases for this project (e.g., ["prod", "staging"]).
+    /// Maximum 10 aliases per project.
+    /// Aliases must be alphanumeric with optional dash/underscore.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+
     /// When the project was created.
     pub created_at: DateTime<Utc>,
 
@@ -213,9 +219,90 @@ impl Project {
             pending_events: Vec::new(),
             event_history: Vec::new(),
             thread: Vec::new(),
+            aliases: Vec::new(),
             created_at: Utc::now(),
             last_activity: None,
         }
+    }
+
+    /// Validates an alias name.
+    ///
+    /// Aliases must be:
+    /// - Alphanumeric with optional dash/underscore
+    /// - Not empty
+    /// - Between 1 and 64 characters
+    fn validate_alias(alias: &str) -> Result<(), String> {
+        if alias.is_empty() {
+            return Err("Alias cannot be empty".to_string());
+        }
+
+        if alias.len() > 64 {
+            return Err("Alias cannot exceed 64 characters".to_string());
+        }
+
+        // Must be alphanumeric with optional dash/underscore (same rules as project names)
+        if !alias
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(
+                "Alias must be alphanumeric with optional dash or underscore".to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Adds an alias to this project.
+    ///
+    /// Returns an error if:
+    /// - Alias is invalid (validation failed)
+    /// - Alias already exists for this project
+    /// - Maximum alias count (10) exceeded
+    pub fn add_alias(&mut self, alias: String) -> Result<(), String> {
+        // Validate alias format
+        Self::validate_alias(&alias)?;
+
+        // Check if alias already exists
+        if self.aliases.contains(&alias) {
+            return Err(format!("Alias '{}' already exists for this project", alias));
+        }
+
+        // Check maximum alias count
+        if self.aliases.len() >= 10 {
+            return Err("Maximum 10 aliases per project".to_string());
+        }
+
+        self.aliases.push(alias);
+        self.aliases.sort();
+        self.touch();
+
+        Ok(())
+    }
+
+    /// Removes an alias from this project.
+    ///
+    /// Returns true if the alias was found and removed, false otherwise.
+    pub fn remove_alias(&mut self, alias: &str) -> bool {
+        if let Some(pos) = self.aliases.iter().position(|a| a == alias) {
+            self.aliases.remove(pos);
+            self.touch();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Checks if this project matches a name or alias.
+    ///
+    /// Matches against:
+    /// - Project name (exact match)
+    /// - Project ID (exact match)
+    /// - Any alias (exact match)
+    pub fn matches(&self, name_or_alias: &str) -> bool {
+        self.name == name_or_alias
+            || self.id.as_str() == name_or_alias
+            || self.aliases.iter().any(|a| a == name_or_alias)
     }
 
     /// Updates the project's last activity timestamp.
@@ -476,5 +563,176 @@ mod tests {
         assert_eq!(project.name, deserialized.name);
         assert_eq!(project.state, deserialized.state);
         assert_eq!(project.state_reason, deserialized.state_reason);
+    }
+
+    // === Alias Tests ===
+
+    #[test]
+    fn test_validate_alias_valid() {
+        assert!(Project::validate_alias("prod").is_ok());
+        assert!(Project::validate_alias("staging").is_ok());
+        assert!(Project::validate_alias("dev-1").is_ok());
+        assert!(Project::validate_alias("my_alias").is_ok());
+        assert!(Project::validate_alias("test123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_alias_empty() {
+        let result = Project::validate_alias("");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Alias cannot be empty");
+    }
+
+    #[test]
+    fn test_validate_alias_too_long() {
+        let long_alias = "a".repeat(65);
+        let result = Project::validate_alias(&long_alias);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Alias cannot exceed 64 characters");
+    }
+
+    #[test]
+    fn test_validate_alias_invalid_characters() {
+        let result = Project::validate_alias("prod@staging");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("alphanumeric with optional dash or underscore"));
+    }
+
+    #[test]
+    fn test_add_alias_success() {
+        let mut project = Project::new("/path", "test");
+
+        let result = project.add_alias("prod".to_string());
+        assert!(result.is_ok());
+        assert_eq!(project.aliases.len(), 1);
+        assert!(project.aliases.contains(&"prod".to_string()));
+    }
+
+    #[test]
+    fn test_add_alias_sorted() {
+        let mut project = Project::new("/path", "test");
+
+        project.add_alias("staging".to_string()).unwrap();
+        project.add_alias("prod".to_string()).unwrap();
+        project.add_alias("dev".to_string()).unwrap();
+
+        assert_eq!(project.aliases, vec!["dev", "prod", "staging"]);
+    }
+
+    #[test]
+    fn test_add_alias_duplicate() {
+        let mut project = Project::new("/path", "test");
+        project.add_alias("prod".to_string()).unwrap();
+
+        let result = project.add_alias("prod".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already exists"));
+    }
+
+    #[test]
+    fn test_add_alias_max_limit() {
+        let mut project = Project::new("/path", "test");
+
+        // Add 10 aliases (maximum)
+        for i in 0..10 {
+            project.add_alias(format!("alias{}", i)).unwrap();
+        }
+
+        // Try to add 11th alias
+        let result = project.add_alias("alias11".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Maximum 10 aliases"));
+    }
+
+    #[test]
+    fn test_add_alias_invalid_format() {
+        let mut project = Project::new("/path", "test");
+
+        let result = project.add_alias("prod@staging".to_string());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("alphanumeric with optional dash or underscore"));
+    }
+
+    #[test]
+    fn test_remove_alias_success() {
+        let mut project = Project::new("/path", "test");
+        project.add_alias("prod".to_string()).unwrap();
+
+        let removed = project.remove_alias("prod");
+        assert!(removed);
+        assert!(project.aliases.is_empty());
+    }
+
+    #[test]
+    fn test_remove_alias_not_found() {
+        let mut project = Project::new("/path", "test");
+
+        let removed = project.remove_alias("nonexistent");
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_matches_by_name() {
+        let project = Project::new("/path", "test-project");
+        assert!(project.matches("test-project"));
+        assert!(!project.matches("other-project"));
+    }
+
+    #[test]
+    fn test_matches_by_id() {
+        let project = Project::new("/path", "test");
+        let id = project.id.as_str();
+
+        assert!(project.matches(id));
+    }
+
+    #[test]
+    fn test_matches_by_alias() {
+        let mut project = Project::new("/path", "test");
+        project.add_alias("prod".to_string()).unwrap();
+        project.add_alias("staging".to_string()).unwrap();
+
+        assert!(project.matches("prod"));
+        assert!(project.matches("staging"));
+        assert!(!project.matches("dev"));
+    }
+
+    #[test]
+    fn test_aliases_serialization_roundtrip() {
+        let mut project = Project::new("/path", "test");
+        project.add_alias("prod".to_string()).unwrap();
+        project.add_alias("staging".to_string()).unwrap();
+
+        let json = serde_json::to_string(&project).unwrap();
+        let deserialized: Project = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(project.aliases, deserialized.aliases);
+    }
+
+    #[test]
+    fn test_aliases_backward_compatible() {
+        // Old JSON without aliases field should deserialize with empty aliases
+        let json = r#"{
+            "id": "proj-123",
+            "path": "/path",
+            "name": "test",
+            "state": "idle",
+            "config_loaded": false,
+            "config": {},
+            "sessions": {},
+            "work_queue": [],
+            "completed_work": [],
+            "pending_events": [],
+            "event_history": [],
+            "thread": [],
+            "created_at": "2024-01-01T00:00:00Z"
+        }"#;
+
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert!(project.aliases.is_empty());
     }
 }

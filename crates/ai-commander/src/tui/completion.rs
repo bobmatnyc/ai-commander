@@ -7,9 +7,9 @@ use std::time::{Duration, SystemTime};
 
 /// Available slash commands for completion.
 pub const COMMANDS: &[&str] = &[
-    "/clear", "/connect", "/disconnect", "/help", "/inspect",
+    "/alias", "/clear", "/connect", "/disconnect", "/help", "/inspect",
     "/list", "/quit", "/rename", "/send", "/sessions", "/status",
-    "/stop", "/telegram",
+    "/stop", "/telegram", "/unalias",
 ];
 
 impl App {
@@ -136,9 +136,21 @@ impl App {
                 if input.ends_with(' ') && (input.contains("-a") || input.contains("-n")) {
                     return Vec::new();
                 }
-                self.complete_project_names(input)
+                self.complete_project_names_and_aliases(input)
             }
-            "/status" | "/s" => self.complete_project_names(input),
+            "/status" | "/s" => self.complete_project_names_and_aliases(input),
+            "/alias" => {
+                // First argument: project name/alias, second: new alias name
+                if parts.len() == 2 {
+                    self.complete_project_names(input)
+                } else {
+                    Vec::new()
+                }
+            }
+            "/unalias" => {
+                // Complete with existing aliases
+                self.complete_aliases(input)
+            }
             "/stop" => self.complete_session_names(input),
             _ => Vec::new()
         }
@@ -152,6 +164,39 @@ impl App {
         let prefix = parts.get(1).unwrap_or(&"");
 
         projects
+            .into_iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| format!("{} {}", command, name))
+            .collect()
+    }
+
+    /// Complete project names and aliases from state store.
+    fn complete_project_names_and_aliases(&mut self, input: &str) -> Vec<String> {
+        let (projects, aliases) = self.load_projects_and_aliases_cached();
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        let command = parts[0];
+        let prefix = parts.get(1).unwrap_or(&"");
+
+        let mut completions: Vec<String> = projects
+            .into_iter()
+            .chain(aliases)
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| format!("{} {}", command, name))
+            .collect();
+
+        completions.sort();
+        completions.dedup();
+        completions
+    }
+
+    /// Complete aliases only.
+    fn complete_aliases(&mut self, input: &str) -> Vec<String> {
+        let (_, aliases) = self.load_projects_and_aliases_cached();
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        let command = parts[0];
+        let prefix = parts.get(1).unwrap_or(&"");
+
+        aliases
             .into_iter()
             .filter(|name| name.starts_with(prefix))
             .map(|name| format!("{} {}", command, name))
@@ -220,6 +265,24 @@ impl App {
                 .map(|(_, projects)| projects.clone())
                 .unwrap_or_default()
         }
+    }
+
+    /// Load projects and aliases with caching (5 second TTL).
+    fn load_projects_and_aliases_cached(&mut self) -> (Vec<String>, Vec<String>) {
+        // Reuse projects cache
+        let projects = self.load_projects_cached();
+
+        // Load aliases
+        let aliases = self.store.load_all_projects()
+            .ok()
+            .map(|map| {
+                map.into_values()
+                    .flat_map(|p| p.aliases)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        (projects, aliases)
     }
 
     /// Load tmux sessions with caching (5 second TTL).

@@ -40,6 +40,7 @@ fuzzy-matcher = { workspace = true }
 
 # Optional dependencies (must be in [dependencies] section)
 commander-orchestrator = { path = "../commander-orchestrator", optional = true }
+commander-daemon = { path = "../commander-daemon" }
 
 [build-dependencies]
 chrono = { workspace = true }

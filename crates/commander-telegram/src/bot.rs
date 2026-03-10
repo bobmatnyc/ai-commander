@@ -3,13 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use commander_core::options::{DetectedOptions, OptionDetector, OptionFormat};
 use teloxide::dispatching::UpdateFilterExt;
 use teloxide::prelude::*;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use crate::error::{Result, TelegramError};
+use crate::features::{apply_expandable_blockquotes, split_message, FeatureSet, EFFECT_ID_CONFETTI};
 use crate::handlers::{handle_callback, handle_command, handle_message, Command};
 use crate::ngrok::NgrokTunnel;
 use crate::state::{create_shared_state, PollResult, TelegramState};
@@ -50,7 +53,17 @@ impl TelegramBot {
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_WEBHOOK_PORT);
 
-        let bot = Bot::new(token);
+        // Configure HTTP client with timeouts for better connection stability
+        // Use teloxide's net module to get the correct reqwest version
+        let client = teloxide::net::default_reqwest_settings()
+            .timeout(Duration::from_secs(120))          // Read timeout - long enough for getUpdates
+            .connect_timeout(Duration::from_secs(30))   // Connect timeout
+            .pool_idle_timeout(Duration::from_secs(90)) // Keep connections alive
+            .pool_max_idle_per_host(2)                  // Limit connection pool
+            .build()
+            .map_err(|e| TelegramError::BotStartFailed(format!("Failed to create HTTP client: {}", e)))?;
+
+        let bot = Bot::with_client(token, client);
         let state = create_shared_state(state_dir);
 
         Ok(Self {
@@ -148,6 +161,17 @@ impl TelegramBot {
             }
         }
 
+        // Cache bot identity once at startup — avoids repeated get_me() calls per message.
+        match self.bot.get_me().await {
+            Ok(me) => {
+                info!(username = %me.username(), "Bot identity cached");
+                self.state.set_bot_info(me).await;
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to cache bot identity; falling back to 'commander'");
+            }
+        }
+
         let bot = self.bot.clone();
         let state = Arc::clone(&self.state);
 
@@ -229,10 +253,14 @@ impl TelegramBot {
 
         info!("Bot is running! Send /start to begin.");
 
+        // Build dispatcher with error handler
         Dispatcher::builder(bot, handler)
             .default_handler(|upd| async move {
                 warn!("Unhandled update: {:?}", upd);
             })
+            .error_handler(teloxide::error_handlers::LoggingErrorHandler::with_custom_text(
+                "An error occurred in the dispatcher"
+            ))
             .enable_ctrlc_handler()
             .build()
             .dispatch()
@@ -265,9 +293,110 @@ impl TelegramBot {
     }
 }
 
+/// Create inline keyboard from detected options.
+fn create_option_keyboard(options: &DetectedOptions) -> InlineKeyboardMarkup {
+    let buttons: Vec<Vec<InlineKeyboardButton>> = options.options
+        .iter()
+        .map(|opt| {
+            let button_text = match options.format {
+                OptionFormat::Letters => format!("{}) {}", opt.key, opt.label),
+                OptionFormat::Numbers => format!("{}. {}", opt.key, opt.label),
+                OptionFormat::YesNo => opt.label.clone(),
+            };
+
+            // Callback data: "option:{key}"
+            let callback_data = format!("option:{}", opt.key);
+
+            vec![InlineKeyboardButton::callback(button_text, callback_data)]
+        })
+        .collect();
+
+    InlineKeyboardMarkup::new(buttons)
+}
+
+/// Send a message, splitting at newline boundaries if it exceeds `max_len` chars.
+///
+/// Returns the `MessageId` of the last chunk sent (used for reply threading on the final piece).
+async fn send_long_message(
+    bot: &Bot,
+    chat_id: teloxide::types::ChatId,
+    text: &str,
+    parse_mode: teloxide::types::ParseMode,
+    thread_id: Option<teloxide::types::ThreadId>,
+    reply_params: Option<teloxide::types::ReplyParameters>,
+    reply_markup: Option<teloxide::types::InlineKeyboardMarkup>,
+    disable_notification: bool,
+    message_effect_id: Option<&str>,
+    max_len: usize,
+) -> Result<Option<teloxide::types::MessageId>> {
+    use teloxide::types::LinkPreviewOptions;
+
+    let chunks = split_message(text, max_len);
+    let chunk_count = chunks.len();
+    let mut last_id = None;
+
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let is_last = i == chunk_count - 1;
+
+        let mut req = bot.send_message(chat_id, chunk)
+            .parse_mode(parse_mode)
+            .link_preview_options(LinkPreviewOptions {
+                is_disabled: true,
+                url: None,
+                prefer_small_media: false,
+                prefer_large_media: false,
+                show_above_text: false,
+            });
+
+        if let Some(tid) = thread_id {
+            req = req.message_thread_id(tid);
+        }
+
+        // Reply parameters and keyboard only on the last chunk.
+        if is_last {
+            if let Some(ref rp) = reply_params {
+                req = req.reply_parameters(rp.clone());
+            }
+            if let Some(ref kb) = reply_markup {
+                req = req.reply_markup(kb.clone());
+            }
+            if let Some(effect_id) = message_effect_id {
+                req = req.message_effect_id(teloxide::types::EffectId(effect_id.to_owned()));
+            }
+        }
+
+        if disable_notification {
+            req = req.disable_notification(true);
+        }
+
+        match req.await {
+            Ok(sent) => {
+                last_id = Some(sent.id);
+            }
+            Err(e) => {
+                warn!(chat_id = %chat_id.0, chunk = i, error = %e, "Failed to send message chunk");
+            }
+        }
+    }
+
+    Ok(last_id)
+}
+
+/// Add a reaction emoji to a message, logging warnings on failure (not fatal).
+async fn add_reaction(bot: &Bot, chat_id: teloxide::types::ChatId, message_id: teloxide::types::MessageId, emoji: &str) {
+    use teloxide::types::ReactionType;
+    if let Err(e) = bot
+        .set_message_reaction(chat_id, message_id)
+        .reaction(vec![ReactionType::Emoji { emoji: emoji.to_owned() }])
+        .await
+    {
+        warn!(chat_id = %chat_id.0, error = %e, "Failed to set message reaction (non-fatal)");
+    }
+}
+
 /// Background task to poll for output from connected sessions and send responses.
 async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
-    use teloxide::types::{ChatAction, MessageId, ReplyParameters};
+    use teloxide::types::{ChatAction, LinkPreviewOptions, MessageId, ReplyParameters};
     use std::collections::HashMap;
 
     let mut poll_interval = interval(Duration::from_millis(POLL_INTERVAL_MS));
@@ -276,6 +405,15 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
     let mut progress_messages: HashMap<i64, MessageId> = HashMap::new();
     // Track summary message IDs per session key
     let mut summary_messages: HashMap<i64, MessageId> = HashMap::new();
+
+    // Shared link preview options for progress/notification messages (no previews on status msgs).
+    let no_preview = LinkPreviewOptions {
+        is_disabled: true,
+        url: None,
+        prefer_small_media: false,
+        prefer_large_media: false,
+        show_above_text: false,
+    };
 
     loop {
         poll_interval.tick().await;
@@ -286,11 +424,14 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
         for (session_key, chat_id, thread_id) in waiting_sessions {
             // Refresh typing indicator to show processing is ongoing
             if let Some(tid) = thread_id {
-                let _ = bot.send_chat_action(chat_id, ChatAction::Typing)
+                if let Err(e) = bot.send_chat_action(chat_id, ChatAction::Typing)
                     .message_thread_id(tid)
-                    .await;
-            } else {
-                let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+                    .await
+                {
+                    warn!(chat_id = %chat_id, thread_id = ?tid, error = %e, "Failed to send typing indicator");
+                }
+            } else if let Err(e) = bot.send_chat_action(chat_id, ChatAction::Typing).await {
+                warn!(chat_id = %chat_id, error = %e, "Failed to send typing indicator");
             }
 
             // Poll for output from this session
@@ -302,13 +443,14 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
 
             match poll_result {
                 Ok(PollResult::Progress(progress_msg)) => {
-                    // Send or update progress message
                     if let Some(&msg_id) = progress_messages.get(&session_key) {
-                        // Update existing progress message (ignore errors - may have been deleted)
+                        // Update existing progress message silently (ignore errors — may have been deleted).
                         let _ = bot.edit_message_text(chat_id, msg_id, &progress_msg).await;
                     } else {
-                        // Send new progress message
-                        let mut req = bot.send_message(chat_id, &progress_msg);
+                        // Send new progress message: silent + no link preview.
+                        let mut req = bot.send_message(chat_id, &progress_msg)
+                            .disable_notification(true)
+                            .link_preview_options(no_preview.clone());
                         if let Some(tid) = thread_id {
                             req = req.message_thread_id(tid);
                         }
@@ -324,15 +466,15 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                 }
                 Ok(PollResult::IncrementalSummary(summary)) => {
                     if let Some(&msg_id) = summary_messages.get(&session_key) {
-                        // Update existing summary message
                         if let Err(e) = bot.edit_message_text(chat_id, msg_id, &summary).await {
                             warn!(chat_id = %chat_id.0, error = %e, "Failed to update incremental summary");
                         } else {
                             info!(chat_id = %chat_id.0, "Incremental summary updated");
                         }
                     } else {
-                        // Send new summary message and track ID
-                        let mut req = bot.send_message(chat_id, &summary);
+                        let mut req = bot.send_message(chat_id, &summary)
+                            .disable_notification(true)
+                            .link_preview_options(no_preview.clone());
                         if let Some(tid) = thread_id {
                             req = req.message_thread_id(tid);
                         }
@@ -348,13 +490,13 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     }
                 }
                 Ok(PollResult::Summarizing) => {
-                    // Update progress message to show summarization
                     let summarizing_msg = "🤖 Summarizing output...";
                     if let Some(&msg_id) = progress_messages.get(&session_key) {
                         let _ = bot.edit_message_text(chat_id, msg_id, summarizing_msg).await;
                     } else {
-                        // Send new summarizing message if no progress message exists
-                        let mut req = bot.send_message(chat_id, summarizing_msg);
+                        let mut req = bot.send_message(chat_id, summarizing_msg)
+                            .disable_notification(true)
+                            .link_preview_options(no_preview.clone());
                         if let Some(tid) = thread_id {
                             req = req.message_thread_id(tid);
                         }
@@ -368,67 +510,86 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                         }
                     }
                 }
-                Ok(PollResult::Complete(response, message_id, response_thread_id)) => {
-                    use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
-
-                    // Delete progress message if it exists
+                Ok(PollResult::Complete(mut response, message_id, response_thread_id)) => {
+                    // Delete progress and summary messages.
                     if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, prog_msg_id).await;
                     }
-
-                    // Delete summary message if it exists
                     if let Some(sum_msg_id) = summary_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, sum_msg_id).await;
                     }
 
-                    // Determine which thread to send to (prefer response's thread_id)
+                    // Determine target thread (prefer response's thread_id).
                     let target_thread_id = response_thread_id.or(thread_id);
 
-                    // Check if response was truncated (fallback used) - add session link button
-                    let is_truncated = response.contains("more characters)_") || response.contains("more lines)_");
-                    let keyboard = if is_truncated {
-                        // Get session info for the button
-                        state.get_session_info(chat_id).await.map(|(name, _)| {
-                            let session_name = format!("commander-{}", name);
-                            InlineKeyboardMarkup::new(vec![vec![
-                                InlineKeyboardButton::callback(
-                                    format!("Open {}", name),
-                                    format!("connect:{}", session_name),
-                                )
-                            ]])
-                        })
-                    } else {
-                        None
-                    };
+                    // Read session metadata needed for feature flags and reactions.
+                    let (original_msg_id, is_private) =
+                        state.get_session_reaction_meta(session_key).await;
 
-                    // Send the final response, as a reply if we have a message ID
-                    let mut req = bot.send_message(chat_id, &response);
+                    let features = FeatureSet::for_context(None, is_private);
 
-                    if let Some(tid) = target_thread_id {
-                        req = req.message_thread_id(tid);
+                    // Append deep link if response is truncated.
+                    if response.contains("more characters)_") || response.contains("more lines)_") {
+                        if let Some((name, _)) = state.get_session_info(chat_id).await {
+                            let bot_username = state.bot_username().await;
+                            let link = format!("https://t.me/{}?start=connect_{}", bot_username, name);
+                            response.push_str(&format!("\n\n👉 <a href=\"{}\">Open full session</a>", link));
+                        }
                     }
 
-                    if let Some(msg_id) = message_id {
-                        req = req.reply_parameters(ReplyParameters::new(msg_id));
+                    // Apply expandable blockquotes to long <pre> blocks.
+                    if features.use_expandable_blockquotes {
+                        response = apply_expandable_blockquotes(&response);
                     }
 
-                    if let Some(kb) = keyboard {
-                        req = req.reply_markup(kb);
-                    }
+                    // Check for options in response.
+                    let detected_options = OptionDetector::detect_options(&response);
+                    let keyboard = detected_options.as_ref().map(|o| create_option_keyboard(o));
 
-                    if let Err(e) = req.await {
-                        warn!(chat_id = %chat_id.0, error = %e, "Failed to send response");
-                    } else {
-                        info!(chat_id = %chat_id.0, thread_id = ?target_thread_id, "Response sent to user");
+                    let reply_params = message_id.map(ReplyParameters::new);
+                    let effect_id = if features.use_message_effects { Some(EFFECT_ID_CONFETTI) } else { None };
+
+                    // Send (possibly split) final response.
+                    let send_result = send_long_message(
+                        &bot,
+                        chat_id,
+                        &response,
+                        teloxide::types::ParseMode::Html,
+                        target_thread_id,
+                        reply_params,
+                        keyboard,
+                        false, // final response is not silent
+                        effect_id,
+                        features.max_message_length,
+                    ).await;
+
+                    match send_result {
+                        Ok(_) => {
+                            if detected_options.is_some() {
+                                info!(chat_id = %chat_id.0, thread_id = ?target_thread_id, "Response with options sent to user");
+                            } else {
+                                info!(chat_id = %chat_id.0, thread_id = ?target_thread_id, "Response sent to user");
+                            }
+
+                            // Add success reaction to the original user message.
+                            if features.use_reactions {
+                                if let Some(orig_id) = original_msg_id {
+                                    add_reaction(&bot, chat_id, orig_id, "👍").await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(chat_id = %chat_id.0, error = %e, "Failed to send response");
+                        }
                     }
                 }
                 Ok(PollResult::NoOutput) => {
-                    // No response ready yet, continue polling
+                    // No response ready yet, continue polling.
                 }
                 Err(e) => {
                     warn!(chat_id = %chat_id.0, error = %e, "Error polling output");
 
-                    // Clean up progress message on error
+                    // Clean up progress message on error.
                     if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, prog_msg_id).await;
                     }
@@ -440,7 +601,7 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
 
 /// Background task to poll for cross-channel notifications and broadcast to authorized users.
 async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
-    use teloxide::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup};
+    use teloxide::types::ChatId;
     use crate::notifications::{get_unread_notifications, mark_notifications_read};
 
     let mut poll_interval = interval(Duration::from_millis(NOTIFICATION_POLL_INTERVAL_MS));
@@ -471,16 +632,28 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
         // No LLM summarization needed - it only introduces preamble bleeding.
         let mut sent_ids = Vec::new();
         for notification in &notifications {
-            // Build inline keyboard with session link button if session is specified
-            let keyboard = notification.session.as_ref().map(|session| {
+            // Build notification message with deep link if session is specified
+            let mut message = notification.message.clone();
+            if let Some(session) = &notification.session {
                 let display_name = session.strip_prefix("commander-").unwrap_or(session);
-                InlineKeyboardMarkup::new(vec![vec![
-                    InlineKeyboardButton::callback(
-                        format!("Open {}", display_name),
-                        format!("connect:{}", session),
-                    )
-                ]])
-            });
+                // Generate deep link for connecting to this session (uses cached identity).
+                let bot_username = state.bot_username().await;
+                let link = format!("https://t.me/{}?start=connect_{}", bot_username, display_name);
+
+                // Choose link text based on notification context
+                let link_text = if message.contains("resumed work") || message.contains("resumed") {
+                    format!("Resume {}", display_name)
+                } else if message.contains("paused") || message.contains("waiting") {
+                    format!("Continue {}", display_name)
+                } else if message.contains("ready") || message.contains("started") {
+                    format!("Open {}", display_name)
+                } else {
+                    // Default for unknown contexts
+                    format!("Connect to {}", display_name)
+                };
+
+                message.push_str(&format!("\n\n👉 <a href=\"{}\">{}</a>", link, link_text));
+            }
 
             for &chat_id in &authorized_chats {
                 // Skip notification if it's for the session the user is currently connected to
@@ -497,10 +670,15 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
                     }
                 }
 
-                let mut req = bot.send_message(ChatId(chat_id), &notification.message);
-                if let Some(ref kb) = keyboard {
-                    req = req.reply_markup(kb.clone());
-                }
+                let req = bot.send_message(ChatId(chat_id), &message)
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .link_preview_options(teloxide::types::LinkPreviewOptions {
+                        is_disabled: true,
+                        url: None,
+                        prefer_small_media: false,
+                        prefer_large_media: false,
+                        show_above_text: false,
+                    });
                 if let Err(e) = req.await {
                     warn!(chat_id = %chat_id, error = %e, "Failed to send notification");
                 } else {

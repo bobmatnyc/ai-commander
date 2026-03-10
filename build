@@ -1,0 +1,62 @@
+#!/bin/bash
+# Build convenience script
+# Usage: ./build [--release] [--all]
+
+set -euo pipefail
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# Default build mode
+MODE="release"
+TARGETS="ai-commander commander-daemon"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --debug)
+            MODE="debug"
+            shift
+            ;;
+        --release)
+            MODE="release"
+            shift
+            ;;
+        --all)
+            TARGETS="ai-commander commander-daemon commander-gui commander-telegram"
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: ./build [--release|--debug] [--all]"
+            exit 1
+            ;;
+    esac
+done
+
+echo -e "${YELLOW}Building in $MODE mode: $TARGETS${NC}"
+
+# Build command
+if [[ "$MODE" == "release" ]]; then
+    BUILD_CMD="cargo build --release"
+else
+    BUILD_CMD="cargo build"
+fi
+
+# Build each target
+for target in $TARGETS; do
+    echo -e "${GREEN}Building $target...${NC}"
+    $BUILD_CMD -p "$target"
+done
+
+echo -e "${GREEN}Build complete!${NC}"
+echo ""
+echo "Available commands:"
+echo "  ./ai help           # Show ai-commander help"
+echo "  ./daemon status     # Check daemon status"
+echo "  ./pair              # Generate pairing code"
+echo ""
+echo "Start using:"
+echo "  ./daemon start      # Start background daemon"

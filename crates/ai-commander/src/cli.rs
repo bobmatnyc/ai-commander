@@ -114,6 +114,19 @@ pub enum Commands {
         #[command(subcommand)]
         command: AgentCommands,
     },
+
+    /// Daemon service management
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
+
+    /// Generate a pairing code for client connections
+    Pair {
+        /// Session ID to pair with (optional)
+        #[arg(short, long)]
+        session: Option<String>,
+    },
 }
 
 /// Agent-related subcommands.
@@ -200,6 +213,26 @@ pub enum AgentCommands {
         #[command(subcommand)]
         command: ContextCommands,
     },
+}
+
+/// Daemon management subcommands.
+#[derive(Subcommand, Debug)]
+pub enum DaemonCommands {
+    /// Start the daemon service
+    Start {
+        /// Run in foreground (don't daemonize)
+        #[arg(short, long)]
+        foreground: bool,
+    },
+
+    /// Stop the daemon service
+    Stop,
+
+    /// Show daemon status
+    Status,
+
+    /// Restart the daemon service
+    Restart,
 }
 
 /// Context management subcommands.
