@@ -37,6 +37,8 @@ pub enum PollResult {
     /// Complete response ready to send (summarization done or no summarization needed).
     /// Includes optional thread_id for forum topic routing.
     Complete(String, Option<MessageId>, Option<ThreadId>),
+    /// An interactive selector is waiting for user input.
+    SelectorDetected(commander_core::SelectorPrompt),
     /// No new output or not ready yet.
     NoOutput,
 }
@@ -266,6 +268,9 @@ pub struct TelegramState {
     session_logger: SessionLogger,
     /// Cached bot identity (populated once at startup, avoids repeated get_me() calls).
     pub bot_info: RwLock<Option<Me>>,
+    /// Maps (chat_id, bot_message_id) → session_base_name for @-addressed responses.
+    /// Used to route replies to bot responses back to the same @session.
+    at_reply_map: Arc<RwLock<HashMap<(i64, i32), String>>>,
     /// Agent orchestrator for LLM-based message processing (feature-gated).
     #[cfg(feature = "agents")]
     orchestrator: RwLock<Option<AgentOrchestrator>>,
@@ -310,6 +315,7 @@ impl TelegramState {
             daemon_client,
             session_logger,
             bot_info: RwLock::new(None),
+            at_reply_map: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "agents")]
             orchestrator: RwLock::new(None),
         }
@@ -611,9 +617,10 @@ impl TelegramState {
 
         // Get screen preview from tmux
         let screen_preview = self.tmux.as_ref().and_then(|tmux| {
-            tmux.capture_output(&session.tmux_session, None, Some(10))
+            tmux.capture_output(&session.tmux_session, None, Some(50))
                 .ok()
-                .map(|output| clean_screen_preview(&output, 5))
+                .map(|output| clean_screen_preview(&output, 15))
+                .filter(|s| !s.trim().is_empty())
         });
 
         Some((
@@ -1063,16 +1070,50 @@ impl TelegramState {
             return Ok(PollResult::NoOutput);
         }
 
+        // Fix 1: 5-minute hard timeout — prevents infinite typing loop if tmux/Claude stalls.
+        const MAX_WAIT_SECS: u64 = 300;
+        if let Some(t) = session.send_time {
+            if t.elapsed().as_secs() > MAX_WAIT_SECS {
+                let message_id = session.pending_message_id;
+                let sess_thread_id = session.thread_id;
+                warn!(
+                    chat_id = %chat_id.0,
+                    thread_id = ?thread_id,
+                    "poll_topic_output: 5-minute timeout reached — force-completing stuck session"
+                );
+                session.reset_response_state();
+                return Ok(PollResult::Complete(
+                    "No response received within 5 minutes. The session may have stalled.".to_string(),
+                    message_id,
+                    sess_thread_id,
+                ));
+            }
+        }
+
         // Capture current output
         let current_output = tmux
             .capture_output(&session.tmux_session, None, Some(200))
             .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
 
+        // Check for interactive selector before progress/completion logic
+        if let Some(selector) = commander_core::detect_selector(&current_output) {
+            return Ok(PollResult::SelectorDetected(selector));
+        }
+
         // Check for new content
         if current_output != session.last_output {
             let new_lines = find_new_lines(&session.last_output, &current_output);
+            let new_line_count = new_lines.len();
             session.add_response_lines(new_lines);
             session.last_output = current_output.clone();
+
+            debug!(
+                chat_id = %chat_id.0,
+                thread_id = ?thread_id,
+                new_lines = new_line_count,
+                buffer_len = session.response_buffer.len(),
+                "poll_topic_output: new tmux output captured"
+            );
 
             // Check if we should emit an incremental summary (every 50 lines)
             if session.should_emit_incremental_summary() {
@@ -1106,7 +1147,69 @@ impl TelegramState {
             is_claude_ready(&current_output)
         };
 
-        if is_idle && has_prompt && !session.response_buffer.is_empty() {
+        debug!(
+            chat_id = %chat_id.0,
+            thread_id = ?thread_id,
+            is_idle = is_idle,
+            has_prompt = has_prompt,
+            buffer_len = session.response_buffer.len(),
+            "poll_topic_output: idle/prompt check"
+        );
+
+        // Fix 2: Detect stale/dead tmux session — idle but no Claude prompt for ~15s.
+        if is_idle && !has_prompt {
+            session.stale_poll_count += 1;
+            if session.stale_poll_count > 10 {
+                let message_id = session.pending_message_id;
+                let sess_thread_id = session.thread_id;
+                warn!(
+                    chat_id = %chat_id.0,
+                    thread_id = ?thread_id,
+                    stale_polls = session.stale_poll_count,
+                    "poll_topic_output: stale session detected — force-completing"
+                );
+                session.reset_response_state();
+                return Ok(PollResult::Complete(
+                    "Session appears stalled — no Claude prompt detected. Try sending your message again.".to_string(),
+                    message_id,
+                    sess_thread_id,
+                ));
+            }
+        } else {
+            session.stale_poll_count = 0;
+        }
+
+        if is_idle && has_prompt {
+            if session.response_buffer.is_empty() {
+                warn!(
+                    chat_id = %chat_id.0,
+                    thread_id = ?thread_id,
+                    tmux_session = %session.tmux_session,
+                    "poll_topic_output: response_buffer empty after idle+prompt — completing with filtered output"
+                );
+                let raw_response = clean_response(&current_output);
+                let message_id = session.pending_message_id;
+                let sess_thread_id = session.thread_id;
+                let log_chat_id = session.chat_id.0;
+                let log_session_id = session.tmux_session.clone();
+                let log_project = session.project_name.clone();
+                let log_send_time = session.send_time;
+                let log_msg_id = message_id.map(|m| m.0).unwrap_or(0);
+                session.reset_response_state();
+                let latency_ms = log_send_time
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                self.session_logger.log_assistant_response(
+                    log_chat_id,
+                    &log_session_id,
+                    &log_project,
+                    &raw_response,
+                    latency_ms,
+                    log_msg_id,
+                );
+                return Ok(PollResult::Complete(raw_response, message_id, sess_thread_id));
+            }
+
             let needs_summarization = is_summarization_available();
 
             if needs_summarization && !session.is_summarizing {
@@ -1256,6 +1359,164 @@ impl TelegramState {
         Ok(())
     }
 
+    /// Take (consume) the at_session_name for a session, returning it if set.
+    /// Called once per response cycle in the poll loop.
+    pub async fn take_at_session_name(&self, session_key: i64) -> Option<String> {
+        let mut sessions = self.sessions.write().await;
+        sessions.get_mut(&session_key)?.at_session_name.take()
+    }
+
+    /// Record that a bot message (chat_id, message_id) was an @-session response.
+    pub async fn record_at_reply(&self, chat_id: i64, message_id: MessageId, session_name: String) {
+        let mut map = self.at_reply_map.write().await;
+        map.insert((chat_id, message_id.0), session_name.clone());
+        // Prune entries to avoid unbounded growth (keep most recent ~150)
+        if map.len() > 200 {
+            let keys_to_remove: Vec<_> = map.keys().take(50).cloned().collect();
+            for k in keys_to_remove {
+                map.remove(&k);
+            }
+        }
+        info!(
+            chat_id = %chat_id,
+            message_id = %message_id.0,
+            session = %session_name,
+            map_len = %map.len(),
+            "Recorded at_reply mapping"
+        );
+    }
+
+    /// Look up whether a message ID was an @-session bot response. Returns session name if so.
+    pub async fn lookup_at_reply(&self, chat_id: i64, message_id: MessageId) -> Option<String> {
+        let map = self.at_reply_map.read().await;
+        let result = map.get(&(chat_id, message_id.0)).cloned();
+        debug!(
+            chat_id = %chat_id,
+            message_id = %message_id.0,
+            found = %result.is_some(),
+            "at_reply lookup"
+        );
+        result
+    }
+
+    /// Route a message to a named session (by project name or tmux session name)
+    /// without changing the caller's active session.
+    /// Sets at_session_name so the poll loop can record the reply ID for reply-chain routing.
+    pub async fn send_to_named_session(
+        &self,
+        chat_id: ChatId,
+        session_name: &str,
+        message: &str,
+        message_id: Option<MessageId>,
+    ) -> Result<String> {
+        let tmux = self.tmux.as_ref().ok_or_else(|| {
+            TelegramError::TmuxError("tmux not available".to_string())
+        })?;
+
+        // Resolve session name → tmux session name
+        let base_name = session_name.strip_prefix("commander-").unwrap_or(session_name);
+        let tmux_session = format!("commander-{}", base_name);
+
+        if !tmux.session_exists(&tmux_session) {
+            // Try bare name too
+            if !tmux.session_exists(base_name) {
+                return Err(TelegramError::SessionError(
+                    format!("Session '{}' not found", session_name)
+                ));
+            }
+        }
+        let tmux_session = if tmux.session_exists(&tmux_session) {
+            tmux_session
+        } else {
+            base_name.to_string()
+        };
+
+        // Ensure a UserSession exists for this chat (connect if needed, preserving existing)
+        let already_connected = {
+            let sessions = self.sessions.read().await;
+            sessions.get(&chat_id.0).map(|s| s.tmux_session.clone())
+        };
+
+        if already_connected.as_deref() != Some(&tmux_session) {
+            // Connect to the target session — this changes the active session
+            // but we'll restore it conceptually via response_prefix
+            self.connect(chat_id, session_name).await
+                .map_err(|e| TelegramError::SessionError(format!("Cannot connect to '{}': {}", session_name, e)))?;
+        }
+
+        // Capture current output for change detection
+        let last_output = tmux
+            .capture_output(&tmux_session, None, Some(200))
+            .unwrap_or_default();
+
+        // Send the message
+        {
+            let mut sessions = self.sessions.write().await;
+            let session = sessions.get_mut(&chat_id.0)
+                .ok_or(TelegramError::NotConnected)?;
+
+            if let (Some(ref daemon), Some(ref sid)) = (&self.daemon_client, &session.daemon_session_id) {
+                daemon.session_send(sid, message).await?;
+            } else {
+                tmux.send_line(&session.tmux_session, None, message)
+                    .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            }
+
+            session.start_response_collection(message, last_output, message_id);
+            // Record the session name so the poll loop can store the reply ID after sending.
+            session.at_session_name = Some(base_name.to_string());
+        }
+
+        debug!(
+            chat_id = %chat_id.0,
+            target = %session_name,
+            message = %message,
+            "Message routed via @-addressing"
+        );
+
+        Ok(base_name.to_string())
+    }
+
+    /// Send a numeric selection to the current session.
+    ///
+    /// For arrow-key style selectors (Inquirer.js), sends Up/Down keypresses to
+    /// navigate to the target option then Enter to confirm.
+    /// `selection` is 1-based; `current_selected` is 0-based.
+    pub async fn send_selection(
+        &self,
+        chat_id: ChatId,
+        selection: usize,
+        current_selected: usize,
+    ) -> Result<()> {
+        let tmux = self.tmux.as_ref().ok_or_else(|| {
+            TelegramError::TmuxError("tmux not available".to_string())
+        })?;
+
+        let sessions = self.sessions.read().await;
+        let session = sessions
+            .get(&chat_id.0)
+            .ok_or(TelegramError::NotConnected)?;
+
+        // Convert 1-based selection to 0-based target
+        let target = selection.saturating_sub(1);
+
+        if target > current_selected {
+            for _ in 0..(target - current_selected) {
+                tmux.send_keys(&session.tmux_session, None, "Down")
+                    .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            }
+        } else if target < current_selected {
+            for _ in 0..(current_selected - target) {
+                tmux.send_keys(&session.tmux_session, None, "Up")
+                    .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            }
+        }
+        tmux.send_keys(&session.tmux_session, None, "Enter")
+            .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+
+        Ok(())
+    }
+
     /// Poll for new output from a user's project.
     /// Returns PollResult indicating progress, summarizing, complete, or no output.
     pub async fn poll_output(&self, chat_id: ChatId) -> Result<PollResult> {
@@ -1272,16 +1533,48 @@ impl TelegramState {
             return Ok(PollResult::NoOutput);
         }
 
+        // Fix 1: 5-minute hard timeout — prevents infinite typing loop if tmux/Claude stalls.
+        const MAX_WAIT_SECS: u64 = 300;
+        if let Some(t) = session.send_time {
+            if t.elapsed().as_secs() > MAX_WAIT_SECS {
+                let message_id = session.pending_message_id;
+                let thread_id = session.thread_id;
+                warn!(
+                    chat_id = %chat_id.0,
+                    "poll_output: 5-minute timeout reached — force-completing stuck session"
+                );
+                session.reset_response_state();
+                return Ok(PollResult::Complete(
+                    "No response received within 5 minutes. The session may have stalled.".to_string(),
+                    message_id,
+                    thread_id,
+                ));
+            }
+        }
+
         // Capture current output
         let current_output = tmux
             .capture_output(&session.tmux_session, None, Some(200))
             .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
 
+        // Check for interactive selector before progress/completion logic
+        if let Some(selector) = commander_core::detect_selector(&current_output) {
+            return Ok(PollResult::SelectorDetected(selector));
+        }
+
         // Check for new content
         if current_output != session.last_output {
             let new_lines = find_new_lines(&session.last_output, &current_output);
+            let new_line_count = new_lines.len();
             session.add_response_lines(new_lines);
             session.last_output = current_output.clone();
+
+            debug!(
+                chat_id = %chat_id.0,
+                new_lines = new_line_count,
+                buffer_len = session.response_buffer.len(),
+                "poll_output: new tmux output captured"
+            );
 
             // Check if we should emit an incremental summary (every 50 lines)
             if session.should_emit_incremental_summary() {
@@ -1316,7 +1609,68 @@ impl TelegramState {
             is_claude_ready(&current_output)
         };
 
-        if is_idle && has_prompt && !session.response_buffer.is_empty() {
+        debug!(
+            chat_id = %chat_id.0,
+            is_idle = is_idle,
+            has_prompt = has_prompt,
+            buffer_len = session.response_buffer.len(),
+            "poll_output: idle/prompt check"
+        );
+
+        // Fix 2: Detect stale/dead tmux session — idle but no Claude prompt for ~15s.
+        if is_idle && !has_prompt {
+            session.stale_poll_count += 1;
+            if session.stale_poll_count > 10 {
+                let message_id = session.pending_message_id;
+                let thread_id = session.thread_id;
+                warn!(
+                    chat_id = %chat_id.0,
+                    stale_polls = session.stale_poll_count,
+                    "poll_output: stale session detected — force-completing"
+                );
+                session.reset_response_state();
+                return Ok(PollResult::Complete(
+                    "Session appears stalled — no Claude prompt detected. Try sending your message again.".to_string(),
+                    message_id,
+                    thread_id,
+                ));
+            }
+        } else {
+            session.stale_poll_count = 0;
+        }
+
+        if is_idle && has_prompt {
+            if session.response_buffer.is_empty() {
+                // All output was filtered as noise — still complete so the session doesn't hang.
+                // Use a small portion of raw tmux output as fallback.
+                warn!(
+                    chat_id = %chat_id.0,
+                    tmux_session = %session.tmux_session,
+                    "poll_output: response_buffer empty after idle+prompt — completing with filtered output"
+                );
+                let raw_response = clean_response(&current_output);
+                let message_id = session.pending_message_id;
+                let thread_id = session.thread_id;
+                let log_chat_id = session.chat_id.0;
+                let log_session_id = session.tmux_session.clone();
+                let log_project = session.project_name.clone();
+                let log_send_time = session.send_time;
+                let log_msg_id = message_id.map(|m| m.0).unwrap_or(0);
+                session.reset_response_state();
+                let latency_ms = log_send_time
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                self.session_logger.log_assistant_response(
+                    log_chat_id,
+                    &log_session_id,
+                    &log_project,
+                    &raw_response,
+                    latency_ms,
+                    log_msg_id,
+                );
+                return Ok(PollResult::Complete(raw_response, message_id, thread_id));
+            }
+
             // Check if we need to summarize (only if API key available)
             let needs_summarization = is_summarization_available();
 
@@ -1433,9 +1787,25 @@ impl TelegramState {
                     .map(|s| {
                         let is_commander = s.name.starts_with("commander-");
                         // Capture a small screen preview to determine idle/active state
-                        let preview = tmux.capture_output(&s.name, None, Some(5))
+                        let preview = tmux.capture_output(&s.name, None, Some(15))
                             .ok()
-                            .map(|output| clean_screen_preview(&output, 3));
+                            .map(|output| {
+                                let cleaned = clean_screen_preview(&output, 15);
+                                cleaned.lines()
+                                    .filter(|l| {
+                                        let l = l.trim();
+                                        !(l.contains('@') && l.contains(':') && {
+                                            let after = l.splitn(2, ':').nth(1).unwrap_or("");
+                                            after.starts_with('/') || after.starts_with('~')
+                                        })
+                                        && !l.contains("claude_mpm")
+                                        && !l.contains("|Sonnet")
+                                        && !l.contains("brewed for")
+                                        && !l.contains("background task")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            });
                         (s.name, is_commander, s.created_at, preview)
                     })
                     .collect()

@@ -48,6 +48,11 @@ pub struct UserSession {
     pub original_message_id: Option<MessageId>,
     /// Whether the chat context is a private chat (for message effects).
     pub is_private_chat: bool,
+    /// When set, this is the base session name for an @-addressed message (e.g. "myproject").
+    /// Used after send to record the bot reply ID in the at_reply_map for reply-chain routing.
+    pub at_session_name: Option<String>,
+    /// Consecutive polls where is_idle=true but has_prompt=false (stale/dead tmux detection).
+    pub stale_poll_count: u32,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -170,6 +175,8 @@ impl UserSession {
             adapter_type: "claude-code".to_string(),
             original_message_id: None,
             is_private_chat: false,
+            at_session_name: None,
+            stale_poll_count: 0,
         }
     }
 
@@ -202,10 +209,14 @@ impl UserSession {
             adapter_type: "claude-code".to_string(),
             original_message_id: None,
             is_private_chat: false,
+            at_session_name: None,
+            stale_poll_count: 0,
         }
     }
 
     /// Reset the response collection state.
+    /// Note: `at_session_name` is intentionally NOT cleared here — it must survive until
+    /// `take_at_session_name()` consumes it in the poll loop's Complete arm (bot.rs).
     pub fn reset_response_state(&mut self) {
         self.response_buffer.clear();
         self.last_output_time = None;
@@ -217,6 +228,13 @@ impl UserSession {
         self.last_incremental_summary_line_count = 0;
         self.send_time = None;
         self.original_message_id = None;
+        self.stale_poll_count = 0;
+    }
+
+    /// Consume and return `at_session_name`, clearing it from the session.
+    /// Called once per response cycle after Complete is returned.
+    pub fn take_at_session_name(&mut self) -> Option<String> {
+        self.at_session_name.take()
     }
 
     /// Start collecting a response for a query.
@@ -267,7 +285,11 @@ impl UserSession {
     pub fn get_progress_message(&mut self) -> String {
         let line_count = self.response_buffer.len();
         self.last_progress_line_count = line_count;
-        format!("📥 Receiving...{} lines captured", line_count)
+        if let Some(ref name) = self.at_session_name {
+            format!("📥 @{} Receiving...{} lines captured", name, line_count)
+        } else {
+            format!("📥 Receiving...{} lines captured", line_count)
+        }
     }
 
     /// Check if an incremental summary should be emitted.
@@ -369,6 +391,21 @@ mod tests {
 
         let progress2 = session.get_progress_message();
         assert_eq!(progress2, "📥 Receiving...10 lines captured");
+
+        // With @session name set
+        let mut prefixed_session = UserSession::new(
+            ChatId(12345),
+            "/path".to_string(),
+            "proj".to_string(),
+            "session".to_string(),
+        );
+        prefixed_session.at_session_name = Some("myproject".to_string());
+        for i in 1..=5 {
+            prefixed_session.add_response_lines(vec![format!("line {}", i)]);
+        }
+        assert!(prefixed_session.should_emit_progress());
+        let prefixed_progress = prefixed_session.get_progress_message();
+        assert_eq!(prefixed_progress, "📥 @myproject Receiving...5 lines captured");
     }
 
     #[test]
