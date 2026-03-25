@@ -261,7 +261,7 @@ impl UserAgent {
         let memory = Memory::new(&self.id, content, embedding);
         self.memory.store(memory).await.map_err(AgentError::Memory)?;
 
-        debug!("Stored memory: {}", &content[..content.len().min(50)]);
+        debug!("Stored memory: {}", content.chars().take(50).collect::<String>());
         Ok(())
     }
 
@@ -297,10 +297,8 @@ impl Agent for UserAgent {
     }
 
     async fn process(&mut self, message: &str, context: &AgentContext) -> Result<AgentResponse> {
-        info!(
-            "Processing message: {}...",
-            &message[..message.len().min(50)]
-        );
+        let preview: String = message.chars().take(50).collect();
+        info!("Processing message: {}...", preview);
 
         // Update internal context with provided context
         self.context.current_task = context.current_task.clone();

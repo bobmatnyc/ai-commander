@@ -341,7 +341,7 @@ impl SessionAgent {
         let memory = Memory::new(&self.id, content, embedding);
         self.memory.store(memory).await.map_err(AgentError::Memory)?;
 
-        debug!("Stored memory for session {}: {}", self.session_id, &content[..content.len().min(50)]);
+        debug!("Stored memory for session {}: {}", self.session_id, content.chars().take(50).collect::<String>());
         Ok(())
     }
 
@@ -403,7 +403,7 @@ impl Agent for SessionAgent {
         info!(
             "Session {} processing: {}...",
             self.session_id,
-            &message[..message.len().min(50)]
+            message.chars().take(50).collect::<String>()
         );
 
         // Update internal context with provided context

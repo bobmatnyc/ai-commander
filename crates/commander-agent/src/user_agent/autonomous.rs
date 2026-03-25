@@ -39,10 +39,8 @@ impl UserAgent {
     /// }
     /// ```
     pub async fn process_autonomous(&mut self, initial_request: &str) -> Result<AutonomousResult> {
-        info!(
-            "Starting autonomous processing: {}...",
-            &initial_request[..initial_request.len().min(50)]
-        );
+        let preview: String = initial_request.chars().take(50).collect();
+        info!("Starting autonomous processing: {}...", preview);
 
         // Initialize completion driver
         let mut driver = CompletionDriver::new();

@@ -126,6 +126,12 @@ impl DaemonClient {
 
         debug!(method = %method, response = %response_line.trim(), "IPC response received");
 
+        if response_line.trim().is_empty() {
+            return Err(TelegramError::SessionError(
+                "Daemon closed connection without responding (possible daemon crash or panic)"
+                    .to_string(),
+            ));
+        }
         let response: JsonRpcResponse = serde_json::from_str(response_line.trim())?;
 
         if let Some(err) = response.error {
