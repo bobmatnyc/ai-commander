@@ -76,7 +76,7 @@ pub const EXPANDABLE_BLOCKQUOTE_THRESHOLD: usize = 300;
 ///
 /// To verify: send a message with this effect_id in a private chat and confirm it shows confetti.
 /// Source: <https://core.telegram.org/bots/api#sendmessage> effect_id field.
-pub const EFFECT_ID_CONFETTI: &str = "5066970843586925436";
+pub const EFFECT_ID_CONFETTI: &str = "5046509195757842739";
 
 /// Wrap `<pre>` blocks longer than `EXPANDABLE_BLOCKQUOTE_THRESHOLD` chars in
 /// `<blockquote expandable>` so Telegram clients collapse them by default.
