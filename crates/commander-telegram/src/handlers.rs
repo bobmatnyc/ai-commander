@@ -10,6 +10,18 @@ use tracing::{debug, error, info, warn};
 use crate::error::TelegramError;
 use crate::state::TelegramState;
 
+/// Send a typing indicator to a chat, ignoring errors (best-effort cosmetic).
+/// Telegram expires the indicator after ~5 seconds — call again for long operations.
+async fn typing(bot: &Bot, chat_id: ChatId, thread_id: Option<ThreadId>) {
+    use teloxide::types::ChatAction;
+    let req = if let Some(tid) = thread_id {
+        bot.send_chat_action(chat_id, ChatAction::Typing).message_thread_id(tid)
+    } else {
+        bot.send_chat_action(chat_id, ChatAction::Typing)
+    };
+    let _ = req.await;
+}
+
 /// Bot commands that can be invoked with /.
 #[derive(BotCommands, Clone, Debug)]
 #[command(rename_rule = "lowercase", description = "Available commands:")]
@@ -197,16 +209,21 @@ async fn handle_deep_link_connect(
         let _ = state.disconnect(msg.chat.id).await;
     }
 
+    // Show typing — connection + LLM status summary take noticeable time
+    typing(&bot, msg.chat.id, None).await;
+
     // Connect to the session
     match state.connect_session(msg.chat.id, session_name).await {
         Ok((connected_name, tool_id)) => {
             let adapter_name = adapter_display_name(&tool_id);
+            let status_info = get_connection_status(&state, msg.chat.id, &connected_name).await;
             bot.send_message(
                 msg.chat.id,
                 format!(
-                    "✅ Connected to <b>{}</b> via deep link!\n\n\
+                    "✅ Connected to <b>{}</b>\n\n\
+                    📊 Status:{}\n\n\
                     You can now send messages to interact with {}.",
-                    connected_name, adapter_name
+                    connected_name, status_info, adapter_name
                 )
             )
             .parse_mode(teloxide::types::ParseMode::Html)
@@ -276,8 +293,15 @@ async fn handle_deep_link_stop(
         }
     };
 
-    // Stop the session
-    let full_session = format!("commander-{}", session_name);
+    // Stop the session — try commander-prefixed first, fall back to bare name
+    let full_session = {
+        let prefixed = format!("commander-{}", session_name);
+        if tmux.session_exists(&prefixed) {
+            prefixed
+        } else {
+            session_name.to_string()
+        }
+    };
 
     // Check if session exists
     if !tmux.session_exists(&full_session) {
@@ -545,6 +569,9 @@ pub async fn handle_connect(
         return Ok(());
     }
 
+    // Show typing early — connection + LLM status summary take noticeable time
+    typing(&bot, msg.chat.id, None).await;
+
     // Parse the connect arguments
     let connect_args = match parse_connect_args(args) {
         Ok(args) => args,
@@ -754,46 +781,26 @@ fn adapter_display_name(tool_id: &str) -> &str {
 /// Get concise status info for connection success message.
 /// Returns a formatted string with git branch, state, and last activity.
 async fn get_connection_status(state: &Arc<TelegramState>, chat_id: ChatId, _connected_name: &str) -> String {
-    // Get detailed session status
-    let status = match state.get_session_status(chat_id).await {
-        Some((_, _, _, is_waiting, _, screen_preview)) => {
-            // Determine state
-            let state_emoji = if is_waiting {
-                "🔄 running"
-            } else {
-                "💤 idle"
-            };
-
-            // Try to extract git branch from screen preview
-            let branch_info = if let Some(ref preview) = screen_preview {
-                extract_git_branch(preview)
-                    .map(|branch| format!("\n• Branch: {} (with changes)", branch))
-                    .unwrap_or_else(|| String::new())
-            } else {
-                String::new()
-            };
-
-            // Extract context from screen when idle
-            let context_info = if !is_waiting {
-                if let Some(ref preview) = screen_preview {
-                    extract_conversation_context(preview)
-                        .map(|ctx| format!("\n• Context: {}", ctx))
-                        .unwrap_or_else(|| String::new())
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
-
-            format!("{}{}\n• State: {}{}", branch_info, if branch_info.is_empty() { "\n• Branch: unknown" } else { "" }, state_emoji, context_info)
-        }
-        None => {
-            "\n• State: connecting...".to_string()
-        }
+    let Some((_, _, _, is_waiting, _, screen_preview)) = state.get_session_status(chat_id).await else {
+        return "\n• State: connecting...".to_string();
     };
 
-    status
+    let state_emoji = if is_waiting { "🔄 running" } else { "💤 idle" };
+
+    // Try LLM summary first
+    let summary = get_session_summary(screen_preview.clone(), is_waiting).await;
+
+    if let Some(ref s) = summary {
+        return format!("\n• {}", s);
+    }
+
+    // Fallback: branch + state
+    let branch_info = screen_preview.as_deref()
+        .and_then(extract_git_branch)
+        .map(|b| format!("\n• Branch: {}", b))
+        .unwrap_or_default();
+
+    format!("{}\n• State: {}", branch_info, state_emoji)
 }
 
 /// Extract git branch from screen preview if visible.
@@ -958,12 +965,22 @@ pub async fn handle_status(
         return Ok(());
     }
 
+    // Show typing — status involves an LLM interpretation call
+    typing(&bot, msg.chat.id, None).await;
+
     let status = if let Some((project_name, project_path, tool_id, is_waiting, pending_query, screen_preview)) =
         state.get_session_status(msg.chat.id).await
     {
         let adapter_name = adapter_display_name(&tool_id);
 
         // Build activity section with LLM interpretation
+        // For idle sessions, get LLM interpretation via spawn_blocking before building activity
+        let llm_interpretation = if !is_waiting {
+            get_session_summary(screen_preview.clone(), false).await
+        } else {
+            None
+        };
+
         let activity = if is_waiting {
             if let Some(query) = pending_query {
                 // Truncate long queries
@@ -980,18 +997,9 @@ pub async fn handle_status(
                 "🔄 Activity: Processing...".to_string()
             }
         } else {
-            // Session is idle - try to interpret what it's showing
-            if let Some(ref preview) = screen_preview {
-                if !preview.is_empty() {
-                    // Use LLM to interpret screen context
-                    if let Some(interpretation) = commander_core::interpret_screen_context(preview, true) {
-                        format!("💤 Activity: {}", html_escape(&interpretation))
-                    } else {
-                        "💤 Activity: Idle (ready for commands)".to_string()
-                    }
-                } else {
-                    "💤 Activity: Idle (ready for commands)".to_string()
-                }
+            // Use LLM interpretation gathered via spawn_blocking above
+            if let Some(interpretation) = llm_interpretation {
+                format!("💤 Activity: {}", html_escape(&interpretation))
             } else {
                 "💤 Activity: Idle (ready for commands)".to_string()
             }
@@ -1066,6 +1074,22 @@ async fn generate_stop_link(bot: &Bot, session_name: &str) -> String {
     format!("https://t.me/{}?start=stop_{}", bot_username, session_name)
 }
 
+/// Call `interpret_screen_context` (blocking) from an async context.
+///
+/// Returns `None` when the preview is empty or the OpenRouter key is absent.
+async fn get_session_summary(preview: Option<String>, is_active: bool) -> Option<String> {
+    let content = preview?;
+    if content.trim().is_empty() {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || {
+        commander_core::interpret_screen_context(&content, !is_active)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Handle the /list command - list tmux sessions with status info and deep links.
 pub async fn handle_list(
     bot: Bot,
@@ -1092,6 +1116,9 @@ pub async fn handle_list(
         return Ok(());
     }
 
+    // Show typing: LLM summary calls can take several seconds per session
+    typing(&bot, msg.chat.id, None).await;
+
     let current_session = state
         .get_session_info(msg.chat.id)
         .await
@@ -1109,15 +1136,19 @@ pub async fn handle_list(
             "📟"
         };
 
-        // Determine status from screen preview
-        let status = if let Some(ref prev) = preview {
-            if prev.contains("Waiting") || prev.contains(">") || prev.contains("$") {
-                "💤 idle"
-            } else {
-                "🔄 running"
-            }
-        } else {
-            "❓ unknown"
+        // Refresh typing indicator — each LLM call can take up to 5s
+        typing(&bot, msg.chat.id, None).await;
+
+        // Determine status: prefer LLM summary, fall back to heuristic.
+        let is_active = preview.as_ref().map(|p| {
+            !p.is_empty() && !p.contains("Waiting")
+        }).unwrap_or(false);
+
+        let summary = get_session_summary(preview.clone(), is_active).await;
+        let status_display = match &summary {
+            Some(s) => format!("<i>{}</i>", html_escape(s)),
+            None if is_active => "🔄 running".to_string(),
+            None => "💤 idle".to_string(),
         };
 
         // Format created time as relative
@@ -1138,11 +1169,11 @@ pub async fn handle_list(
 
         // Add session info to text with prominent deep links for both connect and stop
         text.push_str(&format!(
-            "• <b>{}</b> {} {}\n  Started {}\n  👉 <a href=\"{}\">Connect</a> | 🛑 <a href=\"{}\">Stop</a>\n\n",
-            html_escape(display_name),
-            status,
+            "• {} <b>{}</b> · {}\n  {}\n  👉 <a href=\"{}\">Connect</a> | 🛑 <a href=\"{}\">Stop</a>\n\n",
             marker,
+            html_escape(display_name),
             age_str,
+            status_display,
             connect_link,
             stop_link
         ));
@@ -1267,42 +1298,130 @@ pub async fn handle_message(
         return handle_topic_message(bot, msg, state, &text, tid).await;
     }
 
-    // Check for @alias prefix to route to specific project
+    // Route replies to @-addressed sessions.
+    // Path 1: user replied to their own "@session message" (text starts with @name).
+    // Path 2: user replied to the bot's @-session response (look up by message ID in map).
+    if let Some(replied_msg) = msg.reply_to_message() {
+        let at_session_from_text = replied_msg.text().and_then(|t| {
+            let rest = t.strip_prefix('@')?;
+            // Match "@name " or "@name:" or "@name\n" formats
+            let end = rest.find(|c: char| c == ' ' || c == ':' || c == '\n')?;
+            let name = &rest[..end];
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        });
+
+        let at_session_from_map = if at_session_from_text.is_none() {
+            state.lookup_at_reply(msg.chat.id.0, replied_msg.id).await
+        } else {
+            None
+        };
+
+        let resolved_session = at_session_from_text.or(at_session_from_map);
+
+        debug!(
+            chat_id = %msg.chat.id.0,
+            replied_to = ?msg.reply_to_message().map(|m| m.id),
+            resolved = ?resolved_session,
+            "Reply-to @session detection result"
+        );
+
+        if let Some(session_name) = resolved_session {
+            typing(&bot, msg.chat.id, None).await;
+            match state.send_to_named_session(msg.chat.id, &session_name, &text, Some(msg.id)).await {
+                Ok(resolved_name) => {
+                    debug!(
+                        chat_id = %msg.chat.id,
+                        target = %resolved_name,
+                        message = %text,
+                        "Reply routed via @-addressed session context"
+                    );
+                    let is_private = msg.chat.is_private();
+                    state.set_session_reaction_meta(msg.chat.id.0, Some(msg.id), is_private).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(
+                        chat_id = %msg.chat.id,
+                        session = %session_name,
+                        error = %e,
+                        "Failed to route reply to @-addressed session, falling through"
+                    );
+                    // Fall through to normal handling
+                }
+            }
+        }
+    }
+
+    // Check for @alias prefix to route to a named session.
+    // Supports both "@name message" and "@name: message" formats.
+    // Routes without a disruptive "connecting..." message; response comes back as "@name: reply".
     if let Some(rest) = text.strip_prefix('@') {
-        if let Some((alias, message)) = rest.split_once(' ') {
-            let alias = alias.trim();
-            let message = message.trim();
+        // Strip optional trailing colon on the alias: "@project: message" or "@project message"
+        let rest = rest.trim_start();
+        if let Some((alias, message)) = rest.split_once(|c: char| c == ' ' || c == ':') {
+            let alias = alias.trim().trim_end_matches(':');
+            let message = message.trim_start_matches(':').trim();
 
             if !alias.is_empty() && !message.is_empty() {
-                // Try to connect to the specified project
-                match state.connect(msg.chat.id, alias).await {
-                    Ok((project_name, _tool_id)) => {
-                        // Successfully connected, now send the message
-                        bot.send_message(msg.chat.id, format!("➡️ Routing to {}", project_name))
-                            .await?;
-
-                        // Send the actual message
-                        match state.send_message(msg.chat.id, message, Some(msg.id)).await {
-                            Ok(()) => {
-                                debug!(
-                                    chat_id = %msg.chat.id,
-                                    alias = %alias,
-                                    message = %message,
-                                    "Message routed via @alias"
-                                );
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                bot.send_message(msg.chat.id, format!("❌ Failed to send: {}", e))
-                                    .await?;
-                                return Ok(());
-                            }
+                // Slash commands should be interpreted as bot commands, not forwarded to tmux.
+                // Connect to the aliased session first (for context), then dispatch.
+                if message.starts_with('/') {
+                    let cmd_str = message.split_whitespace().next().unwrap_or("");
+                    // Connect to target session to provide context for the command
+                    typing(&bot, msg.chat.id, None).await;
+                    if let Err(e) = state.connect(msg.chat.id, alias).await {
+                        bot.send_message(
+                            msg.chat.id,
+                            format!("❌ Could not connect to @{}: {}", alias, e),
+                        ).await?;
+                        return Ok(());
+                    }
+                    return match cmd_str {
+                        "/status"                  => handle_status(bot, msg, state).await,
+                        "/ls" | "/list"            => handle_list(bot, msg, state).await,
+                        "/disconnect"              => handle_disconnect(bot, msg, state).await,
+                        "/stop" | "/s"             => {
+                            handle_stop(bot, msg, state, alias.to_string()).await
                         }
+                        _ => {
+                            bot.send_message(
+                                msg.chat.id,
+                                format!(
+                                    "❓ <code>{}</code> is a bot command — use it directly, not via @routing.
+
+Use /help to see all commands.",
+                                    teloxide::utils::html::escape(cmd_str)
+                                ),
+                            )
+                            .parse_mode(teloxide::types::ParseMode::Html)
+                            .await?;
+                            Ok(())
+                        }
+                    };
+                }
+
+                // Regular message — forward to the named session
+                typing(&bot, msg.chat.id, None).await;
+                match state.send_to_named_session(msg.chat.id, alias, message, Some(msg.id)).await {
+                    Ok(resolved_name) => {
+                        debug!(
+                            chat_id = %msg.chat.id,
+                            target = %resolved_name,
+                            message = %message,
+                            "Message routed via @-addressing"
+                        );
+                        let is_private = msg.chat.is_private();
+                        state.set_session_reaction_meta(msg.chat.id.0, Some(msg.id), is_private).await;
+                        return Ok(());
                     }
                     Err(e) => {
                         bot.send_message(
                             msg.chat.id,
-                            format!("❌ Could not connect to '{}': {}", alias, e),
+                            format!("❌ Could not route to @{}: {}", alias, e),
                         )
                         .await?;
                         return Ok(());
@@ -1569,11 +1688,20 @@ pub async fn handle_stop(
             }
         }
     } else {
-        // Use specified session
-        let tmux_session = if session_arg.starts_with("commander-") {
-            session_arg.to_string()
-        } else {
-            format!("commander-{}", session_arg)
+        // Use specified session — try commander-prefixed first, fall back to bare name
+        let tmux_session = {
+            let prefixed = if session_arg.starts_with("commander-") {
+                session_arg.to_string()
+            } else {
+                format!("commander-{}", session_arg)
+            };
+            // Resolve tmux to get the orchestrator for the existence check
+            let tmux_check = state.tmux();
+            if tmux_check.as_ref().map_or(false, |t| t.session_exists(&prefixed)) {
+                prefixed
+            } else {
+                session_arg.to_string()
+            }
         };
 
         // Try to find project path from store
@@ -1940,6 +2068,50 @@ pub async fn handle_send(
     Ok(())
 }
 
+/// Handle selector selection from inline keyboard buttons (arrow-key / numbered prompts).
+///
+/// `rest` is the callback data after "select:" — format: "<n>:<current_selected>".
+async fn handle_selector_selection(
+    bot: Bot,
+    q: CallbackQuery,
+    state: Arc<TelegramState>,
+    rest: &str,
+) -> ResponseResult<()> {
+    let Some(msg) = q.message.as_ref() else {
+        return Ok(());
+    };
+
+    let chat_id = msg.chat().id;
+
+    // Parse "n:current" from callback data
+    let mut parts = rest.splitn(2, ':');
+    let n: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let current: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    if !state.has_session(chat_id).await {
+        bot.send_message(chat_id, "Not connected to a session. Use /connect first.")
+            .await?;
+        return Ok(());
+    }
+
+    match state.send_selection(chat_id, n, current).await {
+        Ok(()) => {
+            // Edit selector message to confirm the selection
+            let _ = bot
+                .edit_message_text(msg.chat().id, msg.id(), format!("Selected option {}", n))
+                .await;
+            info!(chat_id = %chat_id.0, selection = n, "Selector option chosen via button");
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("Failed to send selection: {}", e))
+                .await?;
+            error!(chat_id = %chat_id.0, error = %e, "Failed to send selector selection");
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle option selection from inline keyboard buttons.
 async fn handle_option_selection(
     bot: Bot,
@@ -2020,6 +2192,11 @@ pub async fn handle_callback(
     // Handle option selection
     if let Some(option_key) = data.strip_prefix("option:") {
         return handle_option_selection(bot, q, state, option_key).await;
+    }
+
+    // Handle interactive selector selection (format: "select:<n>:<current_selected>")
+    if let Some(rest) = data.strip_prefix("select:") {
+        return handle_selector_selection(bot, q, state, rest).await;
     }
 
     if let Some(session) = data.strip_prefix("connect:") {
