@@ -25,7 +25,7 @@ impl BotVersion {
         Self {
             binary_hash: compute_binary_hash(),
             last_start: current_timestamp(),
-            start_count: 1,
+            start_count: 0,
         }
     }
 
@@ -42,9 +42,9 @@ impl BotVersion {
         is_rebuild
     }
 
-    /// Check if this is the first start ever.
+    /// Check if this is the first start ever (no prior save existed).
     pub fn is_first_start(&self) -> bool {
-        self.start_count == 1
+        self.start_count == 0
     }
 
     /// Get age since last start in seconds.
@@ -179,7 +179,10 @@ pub fn save_version(version: &BotVersion) {
 pub fn check_rebuild() -> (bool, bool, u64) {
     let mut version = load_version();
     let is_first_start = version.is_first_start();
+    // Always call update() so start_count increments on every startup.
+    // is_first_start is determined from the loaded (pre-update) count.
     let is_rebuild = if is_first_start {
+        version.update();
         false // First start is neither rebuild nor restart
     } else {
         version.update()
@@ -197,7 +200,7 @@ mod tests {
     #[test]
     fn test_bot_version_creation() {
         let version = BotVersion::new();
-        assert_eq!(version.start_count, 1);
+        assert_eq!(version.start_count, 0);
         assert!(version.is_first_start());
         assert!(version.binary_hash > 0);
     }
@@ -207,9 +210,15 @@ mod tests {
         let mut version = BotVersion::new();
         let original_hash = version.binary_hash;
 
-        // Simulate restart (same binary)
+        // Simulate first start (count goes 0 -> 1)
         let is_rebuild = version.update();
         assert!(!is_rebuild); // Same hash = not a rebuild
+        assert_eq!(version.start_count, 1);
+        assert!(!version.is_first_start());
+
+        // Simulate restart (same binary, count goes 1 -> 2)
+        let is_rebuild = version.update();
+        assert!(!is_rebuild);
         assert_eq!(version.start_count, 2);
         assert!(!version.is_first_start());
 
