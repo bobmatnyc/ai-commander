@@ -144,12 +144,12 @@ impl TelegramBot {
             );
         }
 
-        // Send rebuild notification if this is a rebuild (not first start)
-        if is_rebuild && !is_first_start {
+        // Send restart notification on any restart (not first start)
+        if !is_first_start {
             let bot = self.bot.clone();
             let state = Arc::clone(&self.state);
             tokio::spawn(async move {
-                send_rebuild_notification(bot, state, restored_count, total_count).await;
+                send_restart_notification(bot, state).await;
             });
         }
 
@@ -316,7 +316,7 @@ fn create_option_keyboard(options: &DetectedOptions) -> InlineKeyboardMarkup {
 
 /// Send a message, splitting at newline boundaries if it exceeds `max_len` chars.
 ///
-/// Returns the `MessageId` of the last chunk sent (used for reply threading on the final piece).
+/// Returns the `MessageId`s of all chunks sent (used for reply-routing all visible messages).
 async fn send_long_message(
     bot: &Bot,
     chat_id: teloxide::types::ChatId,
@@ -328,12 +328,12 @@ async fn send_long_message(
     disable_notification: bool,
     message_effect_id: Option<&str>,
     max_len: usize,
-) -> Result<Option<teloxide::types::MessageId>> {
+) -> Result<Vec<teloxide::types::MessageId>> {
     use teloxide::types::LinkPreviewOptions;
 
     let chunks = split_message(text, max_len);
     let chunk_count = chunks.len();
-    let mut last_id = None;
+    let mut sent_ids = Vec::with_capacity(chunk_count);
 
     for (i, chunk) in chunks.into_iter().enumerate() {
         let is_last = i == chunk_count - 1;
@@ -371,7 +371,7 @@ async fn send_long_message(
 
         match req.await {
             Ok(sent) => {
-                last_id = Some(sent.id);
+                sent_ids.push(sent.id);
             }
             Err(e) => {
                 warn!(chat_id = %chat_id.0, chunk = i, error = %e, "Failed to send message chunk");
@@ -379,7 +379,7 @@ async fn send_long_message(
         }
     }
 
-    Ok(last_id)
+    Ok(sent_ids)
 }
 
 /// Add a reaction emoji to a message, logging warnings on failure (not fatal).
@@ -405,6 +405,10 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
     let mut progress_messages: HashMap<i64, MessageId> = HashMap::new();
     // Track summary message IDs per session key
     let mut summary_messages: HashMap<i64, MessageId> = HashMap::new();
+    // Track last selector hash per session to avoid re-sending the same prompt every poll
+    let mut last_selector_hashes: HashMap<i64, u64> = HashMap::new();
+    // Track selector message IDs so we can delete them when the selector disappears
+    let mut selector_messages: HashMap<i64, MessageId> = HashMap::new();
 
     // Shared link preview options for progress/notification messages (no previews on status msgs).
     let no_preview = LinkPreviewOptions {
@@ -518,6 +522,14 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     if let Some(sum_msg_id) = summary_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, sum_msg_id).await;
                     }
+                    // Clear selector state when session completes
+                    last_selector_hashes.remove(&session_key);
+                    if let Some(sel_msg_id) = selector_messages.remove(&session_key) {
+                        let _ = bot.delete_message(chat_id, sel_msg_id).await;
+                    }
+
+                    // Take at_session_name (if @-addressed). Used after send to record the reply map.
+                    let at_session_name = state.take_at_session_name(session_key).await;
 
                     // Determine target thread (prefer response's thread_id).
                     let target_thread_id = response_thread_id.or(thread_id);
@@ -564,7 +576,21 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     ).await;
 
                     match send_result {
-                        Ok(_) => {
+                        Ok(sent_ids) => {
+                            // If @-addressed, record ALL sent message IDs so the user can
+                            // reply to any visible chunk and still be routed to the same session.
+                            debug!(
+                                chat_id = %chat_id.0,
+                                sent_ids = ?sent_ids,
+                                at_session = ?at_session_name,
+                                "Attempted record_at_reply"
+                            );
+                            if let Some(session_name) = &at_session_name {
+                                for msg_id in &sent_ids {
+                                    state.record_at_reply(chat_id.0, *msg_id, session_name.clone()).await;
+                                }
+                            }
+
                             if detected_options.is_some() {
                                 info!(chat_id = %chat_id.0, thread_id = ?target_thread_id, "Response with options sent to user");
                             } else {
@@ -580,6 +606,74 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                         }
                         Err(e) => {
                             warn!(chat_id = %chat_id.0, error = %e, "Failed to send response");
+                        }
+                    }
+                }
+                Ok(PollResult::SelectorDetected(selector)) => {
+                    // Deduplicate: only send when question/options change — not on every poll.
+                    use std::hash::{Hash, Hasher};
+                    use std::collections::hash_map::DefaultHasher;
+                    let mut hasher = DefaultHasher::new();
+                    selector.question.hash(&mut hasher);
+                    selector.options.hash(&mut hasher);
+                    let selector_hash = hasher.finish();
+
+                    if last_selector_hashes.get(&session_key) != Some(&selector_hash) {
+                        last_selector_hashes.insert(session_key, selector_hash);
+
+                        // Delete previous selector message if any
+                        if let Some(old_msg_id) = selector_messages.remove(&session_key) {
+                            let _ = bot.delete_message(chat_id, old_msg_id).await;
+                        }
+
+                        let mut text = String::new();
+                        if !selector.question.is_empty() {
+                            text.push_str(&format!(
+                                "❓ <b>{}</b>\n\n",
+                                teloxide::utils::html::escape(&selector.question)
+                            ));
+                        } else {
+                            text.push_str("❓ <b>Choose an option:</b>\n\n");
+                        }
+                        for (i, opt) in selector.options.iter().enumerate() {
+                            let marker = if i == selector.selected_index { "▶ " } else { "   " };
+                            text.push_str(&format!(
+                                "{}{}.  {}\n",
+                                marker,
+                                i + 1,
+                                teloxide::utils::html::escape(opt)
+                            ));
+                        }
+                        if selector.is_multi {
+                            text.push_str("\n<i>Tap buttons to select, then confirm</i>");
+                        } else {
+                            text.push_str("\n<i>Tap a button or reply with a number to select</i>");
+                        }
+
+                        let keyboard_buttons: Vec<Vec<InlineKeyboardButton>> = selector
+                            .options
+                            .iter()
+                            .enumerate()
+                            .map(|(i, opt)| {
+                                vec![InlineKeyboardButton::callback(
+                                    format!("{}. {}", i + 1, opt),
+                                    format!("select:{}:{}", i + 1, selector.selected_index),
+                                )]
+                            })
+                            .collect();
+
+                        let markup = InlineKeyboardMarkup::new(keyboard_buttons);
+
+                        let mut req = bot
+                            .send_message(chat_id, &text)
+                            .parse_mode(teloxide::types::ParseMode::Html)
+                            .reply_markup(markup);
+                        if let Some(tid) = thread_id {
+                            req = req.message_thread_id(tid);
+                        }
+                        match req.await {
+                            Ok(sent) => { selector_messages.insert(session_key, sent.id); }
+                            Err(e) => { warn!(chat_id = %chat_id.0, error = %e, "Failed to send selector message"); }
                         }
                     }
                 }
@@ -695,48 +789,26 @@ async fn poll_notifications_loop(bot: Bot, state: Arc<TelegramState>) {
     }
 }
 
-/// Send rebuild notification to all authorized chats.
-async fn send_rebuild_notification(
-    bot: Bot,
-    state: Arc<TelegramState>,
-    restored_count: usize,
-    total_count: usize,
-) {
-    let authorized_chats = state.get_authorized_chat_ids().await;
-    if authorized_chats.is_empty() {
-        return;
-    }
+/// Send per-session restart notification to each restored session's user.
+async fn send_restart_notification(bot: Bot, state: Arc<TelegramState>) {
+    use teloxide::types::{ChatId, ParseMode, ThreadId};
 
-    let message = if total_count == 0 {
-        "🔄 Bot rebuilt and restarted.\n\nNo active sessions to restore.".to_string()
-    } else if restored_count == 0 {
-        format!(
-            "🔄 Bot rebuilt and restarted.\n\n⚠️ Could not restore {} session(s) (expired or tmux session not found).",
-            total_count
-        )
-    } else if restored_count == total_count {
-        format!(
-            "🔄 Bot rebuilt and restarted.\n\n✅ Successfully restored {} session(s).",
-            restored_count
-        )
-    } else {
-        format!(
-            "🔄 Bot rebuilt and restarted.\n\n✅ Restored {} of {} session(s).\n⚠️ {} session(s) could not be restored (expired or tmux session not found).",
-            restored_count,
-            total_count,
-            total_count - restored_count
-        )
-    };
-
-    for chat_id in authorized_chats {
-        let result = bot
-            .send_message(teloxide::types::ChatId(chat_id), &message)
-            .await;
-
-        if let Err(e) = result {
-            warn!(chat_id = %chat_id, error = %e, "Failed to send rebuild notification");
+    let sessions = state.get_session_summaries().await;
+    for (chat_id, project_name, thread_id) in sessions {
+        let msg = format!(
+            "🔄 Bot restarted — reconnected to <b>{}</b>",
+            teloxide::utils::html::escape(&project_name)
+        );
+        let mut req = bot
+            .send_message(ChatId(chat_id), &msg)
+            .parse_mode(ParseMode::Html);
+        if let Some(tid) = thread_id {
+            req = req.message_thread_id(ThreadId(teloxide::types::MessageId(tid)));
+        }
+        if let Err(e) = req.await {
+            warn!(chat_id = %chat_id, error = %e, "Failed to send restart notification");
         } else {
-            debug!(chat_id = %chat_id, "Rebuild notification sent");
+            debug!(chat_id = %chat_id, project = %project_name, "Restart notification sent");
         }
     }
 }

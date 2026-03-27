@@ -766,12 +766,16 @@ impl TelegramState {
 
                 let mut sessions = self.sessions.write().await;
                 sessions.insert(chat_id.0, session);
+                drop(sessions); // Release lock before saving
 
                 debug!(
                     chat_id = %chat_id.0,
                     session = %session_name,
                     "User connected to unregistered tmux session"
                 );
+
+                self.save_sessions().await;
+
                 return Ok((display_name, "unknown".to_string()));
             }
         }
@@ -1999,6 +2003,16 @@ impl TelegramState {
 
         // Connect to the new project
         self.connect(chat_id, name).await
+    }
+
+    /// Return (chat_id, project_name, thread_id) for every active session.
+    /// Used to send per-session restart notifications.
+    pub async fn get_session_summaries(&self) -> Vec<(i64, String, Option<i32>)> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .map(|s| (s.chat_id.0, s.project_name.clone(), s.thread_id.map(|t| t.0 .0)))
+            .collect()
     }
 
     /// Save all active sessions to disk for persistence.
