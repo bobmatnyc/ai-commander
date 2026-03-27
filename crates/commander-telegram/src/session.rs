@@ -4,6 +4,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use teloxide::types::{ChatId, MessageId, ThreadId};
+use tracing::warn;
 
 /// A user's session with a connected project.
 #[derive(Debug)]
@@ -53,6 +54,10 @@ pub struct UserSession {
     pub at_session_name: Option<String>,
     /// Consecutive polls where is_idle=true but has_prompt=false (stale/dead tmux detection).
     pub stale_poll_count: u32,
+    /// Characters added to response_buffer since last progressive summary.
+    pub chars_since_last_summary: usize,
+    /// When completion (idle+prompt) was first detected; used to avoid waiting for a second idle poll.
+    pub completion_detected_at: Option<Instant>,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -177,6 +182,8 @@ impl UserSession {
             is_private_chat: false,
             at_session_name: None,
             stale_poll_count: 0,
+            chars_since_last_summary: 0,
+            completion_detected_at: None,
         }
     }
 
@@ -211,6 +218,8 @@ impl UserSession {
             is_private_chat: false,
             at_session_name: None,
             stale_poll_count: 0,
+            chars_since_last_summary: 0,
+            completion_detected_at: None,
         }
     }
 
@@ -229,6 +238,8 @@ impl UserSession {
         self.send_time = None;
         self.original_message_id = None;
         self.stale_poll_count = 0;
+        self.chars_since_last_summary = 0;
+        self.completion_detected_at = None;
     }
 
     /// Consume and return `at_session_name`, clearing it from the session.
@@ -239,6 +250,9 @@ impl UserSession {
 
     /// Start collecting a response for a query.
     pub fn start_response_collection(&mut self, query: &str, current_output: String, message_id: Option<MessageId>) {
+        if self.is_waiting {
+            warn!("start_response_collection called while response in-flight — discarding old cycle (buffer_len={})", self.response_buffer.len());
+        }
         self.response_buffer.clear();
         self.last_output = current_output;
         self.last_output_time = Some(Instant::now());
@@ -249,6 +263,8 @@ impl UserSession {
         self.is_summarizing = false;
         self.last_incremental_summary_line_count = 0;
         self.send_time = Some(Instant::now());
+        self.chars_since_last_summary = 0;
+        self.completion_detected_at = None;
     }
 
     /// Add new lines to the response buffer.

@@ -493,6 +493,26 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                         }
                     }
                 }
+                Ok(PollResult::ProgressiveSummary(summary)) => {
+                    if let Some(&msg_id) = summary_messages.get(&session_key) {
+                        let _ = bot.edit_message_text(chat_id, msg_id, &summary).await;
+                    } else {
+                        let mut req = bot.send_message(chat_id, &summary)
+                            .disable_notification(true)
+                            .link_preview_options(no_preview.clone());
+                        if let Some(tid) = thread_id {
+                            req = req.message_thread_id(tid);
+                        }
+                        match req.await {
+                            Ok(sent) => {
+                                summary_messages.insert(session_key, sent.id);
+                            }
+                            Err(e) => {
+                                warn!(chat_id = %chat_id.0, error = %e, "Failed to send progressive summary");
+                            }
+                        }
+                    }
+                }
                 Ok(PollResult::Summarizing) => {
                     let summarizing_msg = "🤖 Summarizing output...";
                     if let Some(&msg_id) = progress_messages.get(&session_key) {
@@ -519,9 +539,8 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, prog_msg_id).await;
                     }
-                    if let Some(sum_msg_id) = summary_messages.remove(&session_key) {
-                        let _ = bot.delete_message(chat_id, sum_msg_id).await;
-                    }
+                    // Keep incremental summary messages in chat — they're useful history.
+                    summary_messages.remove(&session_key);
                     // Clear selector state when session completes
                     last_selector_hashes.remove(&session_key);
                     if let Some(sel_msg_id) = selector_messages.remove(&session_key) {

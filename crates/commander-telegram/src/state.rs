@@ -32,6 +32,8 @@ pub enum PollResult {
     Progress(String),
     /// Incremental summary of content collected so far (every 50 lines).
     IncrementalSummary(String),
+    /// Progressive summary triggered every 50 characters of new output.
+    ProgressiveSummary(String),
     /// Output collection complete, starting summarization.
     Summarizing,
     /// Complete response ready to send (summarization done or no summarization needed).
@@ -1108,8 +1110,10 @@ impl TelegramState {
         if current_output != session.last_output {
             let new_lines = find_new_lines(&session.last_output, &current_output);
             let new_line_count = new_lines.len();
+            let new_chars: usize = new_lines.iter().map(|l| l.chars().count()).sum();
             session.add_response_lines(new_lines);
             session.last_output = current_output.clone();
+            session.chars_since_last_summary += new_chars;
 
             debug!(
                 chat_id = %chat_id.0,
@@ -1118,6 +1122,21 @@ impl TelegramState {
                 buffer_len = session.response_buffer.len(),
                 "poll_topic_output: new tmux output captured"
             );
+
+            // Progressive summary: every 50 characters of new output
+            if session.chars_since_last_summary >= 50 && is_summarization_available() {
+                session.chars_since_last_summary = 0;
+                let content_so_far = session.get_response();
+                let line_count = session.response_buffer.len();
+                match summarize_incremental(&content_so_far, line_count).await {
+                    Ok(summary) => {
+                        return Ok(PollResult::ProgressiveSummary(format!("📝 {}", summary)));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to generate progressive summary, continuing");
+                    }
+                }
+            }
 
             // Check if we should emit an incremental summary (every 50 lines)
             if session.should_emit_incremental_summary() {
@@ -1217,8 +1236,13 @@ impl TelegramState {
             let needs_summarization = is_summarization_available();
 
             if needs_summarization && !session.is_summarizing {
-                session.is_summarizing = true;
-                return Ok(PollResult::Summarizing);
+                // Single-pass fix: signal Summarizing on first detection, proceed on next poll.
+                if session.completion_detected_at.is_none() {
+                    session.completion_detected_at = Some(std::time::Instant::now());
+                    session.is_summarizing = true;
+                    return Ok(PollResult::Summarizing);
+                }
+                // completion_detected_at is set — fall through to do the work on this pass.
             }
 
             let raw_response = session.get_response();
@@ -1570,8 +1594,10 @@ impl TelegramState {
         if current_output != session.last_output {
             let new_lines = find_new_lines(&session.last_output, &current_output);
             let new_line_count = new_lines.len();
+            let new_chars: usize = new_lines.iter().map(|l| l.chars().count()).sum();
             session.add_response_lines(new_lines);
             session.last_output = current_output.clone();
+            session.chars_since_last_summary += new_chars;
 
             debug!(
                 chat_id = %chat_id.0,
@@ -1579,6 +1605,21 @@ impl TelegramState {
                 buffer_len = session.response_buffer.len(),
                 "poll_output: new tmux output captured"
             );
+
+            // Progressive summary: every 50 characters of new output
+            if session.chars_since_last_summary >= 50 && is_summarization_available() {
+                session.chars_since_last_summary = 0;
+                let content_so_far = session.get_response();
+                let line_count = session.response_buffer.len();
+                match summarize_incremental(&content_so_far, line_count).await {
+                    Ok(summary) => {
+                        return Ok(PollResult::ProgressiveSummary(format!("📝 {}", summary)));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to generate progressive summary, continuing");
+                    }
+                }
+            }
 
             // Check if we should emit an incremental summary (every 50 lines)
             if session.should_emit_incremental_summary() {
@@ -1679,12 +1720,18 @@ impl TelegramState {
             let needs_summarization = is_summarization_available();
 
             if needs_summarization && !session.is_summarizing {
-                // First time we detect completion - signal "Summarizing" state
-                session.is_summarizing = true;
-                return Ok(PollResult::Summarizing);
+                // Single-pass fix: record when completion was first detected and show Summarizing.
+                // The next poll proceeds directly without re-checking is_idle, preventing the
+                // two-poll stall where active output keeps resetting the idle timer.
+                if session.completion_detected_at.is_none() {
+                    session.completion_detected_at = Some(std::time::Instant::now());
+                    session.is_summarizing = true;
+                    return Ok(PollResult::Summarizing);
+                }
+                // completion_detected_at is set — fall through to do the work on this pass.
             }
 
-            // If we already signaled Summarizing or don't need it, do the actual work
+            // Do the actual summarization work
             let raw_response = session.get_response();
             let query = session.pending_query.clone().unwrap_or_default();
             let message_id = session.pending_message_id;
