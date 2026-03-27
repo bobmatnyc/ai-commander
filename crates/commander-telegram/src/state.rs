@@ -1123,8 +1123,8 @@ impl TelegramState {
                 "poll_topic_output: new tmux output captured"
             );
 
-            // Progressive summary: every 50 characters of new output
-            if session.chars_since_last_summary >= 50 && is_summarization_available() {
+            // Progressive summary: every 500 characters of new output
+            if session.chars_since_last_summary >= 500 && is_summarization_available() {
                 session.chars_since_last_summary = 0;
                 let content_so_far = session.get_response();
                 let line_count = session.response_buffer.len();
@@ -1606,8 +1606,8 @@ impl TelegramState {
                 "poll_output: new tmux output captured"
             );
 
-            // Progressive summary: every 50 characters of new output
-            if session.chars_since_last_summary >= 50 && is_summarization_available() {
+            // Progressive summary: every 500 characters of new output
+            if session.chars_since_last_summary >= 500 && is_summarization_available() {
                 session.chars_since_last_summary = 0;
                 let content_so_far = session.get_response();
                 let line_count = session.response_buffer.len();

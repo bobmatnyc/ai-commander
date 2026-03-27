@@ -338,7 +338,7 @@ async fn send_long_message(
     for (i, chunk) in chunks.into_iter().enumerate() {
         let is_last = i == chunk_count - 1;
 
-        let mut req = bot.send_message(chat_id, chunk)
+        let mut req = bot.send_message(chat_id, &chunk)
             .parse_mode(parse_mode)
             .link_preview_options(LinkPreviewOptions {
                 is_disabled: true,
@@ -369,14 +369,38 @@ async fn send_long_message(
             req = req.disable_notification(true);
         }
 
-        match req.await {
-            Ok(sent) => {
-                sent_ids.push(sent.id);
+        let send_result = req.await;
+        let msg = match send_result {
+            Ok(m) => m,
+            Err(e) if is_last && e.to_string().contains("EFFECT_ID_INVALID") => {
+                warn!(chat_id = %chat_id.0, chunk = i, "EFFECT_ID_INVALID — retrying without effect");
+                // Rebuild the last-chunk request without message_effect_id.
+                let mut retry = bot.send_message(chat_id, &chunk)
+                    .parse_mode(parse_mode)
+                    .link_preview_options(teloxide::types::LinkPreviewOptions {
+                        is_disabled: true,
+                        url: None,
+                        prefer_small_media: false,
+                        prefer_large_media: false,
+                        show_above_text: false,
+                    });
+                if let Some(tid) = thread_id {
+                    retry = retry.message_thread_id(tid);
+                }
+                if let Some(ref rp) = reply_params {
+                    retry = retry.reply_parameters(rp.clone());
+                }
+                if let Some(ref kb) = reply_markup {
+                    retry = retry.reply_markup(kb.clone());
+                }
+                if disable_notification {
+                    retry = retry.disable_notification(true);
+                }
+                retry.await.map_err(|e2| TelegramError::SessionError(e2.to_string()))?
             }
-            Err(e) => {
-                warn!(chat_id = %chat_id.0, chunk = i, error = %e, "Failed to send message chunk");
-            }
-        }
+            Err(e) => return Err(TelegramError::SessionError(e.to_string()).into()),
+        };
+        sent_ids.push(msg.id);
     }
 
     Ok(sent_ids)
@@ -596,6 +620,17 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
 
                     match send_result {
                         Ok(sent_ids) => {
+                            if sent_ids.is_empty() {
+                                warn!(chat_id = %chat_id.0, "send_long_message returned empty sent_ids — attempting plain fallback send");
+                                let mut fallback = bot.send_message(chat_id, &response);
+                                if let Some(tid) = target_thread_id {
+                                    fallback = fallback.message_thread_id(tid);
+                                }
+                                if let Err(fe) = fallback.await {
+                                    warn!(chat_id = %chat_id.0, error = %fe, "Plain fallback send also failed");
+                                }
+                            }
+
                             // If @-addressed, record ALL sent message IDs so the user can
                             // reply to any visible chunk and still be routed to the same session.
                             debug!(
