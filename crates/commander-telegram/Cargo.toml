@@ -16,6 +16,7 @@ commander-adapters = { path = "../commander-adapters" }
 commander-tmux = { path = "../commander-tmux" }
 commander-persistence = { path = "../commander-persistence" }
 commander-core = { path = "../commander-core" }
+mpm-sdk = { path = "../mpm-sdk" }
 
 # Telegram
 teloxide = { workspace = true }

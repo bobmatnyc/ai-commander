@@ -76,6 +76,15 @@ pub enum Command {
 
     #[command(description = "List topics and their sessions")]
     Topics,
+
+    #[command(description = "List available MPM agents")]
+    Agents,
+    #[command(description = "Spawn an MPM agent: /spawn <agent> <task>")]
+    Spawn(String),
+    #[command(description = "MPM system status")]
+    Mpm,
+    #[command(description = "Ask MPM a question: /ask <question>")]
+    Ask(String),
 }
 
 /// Handle the /start command with optional deep link parameter.
@@ -2493,6 +2502,324 @@ pub async fn handle_topics(
 }
 
 /// Dispatch commands to appropriate handlers.
+/// Handle /agents — list available MPM agents.
+pub async fn handle_agents(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+) -> ResponseResult<()> {
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use <code>/pair &lt;code&gt;</code> first.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    typing(&bot, msg.chat.id, None).await;
+
+    match mpm_sdk::MpmClient::discover() {
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("MPM not available: {}", e),
+            )
+            .await?;
+        }
+        Ok(client) => match client.list_agents().await {
+            Err(e) => {
+                bot.send_message(msg.chat.id, format!("Failed to list agents: {}", e))
+                    .await?;
+            }
+            Ok(agents) if agents.is_empty() => {
+                bot.send_message(msg.chat.id, "No MPM agents found.").await?;
+            }
+            Ok(agents) => {
+                let mut text = String::from("<b>Available MPM agents:</b>\n");
+                for agent in &agents {
+                    if agent.description.is_empty() {
+                        text.push_str(&format!("• <code>{}</code>\n", agent.id));
+                    } else {
+                        text.push_str(&format!(
+                            "• <code>{}</code> — {}\n",
+                            agent.id, agent.description
+                        ));
+                    }
+                }
+                bot.send_message(msg.chat.id, text)
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await?;
+            }
+        },
+    }
+
+    Ok(())
+}
+
+/// Handle /mpm — show MPM system status.
+pub async fn handle_mpm_status(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+) -> ResponseResult<()> {
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use <code>/pair &lt;code&gt;</code> first.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    typing(&bot, msg.chat.id, None).await;
+
+    match mpm_sdk::MpmClient::discover() {
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("MPM not found: {}", e))
+                .await?;
+        }
+        Ok(client) => match client.status().await {
+            Err(e) => {
+                bot.send_message(msg.chat.id, format!("MPM status error: {}", e))
+                    .await?;
+            }
+            Ok(status) => {
+                let health = if status.healthy { "healthy" } else { "unhealthy" };
+                let text = format!(
+                    "<b>MPM Status</b>\nVersion: <code>{}</code>\nBinary: <code>{}</code>\nAgents: {}\nHealth: {}",
+                    status.version, status.binary_path, status.agent_count, health
+                );
+                bot.send_message(msg.chat.id, text)
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await?;
+            }
+        },
+    }
+
+    Ok(())
+}
+
+/// Handle /spawn <agent> <task> — spawn an MPM agent with streaming output.
+pub async fn handle_spawn(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    args: String,
+) -> ResponseResult<()> {
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use <code>/pair &lt;code&gt;</code> first.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    let args = args.trim();
+    if args.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "<b>Usage:</b> <code>/spawn &lt;agent&gt; &lt;task&gt;</code>\n\
+            Example: <code>/spawn research what is the Rust ownership model</code>",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    // Split: first word is agent_id, rest is the prompt.
+    let (agent_id, prompt) = match args.split_once(char::is_whitespace) {
+        Some((a, p)) => (a.trim(), p.trim()),
+        None => (args, ""),
+    };
+
+    if prompt.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "Please provide a task after the agent name.\n\
+                Example: <code>/spawn {} describe this project</code>",
+                agent_id
+            ),
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    spawn_agent_with_streaming(bot, msg, agent_id, prompt).await
+}
+
+/// Handle /ask <question> — shorthand for spawning the default research agent.
+pub async fn handle_ask(
+    bot: Bot,
+    msg: Message,
+    state: Arc<TelegramState>,
+    question: String,
+) -> ResponseResult<()> {
+    if !state.is_authorized(msg.chat.id.0).await {
+        bot.send_message(
+            msg.chat.id,
+            "Not authorized. Use <code>/pair &lt;code&gt;</code> first.",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    let question = question.trim();
+    if question.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "<b>Usage:</b> <code>/ask &lt;question&gt;</code>\n\
+            Example: <code>/ask what is the Rust ownership model</code>",
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+        return Ok(());
+    }
+
+    spawn_agent_with_streaming(bot, msg, "research", question).await
+}
+
+/// Shared implementation: spawn an agent, stream partial output, send final result.
+async fn spawn_agent_with_streaming(
+    bot: Bot,
+    msg: Message,
+    agent_id: &str,
+    prompt: &str,
+) -> ResponseResult<()> {
+    let mut client = match mpm_sdk::MpmClient::discover() {
+        Ok(c) => c,
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("MPM not available: {}", e))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Send initial "spawning" message and keep its ID for editing.
+    let status_msg = bot
+        .send_message(
+            msg.chat.id,
+            format!("Spawning agent <code>{}</code>...", agent_id),
+        )
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .await?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<mpm_sdk::AgentEvent>(64);
+
+    let agent_id_owned = agent_id.to_string();
+    let prompt_owned = prompt.to_string();
+
+    // Spawn the agent run in a background task.
+    tokio::spawn(async move {
+        if let Err(e) = client.run_streaming(&agent_id_owned, &prompt_owned, tx.clone()).await {
+            let _ = tx.send(mpm_sdk::AgentEvent::Error(e.to_string())).await;
+        }
+    });
+
+    // Accumulate output, edit the status message every ~2 seconds.
+    let mut accumulated = String::new();
+    let mut last_edit = std::time::Instant::now();
+    let edit_interval = std::time::Duration::from_secs(2);
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            mpm_sdk::AgentEvent::Text(chunk) => {
+                accumulated.push_str(&chunk);
+                // Rate-limit edits to avoid Telegram flood limits.
+                if last_edit.elapsed() >= edit_interval && !accumulated.is_empty() {
+                    let preview = truncate_for_telegram(&accumulated, 3500);
+                    let _ = bot
+                        .edit_message_text(
+                            msg.chat.id,
+                            status_msg.id,
+                            format!("Agent <code>{}</code> working...\n\n{}", agent_id, preview),
+                        )
+                        .parse_mode(teloxide::types::ParseMode::Html)
+                        .await;
+                    last_edit = std::time::Instant::now();
+                }
+            }
+            mpm_sdk::AgentEvent::ToolUse(tool) => {
+                debug!(agent = %agent_id, tool = %tool, "Agent using tool");
+            }
+            mpm_sdk::AgentEvent::Complete(result) => {
+                let cost_str = result
+                    .cost_usd
+                    .map(|c| format!(" | ${:.4}", c))
+                    .unwrap_or_default();
+                let footer = format!(
+                    "\n\n<i>Agent: {} | {}ms{}</i>",
+                    agent_id, result.duration_ms, cost_str
+                );
+
+                if result.is_error {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("Agent error:\n{}{}", result.text, footer),
+                    )
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await?;
+                } else {
+                    let final_text = if result.text.is_empty() {
+                        accumulated.clone()
+                    } else {
+                        result.text.clone()
+                    };
+
+                    // Delete the "spawning" status message.
+                    let _ = bot.delete_message(msg.chat.id, status_msg.id).await;
+
+                    let display = truncate_for_telegram(&final_text, 4000);
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("{}{}", display, footer),
+                    )
+                    .parse_mode(teloxide::types::ParseMode::Html)
+                    .await?;
+                }
+                return Ok(());
+            }
+            mpm_sdk::AgentEvent::Error(e) => {
+                bot.send_message(msg.chat.id, format!("Agent error: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        }
+    }
+
+    // Channel closed without Complete — something went wrong.
+    if !accumulated.is_empty() {
+        let _ = bot.delete_message(msg.chat.id, status_msg.id).await;
+        bot.send_message(
+            msg.chat.id,
+            truncate_for_telegram(&accumulated, 4000),
+        )
+        .await?;
+    } else {
+        bot.edit_message_text(msg.chat.id, status_msg.id, "Agent run completed (no output).")
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Truncate a string to fit within Telegram's message length limit.
+fn truncate_for_telegram(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        let truncated: String = text.chars().take(max_chars).collect();
+        format!("{}...\n<i>[truncated]</i>", truncated)
+    }
+}
+
 pub async fn handle_command(
     bot: Bot,
     msg: Message,
@@ -2518,6 +2845,10 @@ pub async fn handle_command(
         Command::GroupMode => handle_groupmode(bot, msg, state).await,
         Command::Topic(session) => handle_topic(bot, msg, state, session).await,
         Command::Topics => handle_topics(bot, msg, state).await,
+        Command::Agents => handle_agents(bot, msg, state).await,
+        Command::Spawn(args) => handle_spawn(bot, msg, state, args).await,
+        Command::Mpm => handle_mpm_status(bot, msg, state).await,
+        Command::Ask(question) => handle_ask(bot, msg, state, question).await,
     }
 }
 
