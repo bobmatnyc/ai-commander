@@ -269,6 +269,8 @@ impl MpmClient {
                         cost_usd: None,
                         duration_ms: 0,
                         is_error: false,
+                        num_turns: None,
+                        runtime: None,
                     }))
                     .await;
                 break;

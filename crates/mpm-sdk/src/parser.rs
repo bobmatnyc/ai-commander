@@ -77,6 +77,8 @@ pub fn parse_ndjson_line(line: &str) -> Option<AgentEvent> {
                 cost_usd,
                 duration_ms,
                 is_error,
+                num_turns: None,
+                runtime: None,
             }))
         }
         _ => None,

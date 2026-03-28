@@ -7,8 +7,15 @@
 pub mod client;
 pub mod http_client;
 pub mod parser;
+pub mod serve_client;
+pub mod serve_manager;
 pub mod types;
 
 pub use client::MpmClient;
-pub use http_client::MpmHttpClient;
-pub use types::{AgentEvent, AgentInfo, AgentResult, AgentTask, MpmError, MpmStatus};
+pub use http_client::{InjectRequest, MpmHttpClient};
+pub use serve_client::UiServiceClient;
+pub use serve_manager::ServeManager;
+pub use types::{
+    AgentEvent, AgentInfo, AgentResult, AgentTask, CreateSessionRequest, MpmError, MpmStatus,
+    ServeSession, ServeStreamEvent, SessionContext,
+};

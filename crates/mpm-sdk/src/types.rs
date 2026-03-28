@@ -25,6 +25,49 @@ pub struct AgentResult {
     pub cost_usd: Option<f64>,
     pub duration_ms: u64,
     pub is_error: bool,
+    pub num_turns: Option<u32>,
+    pub runtime: Option<String>,
+}
+
+/// Session created/managed by the ui_service daemon (port 7777).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServeSession {
+    pub id: String,
+    pub claude_session_id: Option<String>,
+    pub status: String,
+    pub model: Option<String>,
+    pub cwd: Option<String>,
+    pub project_root: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Request body for creating a session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct CreateSessionRequest {
+    pub resume_id: Option<String>,
+    pub model: Option<String>,
+    pub cwd: Option<String>,
+    pub project_root: Option<String>,
+    pub bare: Option<bool>,
+    pub permission_mode: Option<String>,
+}
+
+/// A streaming event from POST /api/v1/sessions/{id}/messages with stream=true.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ServeStreamEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub content: Option<String>,
+    pub name: Option<String>,
+}
+
+/// Context usage for a session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionContext {
+    pub tokens_used: u64,
+    pub tokens_total: u64,
+    pub percent_used: f64,
+    pub compaction_recommended: bool,
 }
 
 /// Streaming event from a running agent.
