@@ -8,7 +8,7 @@ use teloxide::utils::command::BotCommands;
 use tracing::{debug, error, info, warn};
 
 use crate::error::TelegramError;
-use crate::state::TelegramState;
+use crate::state::{get_tmux_cwd, TelegramState};
 
 /// Send a typing indicator to a chat, ignoring errors (best-effort cosmetic).
 /// Telegram expires the indicator after ~5 seconds — call again for long operations.
@@ -993,8 +993,8 @@ pub async fn handle_status(
         let activity = if is_waiting {
             if let Some(query) = pending_query {
                 // Truncate long queries
-                let truncated = if query.len() > 50 {
-                    format!("{}...", &query[..47])
+                let truncated = if query.chars().count() > 50 {
+                    format!("{}...", query.chars().take(47).collect::<String>())
                 } else {
                     query
                 };
@@ -1034,15 +1034,21 @@ pub async fn handle_status(
             String::new()
         };
 
+        let path_line = if project_path == "unknown" || project_path.is_empty() {
+            "📍 Path: <i>not available</i>".to_string()
+        } else {
+            format!("📍 Path: <code>{}</code>", html_escape(&project_path))
+        };
+
         format!(
             "📊 <b>Status</b>\n\n\
             ✅ Connection: Connected\n\
             📁 Project: {}\n\
-            📍 Path: <code>{}</code>\n\
+            {}\n\
             🔧 Adapter: {}\n\n\
             {}{}",
             html_escape(&project_name),
-            html_escape(&project_path),
+            path_line,
             adapter_name,
             activity,
             screen_section
@@ -1713,19 +1719,25 @@ pub async fn handle_stop(
             }
         };
 
-        // Try to find project path from store
-        let project_path = state
-            .store()
-            .load_all_projects()
-            .ok()
-            .and_then(|projects| {
-                let search_name = session_arg.strip_prefix("commander-").unwrap_or(session_arg);
-                projects
-                    .values()
-                    .find(|p| p.name == search_name)
-                    .map(|p| p.path.clone())
-            })
-            .unwrap_or_else(|| "unknown".to_string());
+        // Try to find project path from store; fall back to querying tmux directly
+        let project_path = {
+            let from_store = state
+                .store()
+                .load_all_projects()
+                .ok()
+                .and_then(|projects| {
+                    let search_name = session_arg.strip_prefix("commander-").unwrap_or(session_arg);
+                    projects
+                        .values()
+                        .find(|p| p.name == search_name)
+                        .map(|p| p.path.clone())
+                });
+            match from_store {
+                Some(p) => p,
+                None => get_tmux_cwd(&tmux_session).await
+                    .unwrap_or_else(|| "unknown".to_string()),
+            }
+        };
 
         // Check if this is the connected session
         let is_connected = state

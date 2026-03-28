@@ -759,9 +759,12 @@ impl TelegramState {
                     .unwrap_or(session_name)
                     .to_string();
 
+                let project_path = get_tmux_cwd(session_name).await
+                    .unwrap_or_else(|| "unknown".to_string());
+
                 let session = UserSession::new(
                     chat_id,
-                    "unknown".to_string(), // No project path for unregistered sessions
+                    project_path.clone(),
                     display_name.clone(),
                     session_name.clone(),
                 );
@@ -923,9 +926,12 @@ impl TelegramState {
                     .unwrap_or(tmux_session_name)
                     .to_string();
 
+                let topic_project_path = get_tmux_cwd(tmux_session_name).await
+                    .unwrap_or_else(|| "unknown".to_string());
+
                 let session = UserSession::with_thread_id(
                     chat_id,
-                    "unknown".to_string(),
+                    topic_project_path.clone(),
                     display_name.clone(),
                     tmux_session_name.clone(),
                     thread_id,
@@ -941,7 +947,7 @@ impl TelegramState {
                     thread_id.0.0,
                     display_name.clone(),
                     tmux_session_name.clone(),
-                    None,
+                    if topic_project_path == "unknown" { None } else { Some(topic_project_path) },
                 ).await?;
 
                 debug!(
@@ -2131,6 +2137,22 @@ impl TelegramState {
 /// Create a shared state wrapped in Arc for use across handlers.
 pub fn create_shared_state(state_dir: &std::path::Path) -> Arc<TelegramState> {
     Arc::new(TelegramState::new(state_dir))
+}
+
+/// Query tmux for the current working directory of the given session's active pane.
+pub(crate) async fn get_tmux_cwd(session_name: &str) -> Option<String> {
+    let output = tokio::process::Command::new("tmux")
+        .args(["display-message", "-p", "-t", session_name, "#{pane_current_path}"])
+        .output()
+        .await
+        .ok()?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
