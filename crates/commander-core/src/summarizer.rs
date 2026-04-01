@@ -4,7 +4,7 @@
 //! concise, conversational summaries suitable for mobile/compact displays.
 
 use thiserror::Error;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::output_filter::clean_response;
 
@@ -39,6 +39,22 @@ fn fallback_truncate(text: &str, max_lines: usize, max_chars: usize) -> String {
 
 /// Default model to use for summarization.
 pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+
+/// Default tier-2 (cheap/fast) model for mid-confidence summaries.
+pub const TIER2_MODEL: &str = "anthropic/claude-haiku-3.5";
+
+/// Get the configured tier-2 model, or default.
+pub fn get_tier2_model() -> String {
+    std::env::var("SUMMARIZER_TIER2_MODEL").unwrap_or_else(|_| TIER2_MODEL.to_string())
+}
+
+/// Get the confidence threshold for tier-1 structured summaries.
+pub fn get_confidence_threshold() -> f32 {
+    std::env::var("SUMMARIZER_CONFIDENCE_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.7)
+}
 
 /// OpenRouter API endpoint.
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -199,25 +215,113 @@ pub fn summarize_blocking(
         .ok_or_else(|| SummarizerError::ParseError("No content in response".to_string()))
 }
 
+/// Tiered summarization: tries structured extraction first, falls back to LLM.
+/// Returns (summary_text, tier_used) where tier is 1, 2, or 3.
+///
+/// Pipeline:
+/// - Tier 1: Structured extraction (free, instant) — confidence >= threshold
+/// - Tier 2: Cheap model (Haiku) with pre-digested context — confidence >= 0.4
+/// - Tier 3: Full model (Sonnet) with full input — current behavior
+pub async fn summarize_tiered(query: &str, raw_response: &str) -> (String, u8) {
+    use crate::structured_summarizer;
+
+    let lines: Vec<String> = raw_response.lines().map(|l| l.to_string()).collect();
+    let extracted = structured_summarizer::extract(&lines);
+    let confidence = extracted.confidence();
+    let threshold = get_confidence_threshold();
+
+    // Tier 1: Structured extraction (free, instant)
+    if confidence >= threshold {
+        let summary = extracted.to_summary();
+        if !summary.is_empty() {
+            info!(confidence = %confidence, tier = 1, "Summarized via structured extraction");
+            return (summary, 1);
+        }
+    }
+
+    // Tier 2: Cheap model with pre-digested context
+    if confidence >= 0.4 {
+        let context = extracted.to_context();
+        let key_lines_text = extracted.key_lines.join("\n");
+        let enhanced_input = format!(
+            "Structured facts:\n{}\n\nRemaining output:\n{}",
+            context, key_lines_text
+        );
+
+        let api_key = match get_api_key() {
+            Some(key) => key,
+            None => {
+                info!(tier = 1, "No API key, falling back to structured summary");
+                return (extracted.to_summary(), 1);
+            }
+        };
+
+        let tier2_model = get_tier2_model();
+        info!(confidence = %confidence, tier = 2, model = %tier2_model, "Summarizing via tier 2 model");
+
+        match summarize_async(query, &enhanced_input, &api_key, &tier2_model).await {
+            Ok(summary) => return (summary, 2),
+            Err(e) => {
+                warn!(error = %e, "Tier 2 summarization failed, trying tier 3");
+                // Fall through to tier 3
+            }
+        }
+    }
+
+    // Tier 3: Full model with full input (current behavior)
+    let api_key = match get_api_key() {
+        Some(key) => key,
+        None => {
+            return (fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS), 3);
+        }
+    };
+
+    let model = get_model();
+    info!(confidence = %confidence, tier = 3, model = %model, "Summarizing via tier 3 full model");
+
+    match summarize_async(query, raw_response, &api_key, &model).await {
+        Ok(summary) => (summary, 3),
+        Err(e) => {
+            warn!(error = %e, "Tier 3 summarization failed, using fallback");
+            (fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS), 3)
+        }
+    }
+}
+
+/// Tiered incremental summarization for progress updates.
+/// Uses structured extraction for most cases, only calls LLM for complex output.
+pub async fn summarize_incremental_tiered(content: &str, line_count: usize) -> Result<String, SummarizerError> {
+    use crate::structured_summarizer;
+
+    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let extracted = structured_summarizer::extract(&lines);
+    let confidence = extracted.confidence();
+
+    // For incremental/progressive summaries, use a moderate threshold
+    // since these are ephemeral status updates — structured is usually good enough
+    if confidence >= 0.5 {
+        let summary = extracted.to_summary();
+        if !summary.is_empty() {
+            info!(confidence = %confidence, line_count = line_count, "Incremental summary via structured extraction");
+            return Ok(format!("📊 Incremental Summary ({} lines):\n{}", line_count, summary));
+        }
+    }
+
+    // Fall back to existing incremental summarization (uses the configured model)
+    info!(confidence = %confidence, line_count = line_count, "Incremental summary via LLM");
+    summarize_incremental(content, line_count).await
+}
+
 /// Summarize a response with automatic fallback to truncated response.
 ///
 /// This is a convenience function that handles API key lookup and fallback.
 /// If summarization fails or no API key is set, returns a truncated preview
 /// to prevent full AI responses from leaking to clients.
+///
+/// Now delegates to `summarize_tiered` for 3-tier pipeline support.
 pub async fn summarize_with_fallback(query: &str, raw_response: &str) -> String {
-    let Some(api_key) = get_api_key() else {
-        return fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS);
-    };
-
-    let model = get_model();
-
-    match summarize_async(query, raw_response, &api_key, &model).await {
-        Ok(summary) => summary,
-        Err(e) => {
-            warn!(error = %e, "Summarization failed, using truncated fallback");
-            fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS)
-        }
-    }
+    let (summary, _tier) = summarize_tiered(query, raw_response).await;
+    summary
 }
 
 /// Summarize a response synchronously with automatic fallback.

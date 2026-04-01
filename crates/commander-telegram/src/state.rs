@@ -7,7 +7,7 @@ use std::sync::Arc;
 use commander_adapters::AdapterRegistry;
 use commander_core::{
     clean_response, clean_screen_preview, config::authorized_chats_file, find_new_lines,
-    is_claude_ready, is_mpm_ready, is_summarization_available, summarize_incremental,
+    is_claude_ready, is_mpm_ready, is_summarization_available, summarize_incremental_tiered,
     summarize_with_fallback, config::runtime_state_dir,
 };
 use commander_persistence::StateStore;
@@ -1134,11 +1134,11 @@ impl TelegramState {
             );
 
             // Progressive summary: every 500 characters of new output
-            if session.chars_since_last_summary >= 500 && is_summarization_available() {
+            if session.chars_since_last_summary >= 500 {
                 session.chars_since_last_summary = 0;
                 let content_so_far = session.get_response();
                 let line_count = session.response_buffer.len();
-                match summarize_incremental(&content_so_far, line_count).await {
+                match summarize_incremental_tiered(&content_so_far, line_count).await {
                     Ok(summary) => {
                         return Ok(PollResult::ProgressiveSummary(format!("📝 {}", summary)));
                     }
@@ -1154,7 +1154,7 @@ impl TelegramState {
                 let line_count = session.response_buffer.len();
 
                 // Generate incremental summary asynchronously
-                match summarize_incremental(&content_so_far, line_count).await {
+                match summarize_incremental_tiered(&content_so_far, line_count).await {
                     Ok(summary) => {
                         session.mark_incremental_summary_sent();
                         return Ok(PollResult::IncrementalSummary(summary));
@@ -1621,11 +1621,11 @@ impl TelegramState {
             );
 
             // Progressive summary: every 500 characters of new output
-            if session.chars_since_last_summary >= 500 && is_summarization_available() {
+            if session.chars_since_last_summary >= 500 {
                 session.chars_since_last_summary = 0;
                 let content_so_far = session.get_response();
                 let line_count = session.response_buffer.len();
-                match summarize_incremental(&content_so_far, line_count).await {
+                match summarize_incremental_tiered(&content_so_far, line_count).await {
                     Ok(summary) => {
                         return Ok(PollResult::ProgressiveSummary(format!("📝 {}", summary)));
                     }
@@ -1641,7 +1641,7 @@ impl TelegramState {
                 let line_count = session.response_buffer.len();
 
                 // Generate incremental summary asynchronously
-                match summarize_incremental(&content_so_far, line_count).await {
+                match summarize_incremental_tiered(&content_so_far, line_count).await {
                     Ok(summary) => {
                         session.mark_incremental_summary_sent();
                         return Ok(PollResult::IncrementalSummary(summary));
