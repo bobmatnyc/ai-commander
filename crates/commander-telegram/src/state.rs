@@ -1082,20 +1082,24 @@ impl TelegramState {
             return Ok(PollResult::NoOutput);
         }
 
-        // Fix 1: 5-minute hard timeout — prevents infinite typing loop if tmux/Claude stalls.
+        // Fix 1: 5-minute inactivity timeout — if no new output has arrived for 5 minutes,
+        // the session is likely stalled. Uses last_output_time (updated on every new content)
+        // when available, so actively-streaming responses won't trigger the timeout.
         const MAX_WAIT_SECS: u64 = 300;
-        if let Some(t) = session.send_time {
-            if t.elapsed().as_secs() > MAX_WAIT_SECS {
+        if let Some(send_t) = session.send_time {
+            // Use last_output_time if content has been received, otherwise use send_time
+            let reference_time = session.last_output_time.unwrap_or(send_t);
+            if reference_time.elapsed().as_secs() > MAX_WAIT_SECS {
                 let message_id = session.pending_message_id;
                 let sess_thread_id = session.thread_id;
                 warn!(
                     chat_id = %chat_id.0,
                     thread_id = ?thread_id,
-                    "poll_topic_output: 5-minute timeout reached — force-completing stuck session"
+                    "poll_topic_output: 5-minute inactivity timeout reached — force-completing stuck session"
                 );
                 session.reset_response_state();
                 return Ok(PollResult::Complete(
-                    "No response received within 5 minutes. The session may have stalled.".to_string(),
+                    "No new output received for 5 minutes. The session may have stalled.".to_string(),
                     message_id,
                     sess_thread_id,
                 ));
@@ -1567,19 +1571,23 @@ impl TelegramState {
             return Ok(PollResult::NoOutput);
         }
 
-        // Fix 1: 5-minute hard timeout — prevents infinite typing loop if tmux/Claude stalls.
+        // Fix 1: 5-minute inactivity timeout — if no new output has arrived for 5 minutes,
+        // the session is likely stalled. Uses last_output_time (updated on every new content)
+        // when available, so actively-streaming responses won't trigger the timeout.
         const MAX_WAIT_SECS: u64 = 300;
-        if let Some(t) = session.send_time {
-            if t.elapsed().as_secs() > MAX_WAIT_SECS {
+        if let Some(send_t) = session.send_time {
+            // Use last_output_time if content has been received, otherwise use send_time
+            let reference_time = session.last_output_time.unwrap_or(send_t);
+            if reference_time.elapsed().as_secs() > MAX_WAIT_SECS {
                 let message_id = session.pending_message_id;
                 let thread_id = session.thread_id;
                 warn!(
                     chat_id = %chat_id.0,
-                    "poll_output: 5-minute timeout reached — force-completing stuck session"
+                    "poll_output: 5-minute inactivity timeout reached — force-completing stuck session"
                 );
                 session.reset_response_state();
                 return Ok(PollResult::Complete(
-                    "No response received within 5 minutes. The session may have stalled.".to_string(),
+                    "No new output received for 5 minutes. The session may have stalled.".to_string(),
                     message_id,
                     thread_id,
                 ));
