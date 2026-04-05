@@ -17,6 +17,7 @@ use crate::handlers::{handle_callback, handle_command, handle_message, Command};
 use crate::ngrok::NgrokTunnel;
 use crate::state::{create_shared_state, PollResult, TelegramState};
 
+
 /// Default webhook port.
 const DEFAULT_WEBHOOK_PORT: u16 = 8443;
 
@@ -420,10 +421,11 @@ async fn add_reaction(bot: &Bot, chat_id: teloxide::types::ChatId, message_id: t
 
 /// Background task to poll for output from connected sessions and send responses.
 async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
-    use teloxide::types::{ChatAction, LinkPreviewOptions, MessageId, ReplyParameters};
+    use teloxide::types::{LinkPreviewOptions, MessageId, ReplyParameters};
     use std::collections::HashMap;
 
     let mut poll_interval = interval(Duration::from_millis(POLL_INTERVAL_MS));
+    let typing_throttle = state.typing_throttle.clone();
 
     // Track progress message IDs per session key
     let mut progress_messages: HashMap<i64, MessageId> = HashMap::new();
@@ -450,17 +452,9 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
         let waiting_sessions = state.get_waiting_sessions().await;
 
         for (session_key, chat_id, thread_id) in waiting_sessions {
-            // Refresh typing indicator to show processing is ongoing
-            if let Some(tid) = thread_id {
-                if let Err(e) = bot.send_chat_action(chat_id, ChatAction::Typing)
-                    .message_thread_id(tid)
-                    .await
-                {
-                    warn!(chat_id = %chat_id, thread_id = ?tid, error = %e, "Failed to send typing indicator");
-                }
-            } else if let Err(e) = bot.send_chat_action(chat_id, ChatAction::Typing).await {
-                warn!(chat_id = %chat_id, error = %e, "Failed to send typing indicator");
-            }
+            // Refresh typing indicator (throttled: max once per 5s per chat,
+            // respects Telegram Retry-After backoff).
+            typing_throttle.send_if_allowed(&bot, chat_id, thread_id).await;
 
             // Poll for output from this session
             let poll_result = if let Some(tid) = thread_id {

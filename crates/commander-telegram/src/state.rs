@@ -24,6 +24,7 @@ use crate::ipc_client::DaemonClient;
 use crate::pairing;
 use crate::session::{PersistedSession, UserSession};
 use crate::session_log::SessionLogger;
+use crate::typing_throttle::TypingThrottle;
 
 /// Result from polling output - represents different stages of output collection.
 #[derive(Debug)]
@@ -273,6 +274,8 @@ pub struct TelegramState {
     /// Maps (chat_id, bot_message_id) → session_base_name for @-addressed responses.
     /// Used to route replies to bot responses back to the same @session.
     at_reply_map: Arc<RwLock<HashMap<(i64, i32), String>>>,
+    /// Per-chat typing indicator throttle (shared across poll loop and handlers).
+    pub typing_throttle: TypingThrottle,
     /// Agent orchestrator for LLM-based message processing (feature-gated).
     #[cfg(feature = "agents")]
     orchestrator: RwLock<Option<AgentOrchestrator>>,
@@ -318,6 +321,7 @@ impl TelegramState {
             session_logger,
             bot_info: RwLock::new(None),
             at_reply_map: Arc::new(RwLock::new(HashMap::new())),
+            typing_throttle: TypingThrottle::new(),
             #[cfg(feature = "agents")]
             orchestrator: RwLock::new(None),
         }

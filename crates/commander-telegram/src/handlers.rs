@@ -10,16 +10,12 @@ use tracing::{debug, error, info, warn};
 use crate::error::TelegramError;
 use crate::state::{get_tmux_cwd, TelegramState};
 
-/// Send a typing indicator to a chat, ignoring errors (best-effort cosmetic).
-/// Telegram expires the indicator after ~5 seconds — call again for long operations.
-async fn typing(bot: &Bot, chat_id: ChatId, thread_id: Option<ThreadId>) {
-    use teloxide::types::ChatAction;
-    let req = if let Some(tid) = thread_id {
-        bot.send_chat_action(chat_id, ChatAction::Typing).message_thread_id(tid)
-    } else {
-        bot.send_chat_action(chat_id, ChatAction::Typing)
-    };
-    let _ = req.await;
+/// Send a throttled typing indicator to a chat.
+///
+/// Uses the per-chat cooldown from shared state (max once per 5 seconds per chat).
+/// Respects Telegram `Retry after N` responses by backing off for the specified duration.
+async fn typing_throttled(bot: &Bot, chat_id: ChatId, thread_id: Option<ThreadId>, state: &crate::state::TelegramState) {
+    state.typing_throttle.send_if_allowed(bot, chat_id, thread_id).await;
 }
 
 /// Bot commands that can be invoked with /.
@@ -219,7 +215,7 @@ async fn handle_deep_link_connect(
     }
 
     // Show typing — connection + LLM status summary take noticeable time
-    typing(&bot, msg.chat.id, None).await;
+    typing_throttled(&bot, msg.chat.id, None, &state).await;
 
     // Connect to the session
     match state.connect_session(msg.chat.id, session_name).await {
@@ -579,7 +575,7 @@ pub async fn handle_connect(
     }
 
     // Show typing early — connection + LLM status summary take noticeable time
-    typing(&bot, msg.chat.id, None).await;
+    typing_throttled(&bot, msg.chat.id, None, &state).await;
 
     // Parse the connect arguments
     let connect_args = match parse_connect_args(args) {
@@ -975,7 +971,7 @@ pub async fn handle_status(
     }
 
     // Show typing — status involves an LLM interpretation call
-    typing(&bot, msg.chat.id, None).await;
+    typing_throttled(&bot, msg.chat.id, None, &state).await;
 
     let status = if let Some((project_name, project_path, tool_id, is_waiting, pending_query, screen_preview)) =
         state.get_session_status(msg.chat.id).await
@@ -1132,7 +1128,7 @@ pub async fn handle_list(
     }
 
     // Show typing: LLM summary calls can take several seconds per session
-    typing(&bot, msg.chat.id, None).await;
+    typing_throttled(&bot, msg.chat.id, None, &state).await;
 
     let current_session = state
         .get_session_info(msg.chat.id)
@@ -1152,7 +1148,7 @@ pub async fn handle_list(
         };
 
         // Refresh typing indicator — each LLM call can take up to 5s
-        typing(&bot, msg.chat.id, None).await;
+        typing_throttled(&bot, msg.chat.id, None, &state).await;
 
         // Determine status: prefer LLM summary, fall back to heuristic.
         let is_active = preview.as_ref().map(|p| {
@@ -1345,7 +1341,7 @@ pub async fn handle_message(
         );
 
         if let Some(session_name) = resolved_session {
-            typing(&bot, msg.chat.id, None).await;
+            typing_throttled(&bot, msg.chat.id, None, &state).await;
             match state.send_to_named_session(msg.chat.id, &session_name, &text, Some(msg.id)).await {
                 Ok(resolved_name) => {
                     debug!(
@@ -1387,7 +1383,7 @@ pub async fn handle_message(
                 if message.starts_with('/') {
                     let cmd_str = message.split_whitespace().next().unwrap_or("");
                     // Connect to target session to provide context for the command
-                    typing(&bot, msg.chat.id, None).await;
+                    typing_throttled(&bot, msg.chat.id, None, &state).await;
                     if let Err(e) = state.connect(msg.chat.id, alias).await {
                         bot.send_message(
                             msg.chat.id,
@@ -1420,7 +1416,7 @@ Use /help to see all commands.",
                 }
 
                 // Regular message — forward to the named session
-                typing(&bot, msg.chat.id, None).await;
+                typing_throttled(&bot, msg.chat.id, None, &state).await;
                 match state.send_to_named_session(msg.chat.id, alias, message, Some(msg.id)).await {
                     Ok(resolved_name) => {
                         debug!(
@@ -1456,9 +1452,8 @@ Use /help to see all commands.",
         return Ok(());
     }
 
-    // Send typing indicator
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-        .await?;
+    // Send typing indicator (throttled)
+    typing_throttled(&bot, msg.chat.id, None, &state).await;
 
     // Send message to the project with message ID for reply threading
     let is_private = msg.chat.is_private();
@@ -1543,13 +1538,8 @@ async fn handle_topic_message(
         }
     }
 
-    // Send typing indicator to the topic
-    if let Err(e) = bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-        .message_thread_id(thread_id)
-        .await
-    {
-        warn!(chat_id = %msg.chat.id, thread_id = ?thread_id, error = %e, "Failed to send typing indicator");
-    }
+    // Send typing indicator to the topic (throttled)
+    typing_throttled(&bot, msg.chat.id, Some(thread_id), &state).await;
 
     // Send message to the topic's session
     let session_key = TelegramState::session_key(msg.chat.id.0, Some(thread_id));
@@ -2070,9 +2060,8 @@ pub async fn handle_send(
         return Ok(());
     }
 
-    // Send typing indicator
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-        .await?;
+    // Send typing indicator (throttled)
+    typing_throttled(&bot, msg.chat.id, None, &state).await;
 
     // Send the message directly without LLM interpretation
     match state.send_message_direct(msg.chat.id, message, Some(msg.id)).await {
@@ -2530,7 +2519,7 @@ pub async fn handle_agents(
         return Ok(());
     }
 
-    typing(&bot, msg.chat.id, None).await;
+    typing_throttled(&bot, msg.chat.id, None, &state).await;
 
     match mpm_sdk::MpmClient::discover() {
         Err(e) => {
@@ -2586,7 +2575,7 @@ pub async fn handle_mpm_status(
         return Ok(());
     }
 
-    typing(&bot, msg.chat.id, None).await;
+    typing_throttled(&bot, msg.chat.id, None, &state).await;
 
     match mpm_sdk::MpmClient::discover() {
         Err(e) => {

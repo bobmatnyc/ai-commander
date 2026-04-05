@@ -72,6 +72,7 @@ pub mod pairing;
 pub mod session;
 pub mod session_log;
 pub mod state;
+pub mod typing_throttle;
 pub mod version;
 
 pub use bot::TelegramBot;
