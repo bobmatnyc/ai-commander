@@ -1266,7 +1266,7 @@ impl Repl {
                     Some(id) => id.to_string(),
                     None => {
                         println!(
-                            "Unknown adapter: {}. Available: cc (claude-code), mpm",
+                            "Unknown adapter: {}. Available: cc (claude-code), mpm, mpm-sdk",
                             args.tool
                         );
                         return Ok(());

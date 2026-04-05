@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::claude_code::ClaudeCodeAdapter;
+use crate::event_driven::EventDrivenAdapter;
 use crate::mpm::MpmAdapter;
+use crate::mpm_sdk::MpmSdkAdapter;
 use crate::shell::ShellAdapter;
 use crate::traits::RuntimeAdapter;
 
@@ -34,6 +36,7 @@ use crate::traits::RuntimeAdapter;
 /// ```
 pub struct AdapterRegistry {
     adapters: HashMap<String, Arc<dyn RuntimeAdapter>>,
+    event_driven: HashMap<String, Arc<dyn EventDrivenAdapter>>,
 }
 
 impl AdapterRegistry {
@@ -51,20 +54,34 @@ impl AdapterRegistry {
         let shell = Arc::new(ShellAdapter::new());
         adapters.insert(shell.info().id.clone(), shell);
 
-        Self { adapters }
+        let mut event_driven: HashMap<String, Arc<dyn EventDrivenAdapter>> = HashMap::new();
+        let mpm_sdk = Arc::new(MpmSdkAdapter::new());
+        event_driven.insert(mpm_sdk.info().id.clone(), mpm_sdk);
+
+        Self {
+            adapters,
+            event_driven,
+        }
     }
 
     /// Creates an empty registry.
     pub fn empty() -> Self {
         Self {
             adapters: HashMap::new(),
+            event_driven: HashMap::new(),
         }
     }
 
-    /// Registers an adapter.
+    /// Registers a terminal-output `RuntimeAdapter`.
     pub fn register(&mut self, adapter: Arc<dyn RuntimeAdapter>) {
         let id = adapter.info().id.clone();
         self.adapters.insert(id, adapter);
+    }
+
+    /// Registers an event-driven adapter.
+    pub fn register_event_driven(&mut self, adapter: Arc<dyn EventDrivenAdapter>) {
+        let id = adapter.info().id.clone();
+        self.event_driven.insert(id, adapter);
     }
 
     /// Gets an adapter by ID.
@@ -72,19 +89,33 @@ impl AdapterRegistry {
         self.adapters.get(id).cloned()
     }
 
-    /// Lists all registered adapter IDs.
-    pub fn list(&self) -> Vec<&str> {
-        self.adapters.keys().map(|s| s.as_str()).collect()
+    /// Gets an event-driven adapter by ID.
+    pub fn get_event_driven(&self, id: &str) -> Option<Arc<dyn EventDrivenAdapter>> {
+        self.event_driven.get(id).cloned()
     }
 
-    /// Returns the number of registered adapters.
+    /// Returns true if an event-driven adapter is registered under this id.
+    pub fn is_event_driven(&self, id: &str) -> bool {
+        self.event_driven.contains_key(id)
+    }
+
+    /// Lists all registered adapter IDs (both terminal and event-driven).
+    pub fn list(&self) -> Vec<&str> {
+        self.adapters
+            .keys()
+            .chain(self.event_driven.keys())
+            .map(|s| s.as_str())
+            .collect()
+    }
+
+    /// Returns the number of registered adapters (terminal + event-driven).
     pub fn len(&self) -> usize {
-        self.adapters.len()
+        self.adapters.len() + self.event_driven.len()
     }
 
     /// Returns true if no adapters are registered.
     pub fn is_empty(&self) -> bool {
-        self.adapters.is_empty()
+        self.adapters.is_empty() && self.event_driven.is_empty()
     }
 
     /// Gets the default adapter (claude-code).
@@ -105,6 +136,7 @@ impl AdapterRegistry {
         match alias {
             "cc" | "claude-code" => Some("claude-code"),
             "mpm" => Some("mpm"),
+            "mpm-sdk" => Some("mpm-sdk"),
             "shell" | "sh" | "bash" | "zsh" => Some("shell"),
             _ => {
                 // Check if it's a registered adapter ID
@@ -134,7 +166,8 @@ mod tests {
     fn test_registry_new() {
         let registry = AdapterRegistry::new();
         assert!(!registry.is_empty());
-        assert!(registry.len() >= 3); // claude-code, mpm, and shell
+        // claude-code, mpm, shell (terminal) + mpm-sdk (event-driven)
+        assert!(registry.len() >= 4);
     }
 
     #[test]
@@ -154,6 +187,7 @@ mod tests {
         assert!(list.contains(&"claude-code"));
         assert!(list.contains(&"mpm"));
         assert!(list.contains(&"shell"));
+        assert!(list.contains(&"mpm-sdk"));
     }
 
     #[test]
@@ -196,6 +230,7 @@ mod tests {
         assert_eq!(registry.resolve("cc"), Some("claude-code"));
         assert_eq!(registry.resolve("claude-code"), Some("claude-code"));
         assert_eq!(registry.resolve("mpm"), Some("mpm"));
+        assert_eq!(registry.resolve("mpm-sdk"), Some("mpm-sdk"));
 
         // Test shell aliases
         assert_eq!(registry.resolve("shell"), Some("shell"));
@@ -214,5 +249,37 @@ mod tests {
         let adapter = registry.get("shell");
         assert!(adapter.is_some());
         assert_eq!(adapter.unwrap().info().id, "shell");
+    }
+
+    #[test]
+    fn test_event_driven_registration() {
+        let registry = AdapterRegistry::new();
+
+        // mpm-sdk is registered as an event-driven adapter.
+        assert!(registry.get_event_driven("mpm-sdk").is_some());
+        assert_eq!(
+            registry.get_event_driven("mpm-sdk").unwrap().info().id,
+            "mpm-sdk"
+        );
+    }
+
+    #[test]
+    fn test_is_event_driven() {
+        let registry = AdapterRegistry::new();
+
+        assert!(registry.is_event_driven("mpm-sdk"));
+        assert!(!registry.is_event_driven("claude-code"));
+        assert!(!registry.is_event_driven("mpm"));
+        assert!(!registry.is_event_driven("shell"));
+        assert!(!registry.is_event_driven("unknown"));
+    }
+
+    #[test]
+    fn test_event_driven_not_in_terminal_map() {
+        let registry = AdapterRegistry::new();
+
+        // mpm-sdk should NOT be retrievable via the terminal `get` — it lives
+        // in the event-driven map only.
+        assert!(registry.get("mpm-sdk").is_none());
     }
 }

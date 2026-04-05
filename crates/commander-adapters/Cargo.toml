@@ -7,9 +7,15 @@ description = "Runtime adapters for AI coding tools (Claude Code, Aider, etc.)"
 
 [dependencies]
 commander-models = { path = "../commander-models" }
+mpm-sdk = { path = "../mpm-sdk" }
 regex = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tokio-stream = "0.1"
+async-trait = "0.1"
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

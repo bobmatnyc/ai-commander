@@ -199,7 +199,7 @@ impl App {
     pub fn connect_new(&mut self, path: &str, adapter: &str, name: &str) -> Result<(), String> {
         // Resolve adapter alias
         let tool_id = self.registry.resolve(adapter)
-            .ok_or_else(|| format!("Unknown adapter: {}. Use: cc (claude-code), mpm", adapter))?
+            .ok_or_else(|| format!("Unknown adapter: {}. Use: cc (claude-code), mpm, mpm-sdk", adapter))?
             .to_string();
 
         // Validate project path exists and is accessible

@@ -2038,7 +2038,7 @@ impl TelegramState {
         // Resolve adapter alias
         let tool_id = self.adapters.resolve(adapter)
             .ok_or_else(|| TelegramError::SessionError(
-                format!("Unknown adapter: {}. Use: cc (claude-code), mpm", adapter)
+                format!("Unknown adapter: {}. Use: cc (claude-code), mpm, mpm-sdk", adapter)
             ))?
             .to_string();
 

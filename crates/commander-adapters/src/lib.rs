@@ -31,14 +31,18 @@
 //! ```
 
 pub mod claude_code;
+pub mod event_driven;
 pub mod mpm;
+pub mod mpm_sdk;
 pub mod patterns;
 pub mod registry;
 pub mod shell;
 pub mod traits;
 
 pub use claude_code::ClaudeCodeAdapter;
+pub use event_driven::{EventDrivenAdapter, EventStream, RuntimeEvent, SessionHandle};
 pub use mpm::MpmAdapter;
+pub use mpm_sdk::MpmSdkAdapter;
 pub use patterns::Pattern;
 pub use registry::AdapterRegistry;
 pub use shell::ShellAdapter;
