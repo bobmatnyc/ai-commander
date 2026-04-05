@@ -26,6 +26,7 @@ LOG_DIR="$HOME_DIR/logs"
 STATE_DIR="$HOME_DIR/state"
 CONFIG_DIR="$HOME_DIR/config"
 SELF_INSTALL="$HOME_DIR/services.sh"
+PROJECT_ROOT_FILE="$HOME_DIR/project-root"
 
 DAEMON_BIN="$BIN_DIR/commander-daemon"
 TELEGRAM_BIN="$BIN_DIR/commander-telegram"
@@ -50,6 +51,46 @@ ok()   { echo -e "${GREEN}✓${NC} $*"; }
 info() { echo -e "${BLUE}→${NC} $*"; }
 warn() { echo -e "${YELLOW}⚠${NC} $*"; }
 fail() { echo -e "${RED}✗${NC} $*"; }
+
+# ── project root resolution ────────────────────────────────────────────────────
+# Resolves the project root in this order:
+#   1. Script-relative: script itself at project root (has Cargo.toml)
+#   2. Script-relative: script in scripts/ subdirectory
+#   3. $AI_COMMANDER_PROJECT_ROOT environment variable
+#   4. Persisted path at ~/.ai-commander/project-root
+# Prints the absolute path on stdout, or fails with exit 1.
+resolve_project_root() {
+    local script_path; script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [[ -f "$script_path/Cargo.toml" ]]; then
+        echo "$script_path"
+        return 0
+    elif [[ -f "$script_path/../Cargo.toml" ]]; then
+        (cd "$script_path/.." && pwd)
+        return 0
+    elif [[ -n "${AI_COMMANDER_PROJECT_ROOT:-}" ]]; then
+        if [[ -f "$AI_COMMANDER_PROJECT_ROOT/Cargo.toml" ]]; then
+            echo "$AI_COMMANDER_PROJECT_ROOT"
+            return 0
+        else
+            fail "AI_COMMANDER_PROJECT_ROOT=$AI_COMMANDER_PROJECT_ROOT has no Cargo.toml"
+            exit 1
+        fi
+    elif [[ -f "$PROJECT_ROOT_FILE" ]]; then
+        local persisted_root
+        persisted_root="$(cat "$PROJECT_ROOT_FILE")"
+        if [[ -f "$persisted_root/Cargo.toml" ]]; then
+            echo "$persisted_root"
+            return 0
+        else
+            fail "persisted project root $persisted_root no longer valid (edit or remove $PROJECT_ROOT_FILE)"
+            exit 1
+        fi
+    fi
+
+    fail "Cannot find project Cargo.toml — run from the ai-commander repo, set AI_COMMANDER_PROJECT_ROOT, or re-run install"
+    exit 1
+}
 
 # ── env loading ────────────────────────────────────────────────────────────────
 load_env() {
@@ -161,18 +202,8 @@ launchd_unload() {
 
 # ── commands ───────────────────────────────────────────────────────────────────
 cmd_install() {
-    # Find the project root (script may live in scripts/ or in ~/.ai-commander/)
     local script_path; script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local project_root
-
-    if [[ -f "$script_path/Cargo.toml" ]]; then
-        project_root="$script_path"           # script is at project root
-    elif [[ -f "$script_path/../Cargo.toml" ]]; then
-        project_root="$(cd "$script_path/.." && pwd)"   # script is in scripts/
-    else
-        fail "Cannot find project Cargo.toml — run this from the ai-commander repo"
-        exit 1
-    fi
+    local project_root; project_root="$(resolve_project_root)"
 
     echo -e "\n${BOLD}Installing AI Commander services…${NC}\n"
     info "Project root: $project_root"
@@ -198,6 +229,10 @@ cmd_install() {
     cp "${BASH_SOURCE[0]}" "$SELF_INSTALL"
     chmod +x "$SELF_INSTALL"
     ok "services.sh        → $SELF_INSTALL"
+
+    # Persist project root for commands run from installed location
+    echo "$project_root" > "$PROJECT_ROOT_FILE"
+    ok "project-root       → $PROJECT_ROOT_FILE ($project_root)"
 
     # Ensure config dir exists with a template .env if missing
     mkdir -p "$CONFIG_DIR" "$LOG_DIR" "$STATE_DIR"
@@ -411,6 +446,46 @@ cmd_stop() {
     echo ""
 }
 
+cmd_deploy() {
+    local project_root; project_root="$(resolve_project_root)"
+
+    echo -e "\n${BOLD}Building and deploying AI Commander…${NC}\n"
+    info "Project root: $project_root"
+
+    # Build release binaries
+    info "Building release binaries…"
+    cargo build --release \
+        -p commander-daemon \
+        -p commander-telegram \
+        --manifest-path "$project_root/Cargo.toml" 2>&1 | \
+        grep -E "^(error|   Compiling|    Finished)" || true
+
+    if [[ ! -f "$project_root/target/release/commander-telegram" ]]; then
+        fail "Build failed — binary not found"
+        exit 1
+    fi
+
+    # Stop services before swapping binaries
+    info "Stopping services to swap binaries…"
+    cmd_stop
+    sleep 1
+
+    # Copy fresh binaries
+    mkdir -p "$BIN_DIR"
+    cp "$project_root/target/release/commander-daemon"   "$DAEMON_BIN"
+    cp "$project_root/target/release/commander-telegram" "$TELEGRAM_BIN"
+    chmod +x "$DAEMON_BIN" "$TELEGRAM_BIN"
+    ok "commander-daemon   → $DAEMON_BIN"
+    ok "commander-telegram → $TELEGRAM_BIN"
+
+    # Restart with new binaries
+    info "Starting services with new binaries…"
+    cmd_start
+
+    echo ""
+    ok "Deploy complete"
+}
+
 cmd_restart() {
     cmd_stop
     sleep 1
@@ -505,6 +580,7 @@ case "${1:-}" in
     install)          cmd_install          ;;
     start)            cmd_start            ;;
     stop)             cmd_stop             ;;
+    deploy)           cmd_deploy           ;;
     restart)          cmd_restart          ;;
     status)           cmd_status           ;;
     logs)             cmd_logs             ;;
@@ -520,7 +596,8 @@ case "${1:-}" in
         echo -e "  ${BOLD}After install (run from anywhere):${NC}"
         echo "    ~/.ai-commander/services.sh start"
         echo "    ~/.ai-commander/services.sh stop"
-        echo "    ~/.ai-commander/services.sh restart"
+        echo "    ~/.ai-commander/services.sh deploy    # rebuild + install + restart
+    ~/.ai-commander/services.sh restart"
         echo "    ~/.ai-commander/services.sh status"
         echo "    ~/.ai-commander/services.sh logs"
         echo ""
