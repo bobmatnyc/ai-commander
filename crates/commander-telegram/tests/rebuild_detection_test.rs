@@ -4,16 +4,16 @@ use commander_telegram::{check_rebuild, load_version, BotVersion};
 
 #[test]
 fn test_version_tracking() {
-    // Create a new version
+    // Create a new version (start_count=0 means no starts yet)
     let version = BotVersion::new();
-    assert_eq!(version.start_count, 1);
+    assert_eq!(version.start_count, 0);
     assert!(version.is_first_start());
 
-    // Simulate restart
+    // Simulate first start (count goes 0 -> 1)
     let mut version2 = version.clone();
     let is_rebuild = version2.update();
     assert!(!is_rebuild, "Should not be a rebuild on restart");
-    assert_eq!(version2.start_count, 2);
+    assert_eq!(version2.start_count, 1);
     assert!(!version2.is_first_start());
 }
 
