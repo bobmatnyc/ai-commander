@@ -1455,6 +1455,28 @@ Use /help to see all commands.",
     // Send typing indicator (throttled)
     typing_throttled(&bot, msg.chat.id, None, &state).await;
 
+    // Event-driven adapter path (e.g. mpm-sdk): bypass tmux + poll loop entirely.
+    if state.is_event_driven_session(msg.chat.id).await {
+        match state
+            .try_send_event_driven(bot.clone(), msg.chat.id, &text, Some(msg.id))
+            .await
+        {
+            Ok(true) => {
+                debug!(chat_id = %msg.chat.id, "Message dispatched to event-driven adapter");
+            }
+            Ok(false) => {
+                // Shouldn't happen — is_event_driven_session said yes.
+                warn!(chat_id = %msg.chat.id, "Event-driven dispatch returned false");
+            }
+            Err(e) => {
+                bot.send_message(msg.chat.id, format!("❌ Error: {}", e))
+                    .await?;
+                error!(chat_id = %msg.chat.id, error = %e, "Event-driven dispatch failed");
+            }
+        }
+        return Ok(());
+    }
+
     // Send message to the project with message ID for reply threading
     let is_private = msg.chat.is_private();
     match state.send_message(msg.chat.id, &text, Some(msg.id)).await {

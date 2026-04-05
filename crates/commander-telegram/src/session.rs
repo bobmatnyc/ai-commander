@@ -2,6 +2,7 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use commander_adapters::SessionHandle;
 use serde::{Deserialize, Serialize};
 use teloxide::types::{ChatId, MessageId, ThreadId};
 use tracing::warn;
@@ -58,6 +59,10 @@ pub struct UserSession {
     pub chars_since_last_summary: usize,
     /// When completion (idle+prompt) was first detected; used to avoid waiting for a second idle poll.
     pub completion_detected_at: Option<Instant>,
+    /// Handle for event-driven adapter sessions (e.g. mpm-sdk).
+    /// When `Some`, this session bypasses tmux entirely and uses the event-driven path.
+    /// Populated lazily on the first message (first call creates the handle via `start_session`).
+    pub event_handle: Option<SessionHandle>,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -184,6 +189,7 @@ impl UserSession {
             stale_poll_count: 0,
             chars_since_last_summary: 0,
             completion_detected_at: None,
+            event_handle: None,
         }
     }
 
@@ -220,6 +226,7 @@ impl UserSession {
             stale_poll_count: 0,
             chars_since_last_summary: 0,
             completion_detected_at: None,
+            event_handle: None,
         }
     }
 
