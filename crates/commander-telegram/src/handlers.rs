@@ -1342,7 +1342,7 @@ pub async fn handle_message(
 
         if let Some(session_name) = resolved_session {
             typing_throttled(&bot, msg.chat.id, None, &state).await;
-            match state.send_to_named_session(msg.chat.id, &session_name, &text, Some(msg.id)).await {
+            match state.send_to_named_session(bot.clone(), msg.chat.id, &session_name, &text, Some(msg.id)).await {
                 Ok(resolved_name) => {
                     debug!(
                         chat_id = %msg.chat.id,
@@ -1417,7 +1417,7 @@ Use /help to see all commands.",
 
                 // Regular message — forward to the named session
                 typing_throttled(&bot, msg.chat.id, None, &state).await;
-                match state.send_to_named_session(msg.chat.id, alias, message, Some(msg.id)).await {
+                match state.send_to_named_session(bot.clone(), msg.chat.id, alias, message, Some(msg.id)).await {
                     Ok(resolved_name) => {
                         debug!(
                             chat_id = %msg.chat.id,
@@ -1563,8 +1563,50 @@ async fn handle_topic_message(
     // Send typing indicator to the topic (throttled)
     typing_throttled(&bot, msg.chat.id, Some(thread_id), &state).await;
 
-    // Send message to the topic's session
+    // Event-driven adapter path for topic sessions: bypass tmux + poll loop.
     let session_key = TelegramState::session_key(msg.chat.id.0, Some(thread_id));
+    if state.is_topic_event_driven(msg.chat.id, thread_id).await {
+        match state
+            .try_send_event_driven_keyed(
+                bot.clone(),
+                msg.chat.id,
+                session_key,
+                text,
+                Some(msg.id),
+                Some(thread_id),
+            )
+            .await
+        {
+            Ok(true) => {
+                debug!(
+                    chat_id = %msg.chat.id,
+                    thread_id = ?thread_id,
+                    "Topic message dispatched to event-driven adapter"
+                );
+            }
+            Ok(false) => {
+                warn!(
+                    chat_id = %msg.chat.id,
+                    thread_id = ?thread_id,
+                    "Event-driven dispatch returned false for topic"
+                );
+            }
+            Err(e) => {
+                bot.send_message(msg.chat.id, format!("❌ Error: {}", e))
+                    .message_thread_id(thread_id)
+                    .await?;
+                error!(
+                    chat_id = %msg.chat.id,
+                    thread_id = ?thread_id,
+                    error = %e,
+                    "Event-driven topic dispatch failed"
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // Terminal adapter path: send via tmux and arm the poll loop.
     match state.send_message_to_topic(msg.chat.id, thread_id, text, Some(msg.id)).await {
         Ok(()) => {
             debug!(

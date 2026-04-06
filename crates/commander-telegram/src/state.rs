@@ -12,6 +12,7 @@ use commander_core::{
 };
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
+use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::Requester;
 use teloxide::types::{ChatId, Me, MessageId, ThreadId};
 use teloxide::Bot;
@@ -232,7 +233,7 @@ fn save_authorized_chats(chat_ids: &HashSet<i64>) {
 /// before that, `adapter_type` identifies them. The synthetic `tmux_session`
 /// name prefix `event-driven-` is also a marker.
 pub(crate) fn is_event_driven_session(session: &UserSession) -> bool {
-    session.event_handle.is_some()
+    session.event_handle.is_active()
         || session.adapter_type == "mpm-sdk"
         || session.tmux_session.starts_with("event-driven-")
 }
@@ -848,7 +849,7 @@ impl TelegramState {
         let mut sessions = self.sessions.write().await;
         let result = if let Some(mut session) = sessions.remove(&chat_id.0) {
             // Clean up event-driven adapter session if present.
-            if let Some(handle) = session.event_handle.take() {
+            if let Some(handle) = session.event_handle.take_handle() {
                 if let Some(adapter) = self.adapters.get_event_driven(&session.adapter_type) {
                     if let Err(e) = adapter.stop(handle).await {
                         warn!(
@@ -915,6 +916,47 @@ impl TelegramState {
                 .unwrap_or("claude-code")
                 .to_string();
 
+            // Event-driven adapter branch for topics: skip tmux spawn.
+            if self.adapters.is_event_driven(&tool_id) {
+                let synthetic_name = format!("event-driven-{}-topic-{}", project.name, thread_id.0.0);
+                info!(
+                    project = %project.name,
+                    adapter = %tool_id,
+                    thread_id = ?thread_id,
+                    "Creating event-driven topic session (no tmux spawn)"
+                );
+
+                let mut session = UserSession::with_thread_id(
+                    chat_id,
+                    project.path.clone(),
+                    project.name.clone(),
+                    synthetic_name.clone(),
+                    thread_id,
+                );
+                session.adapter_type = tool_id.clone();
+
+                let session_key = Self::session_key(chat_id.0, Some(thread_id));
+                let mut sessions = self.sessions.write().await;
+                sessions.insert(session_key, session);
+
+                self.add_topic(
+                    chat_id.0,
+                    thread_id.0.0,
+                    project.name.clone(),
+                    synthetic_name,
+                    Some(project.path.clone()),
+                ).await?;
+
+                debug!(
+                    chat_id = %chat_id.0,
+                    thread_id = ?thread_id,
+                    project = %project.name,
+                    "Topic connected to event-driven session"
+                );
+                return Ok((project.name.clone(), tool_id));
+            }
+
+            // Terminal adapter path for topics: requires tmux.
             // Check if tmux session exists, create if not
             if !tmux.session_exists(&tmux_session_name) {
                 if let Some(adapter) = self.adapters.get(&tool_id) {
@@ -1051,6 +1093,25 @@ impl TelegramState {
     }
 
     /// Send a message to a topic's session.
+    ///
+    /// For event-driven topic sessions, this is a no-op — the caller
+    /// (`handle_topic_message`) should route through `try_send_event_driven_keyed`
+    /// instead.  Returns `Ok(true)` if the session is event-driven (caller should
+    /// skip tmux path), `Ok(false)` if not.
+    pub async fn is_topic_event_driven(
+        &self,
+        chat_id: ChatId,
+        thread_id: ThreadId,
+    ) -> bool {
+        let session_key = Self::session_key(chat_id.0, Some(thread_id));
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(&session_key)
+            .map(|s| is_event_driven_session(s))
+            .unwrap_or(false)
+    }
+
+    /// Send a message to a topic's session (terminal adapter path).
     pub async fn send_message_to_topic(
         &self,
         chat_id: ChatId,
@@ -1129,6 +1190,9 @@ impl TelegramState {
     }
 
     /// Poll output for a topic session.
+    ///
+    /// Event-driven topic sessions are handled entirely by background
+    /// event-consumer tasks and should never reach this function.
     pub async fn poll_topic_output(
         &self,
         chat_id: ChatId,
@@ -1144,6 +1208,11 @@ impl TelegramState {
         let session = sessions
             .get_mut(&session_key)
             .ok_or(TelegramError::NotConnected)?;
+
+        // Event-driven sessions are handled by background tasks, not the poll loop.
+        if is_event_driven_session(session) {
+            return Ok(PollResult::NoOutput);
+        }
 
         if !session.is_waiting {
             return Ok(PollResult::NoOutput);
@@ -1442,10 +1511,34 @@ impl TelegramState {
         message: &str,
         reply_to: Option<MessageId>,
     ) -> Result<bool> {
-        // Snapshot what we need under the read lock.
-        let (adapter_type, handle_opt, project_path, project_name) = {
+        self.try_send_event_driven_keyed(bot, chat_id, chat_id.0, message, reply_to, None)
+            .await
+    }
+
+    /// Core event-driven dispatch, parameterised by session key and optional thread_id.
+    ///
+    /// Both `try_send_event_driven` (private chat) and topic/`@alias` callers
+    /// funnel through here. The sentinel logic lives in one place:
+    ///
+    /// - `EventHandleState::None` -> set `Starting` under write lock, call
+    ///   `start_session`, then store `Ready(handle)`.
+    /// - `EventHandleState::Starting` -> return a "please wait" message.
+    /// - `EventHandleState::Ready(handle)` -> call `adapter.send`.
+    pub async fn try_send_event_driven_keyed(
+        &self,
+        bot: Bot,
+        chat_id: ChatId,
+        session_key: i64,
+        message: &str,
+        reply_to: Option<MessageId>,
+        thread_id: Option<ThreadId>,
+    ) -> Result<bool> {
+        use crate::session::EventHandleState;
+
+        // Snapshot session state under read lock to decide what to do.
+        let (adapter_type, handle_state, project_path, project_name) = {
             let sessions = self.sessions.read().await;
-            let Some(session) = sessions.get(&chat_id.0) else {
+            let Some(session) = sessions.get(&session_key) else {
                 return Ok(false);
             };
             if !is_event_driven_session(session) {
@@ -1459,6 +1552,17 @@ impl TelegramState {
             )
         };
 
+        // Handle the Starting sentinel: another message is already initialising
+        // the session. Tell the user to wait.
+        if matches!(handle_state, EventHandleState::Starting) {
+            let mut send = bot.send_message(chat_id, "⏳ Session is starting, please wait...");
+            if let Some(tid) = thread_id {
+                send = send.message_thread_id(tid);
+            }
+            let _ = send.await;
+            return Ok(true);
+        }
+
         let adapter = self.adapters.get_event_driven(&adapter_type).ok_or_else(|| {
             TelegramError::SessionError(format!(
                 "Event-driven adapter '{}' not registered",
@@ -1466,15 +1570,32 @@ impl TelegramState {
             ))
         })?;
 
+        // If this is the first turn, claim the Starting sentinel under write lock
+        // BEFORE doing any I/O. This prevents a second concurrent message from
+        // also calling start_session.
+        let needs_start = matches!(handle_state, EventHandleState::None);
+        if needs_start {
+            let mut sessions = self.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_key) {
+                // Double-check: another task may have beaten us between read and write.
+                if matches!(session.event_handle, EventHandleState::None) {
+                    session.event_handle = EventHandleState::Starting;
+                }
+            }
+        }
+
         // Send initial status message (users get immediate feedback).
-        let status_msg = bot
-            .send_message(chat_id, "🤔 thinking...")
+        let mut status_send = bot.send_message(chat_id, "🤔 thinking...");
+        if let Some(tid) = thread_id {
+            status_send = status_send.message_thread_id(tid);
+        }
+        let status_msg = status_send
             .await
             .map_err(|e| TelegramError::SessionError(format!("Failed to send status: {}", e)))?;
 
         // Start a session (first turn) or send a follow-up (subsequent turns).
-        let (handle_for_store, stream) = match handle_opt {
-            None => {
+        let (handle_for_store, stream) = match handle_state {
+            EventHandleState::None => {
                 info!(
                     chat_id = %chat_id.0,
                     project = %project_name,
@@ -1484,6 +1605,11 @@ impl TelegramState {
                 match adapter.start_session(&project_path, message).await {
                     Ok((handle, stream)) => (Some(handle), stream),
                     Err(e) => {
+                        // Reset sentinel back to None on failure.
+                        let mut sessions = self.sessions.write().await;
+                        if let Some(session) = sessions.get_mut(&session_key) {
+                            session.event_handle = EventHandleState::None;
+                        }
                         let _ = bot
                             .edit_message_text(
                                 chat_id,
@@ -1498,7 +1624,7 @@ impl TelegramState {
                     }
                 }
             }
-            Some(handle) => match adapter.send(&handle, message).await {
+            EventHandleState::Ready(handle) => match adapter.send(&handle, message).await {
                 Ok(stream) => (None, stream),
                 Err(e) => {
                     let _ = bot
@@ -1514,13 +1640,17 @@ impl TelegramState {
                     )));
                 }
             },
+            EventHandleState::Starting => {
+                // Handled above with early return; unreachable here.
+                unreachable!("Starting state handled above");
+            }
         };
 
         // If this was the first turn, store the freshly-created handle.
         if let Some(new_handle) = handle_for_store {
             let mut sessions = self.sessions.write().await;
-            if let Some(session) = sessions.get_mut(&chat_id.0) {
-                session.event_handle = Some(new_handle);
+            if let Some(session) = sessions.get_mut(&session_key) {
+                session.event_handle = EventHandleState::Ready(new_handle);
             }
         }
 
@@ -1539,7 +1669,7 @@ impl TelegramState {
         let status_id = status_msg.id;
         tokio::spawn(async move {
             crate::event_consumer::consume_runtime_events(
-                bot, chat_id, status_id, reply_to, stream,
+                bot, chat_id, status_id, reply_to, thread_id, stream,
             )
             .await;
         });
@@ -1642,47 +1772,71 @@ impl TelegramState {
     /// Route a message to a named session (by project name or tmux session name)
     /// without changing the caller's active session.
     /// Sets at_session_name so the poll loop can record the reply ID for reply-chain routing.
+    ///
+    /// For event-driven sessions, the message is dispatched through the event-driven
+    /// path (`try_send_event_driven_keyed`) instead of tmux. This requires that
+    /// `connect` has already created the `UserSession` (it does — `connect` is called
+    /// below if no session exists yet).
     pub async fn send_to_named_session(
         &self,
+        bot: Bot,
         chat_id: ChatId,
         session_name: &str,
         message: &str,
         message_id: Option<MessageId>,
     ) -> Result<String> {
+        let base_name = session_name.strip_prefix("commander-").unwrap_or(session_name);
+
+        // Ensure a UserSession exists for this chat (connect if needed).
+        // `connect` handles both terminal and event-driven adapters.
+        let already_connected = {
+            let sessions = self.sessions.read().await;
+            sessions.get(&chat_id.0).map(|s| s.project_name.clone())
+        };
+
+        let needs_connect = match &already_connected {
+            Some(current_name) => current_name != base_name,
+            None => true,
+        };
+
+        if needs_connect {
+            self.connect(chat_id, session_name).await
+                .map_err(|e| TelegramError::SessionError(format!("Cannot connect to '{}': {}", session_name, e)))?;
+        }
+
+        // Check if the (now-connected) session is event-driven.
+        let is_event = {
+            let sessions = self.sessions.read().await;
+            sessions.get(&chat_id.0).map(|s| is_event_driven_session(s)).unwrap_or(false)
+        };
+
+        if is_event {
+            // Route through event-driven path. The background task handles the
+            // full response lifecycle, so we don't arm the poll loop.
+            self.try_send_event_driven_keyed(
+                bot, chat_id, chat_id.0, message, message_id, None,
+            ).await?;
+
+            debug!(
+                chat_id = %chat_id.0,
+                target = %session_name,
+                message = %message,
+                "Message routed via @-addressing (event-driven)"
+            );
+            return Ok(base_name.to_string());
+        }
+
+        // Terminal adapter path: requires tmux.
         let tmux = self.tmux.as_ref().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
 
-        // Resolve session name → tmux session name
-        let base_name = session_name.strip_prefix("commander-").unwrap_or(session_name);
-        let tmux_session = format!("commander-{}", base_name);
-
-        if !tmux.session_exists(&tmux_session) {
-            // Try bare name too
-            if !tmux.session_exists(base_name) {
-                return Err(TelegramError::SessionError(
-                    format!("Session '{}' not found", session_name)
-                ));
-            }
-        }
-        let tmux_session = if tmux.session_exists(&tmux_session) {
-            tmux_session
-        } else {
-            base_name.to_string()
-        };
-
-        // Ensure a UserSession exists for this chat (connect if needed, preserving existing)
-        let already_connected = {
+        let tmux_session = {
             let sessions = self.sessions.read().await;
-            sessions.get(&chat_id.0).map(|s| s.tmux_session.clone())
+            sessions.get(&chat_id.0)
+                .map(|s| s.tmux_session.clone())
+                .ok_or(TelegramError::NotConnected)?
         };
-
-        if already_connected.as_deref() != Some(&tmux_session) {
-            // Connect to the target session — this changes the active session
-            // but we'll restore it conceptually via response_prefix
-            self.connect(chat_id, session_name).await
-                .map_err(|e| TelegramError::SessionError(format!("Cannot connect to '{}': {}", session_name, e)))?;
-        }
 
         // Capture current output for change detection
         let last_output = tmux

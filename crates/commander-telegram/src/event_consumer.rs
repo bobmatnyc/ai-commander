@@ -13,7 +13,7 @@
 use commander_adapters::{EventStream, RuntimeEvent};
 use futures::StreamExt;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, MessageId, ReplyParameters};
+use teloxide::types::{ChatId, MessageId, ReplyParameters, ThreadId};
 use tracing::debug;
 
 /// Debounced cadence for live status-message edits (matches streaming UX
@@ -38,12 +38,14 @@ const FINAL_MAX_CHARS: usize = 4000;
 /// * `chat_id` - Target chat
 /// * `status_msg_id` - Pre-sent status message to edit/delete during streaming
 /// * `reply_to` - Optional message id to reply to (the user's original message)
+/// * `thread_id` - Optional forum topic thread id (for group-mode topic sessions)
 /// * `stream` - Event stream from the event-driven adapter
 pub async fn consume_runtime_events(
     bot: Bot,
     chat_id: ChatId,
     status_msg_id: MessageId,
     reply_to: Option<MessageId>,
+    thread_id: Option<ThreadId>,
     mut stream: EventStream,
 ) {
     let mut accumulated = String::new();
@@ -81,6 +83,9 @@ pub async fn consume_runtime_events(
                 if let Some(reply) = reply_to {
                     send = send.reply_parameters(ReplyParameters::new(reply));
                 }
+                if let Some(tid) = thread_id {
+                    send = send.message_thread_id(tid);
+                }
                 let _ = send.await;
                 return;
             }
@@ -104,6 +109,9 @@ pub async fn consume_runtime_events(
         let mut send = bot.send_message(chat_id, display);
         if let Some(reply) = reply_to {
             send = send.reply_parameters(ReplyParameters::new(reply));
+        }
+        if let Some(tid) = thread_id {
+            send = send.message_thread_id(tid);
         }
         let _ = send.await;
     } else {

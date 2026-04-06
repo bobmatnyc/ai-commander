@@ -7,6 +7,51 @@ use serde::{Deserialize, Serialize};
 use teloxide::types::{ChatId, MessageId, ThreadId};
 use tracing::warn;
 
+/// Tri-state for event-driven adapter session handles.
+///
+/// Prevents race conditions where two concurrent messages both see `None`
+/// and both call `start_session`. The `Starting` state acts as a sentinel:
+/// the first message transitions `None -> Starting` under the write lock,
+/// and subsequent messages see `Starting` and wait instead of double-starting.
+#[derive(Debug, Clone)]
+pub enum EventHandleState {
+    /// No event-driven session (terminal adapter or not yet connected).
+    None,
+    /// Session is being initialized (first `start_session` call in progress).
+    Starting,
+    /// Active event-driven session with handle.
+    Ready(SessionHandle),
+}
+
+impl Default for EventHandleState {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl EventHandleState {
+    /// Returns `true` if the handle is `Ready(_)`.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+
+    /// Returns `true` if the handle is either `Starting` or `Ready(_)`.
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Extract the `SessionHandle` if `Ready`, resetting to `None`.
+    pub fn take_handle(&mut self) -> Option<SessionHandle> {
+        match std::mem::replace(self, EventHandleState::None) {
+            EventHandleState::Ready(h) => Some(h),
+            other => {
+                *self = other;
+                Option::None
+            }
+        }
+    }
+}
+
 /// A user's session with a connected project.
 #[derive(Debug)]
 pub struct UserSession {
@@ -60,9 +105,10 @@ pub struct UserSession {
     /// When completion (idle+prompt) was first detected; used to avoid waiting for a second idle poll.
     pub completion_detected_at: Option<Instant>,
     /// Handle for event-driven adapter sessions (e.g. mpm-sdk).
-    /// When `Some`, this session bypasses tmux entirely and uses the event-driven path.
-    /// Populated lazily on the first message (first call creates the handle via `start_session`).
-    pub event_handle: Option<SessionHandle>,
+    /// When `Ready`, this session bypasses tmux entirely and uses the event-driven path.
+    /// Transitions: `None -> Starting` (first message) -> `Ready(handle)` (after `start_session`).
+    /// The `Starting` sentinel prevents race conditions from concurrent messages.
+    pub event_handle: EventHandleState,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -189,7 +235,7 @@ impl UserSession {
             stale_poll_count: 0,
             chars_since_last_summary: 0,
             completion_detected_at: None,
-            event_handle: None,
+            event_handle: EventHandleState::None,
         }
     }
 
@@ -226,7 +272,7 @@ impl UserSession {
             stale_poll_count: 0,
             chars_since_last_summary: 0,
             completion_detected_at: None,
-            event_handle: None,
+            event_handle: EventHandleState::None,
         }
     }
 
