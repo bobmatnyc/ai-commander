@@ -49,6 +49,8 @@ const PROGRESSIVE_SUMMARY_CHARS: usize = 500;
 /// * `status_msg_id` - Pre-sent status message to edit/delete during streaming
 /// * `reply_to` - Optional message id to reply to (the user's original message)
 /// * `thread_id` - Optional forum topic thread id (for group-mode topic sessions)
+/// * `query` - The original user query, passed to `summarize_with_fallback` for
+///   better summarization quality
 /// * `stream` - Event stream from the event-driven adapter
 pub async fn consume_runtime_events(
     bot: Bot,
@@ -56,6 +58,7 @@ pub async fn consume_runtime_events(
     status_msg_id: MessageId,
     reply_to: Option<MessageId>,
     thread_id: Option<ThreadId>,
+    query: String,
     mut stream: EventStream,
 ) {
     let mut accumulated = String::new();
@@ -118,7 +121,7 @@ pub async fn consume_runtime_events(
                 let display = if summarization_available
                     && final_text.len() > SUMMARIZE_THRESHOLD
                 {
-                    let summarized = summarize_with_fallback("", &final_text).await;
+                    let summarized = summarize_with_fallback(&query, &final_text).await;
                     if summarized.is_empty() || summarized.len() >= final_text.len() {
                         // Summarization returned nothing useful; fall back to truncation.
                         warn!(

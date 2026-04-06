@@ -50,7 +50,12 @@ pub trait EventDrivenAdapter: Send + Sync {
     /// Returns static info about this adapter (id, name, description).
     fn info(&self) -> &AdapterInfo;
 
-    /// Starts a new session for the given project path and initial prompt.
+    /// Starts a new session (or resumes an existing one) for the given project
+    /// path and initial prompt.
+    ///
+    /// If `resume_id` is `Some`, the adapter should attempt to resume the
+    /// session with that identifier (e.g. the serve-daemon session ID)
+    /// instead of creating a brand-new session.
     ///
     /// Returns a handle that identifies the session for follow-up calls, and
     /// a stream of events for this first turn.
@@ -58,6 +63,7 @@ pub trait EventDrivenAdapter: Send + Sync {
         &self,
         project_path: &str,
         prompt: &str,
+        resume_id: Option<&str>,
     ) -> Result<(SessionHandle, EventStream), String>;
 
     /// Sends a follow-up message to an existing session.

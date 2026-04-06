@@ -74,6 +74,12 @@ impl MpmClient {
         self.last_session_id.as_deref()
     }
 
+    /// Pre-seed the session ID so the next `run_streaming` call will use
+    /// `--resume` to continue an existing session instead of starting fresh.
+    pub fn set_last_session_id(&mut self, id: String) {
+        self.last_session_id = Some(id);
+    }
+
     /// Get MPM system status: version, binary path, agent count, health.
     pub async fn status(&self) -> Result<MpmStatus, MpmError> {
         // Run `claude-mpm --version`

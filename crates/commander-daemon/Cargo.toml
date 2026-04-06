@@ -40,6 +40,9 @@ psutil = { version = "3.2", optional = true }
 default = []
 psutil = ["dep:psutil"]
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [[bin]]
 name = "commander-daemon"
 path = "src/main.rs"

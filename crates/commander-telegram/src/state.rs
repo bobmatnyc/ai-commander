@@ -1544,7 +1544,7 @@ impl TelegramState {
         use crate::session::EventHandleState;
 
         // Snapshot session state under read lock to decide what to do.
-        let (adapter_type, handle_state, project_path, project_name) = {
+        let (adapter_type, handle_state, project_path, project_name, persisted_serve_id) = {
             let sessions = self.sessions.read().await;
             let Some(session) = sessions.get(&session_key) else {
                 return Ok(false);
@@ -1557,6 +1557,7 @@ impl TelegramState {
                 session.event_handle.clone(),
                 session.project_path.clone(),
                 session.project_name.clone(),
+                session.serve_session_id.clone(),
             )
         };
 
@@ -1610,7 +1611,7 @@ impl TelegramState {
                     adapter = %adapter_type,
                     "Starting event-driven session"
                 );
-                match adapter.start_session(&project_path, message).await {
+                match adapter.start_session(&project_path, message, persisted_serve_id.as_deref()).await {
                     Ok((handle, stream)) => (Some(handle), stream),
                     Err(e) => {
                         // Reset sentinel back to None on failure.
@@ -1678,9 +1679,10 @@ impl TelegramState {
         // Spawn the background event-consumer task. It owns the entire
         // response lifecycle for this turn.
         let status_id = status_msg.id;
+        let query = message.to_string();
         tokio::spawn(async move {
             crate::event_consumer::consume_runtime_events(
-                bot, chat_id, status_id, reply_to, thread_id, stream,
+                bot, chat_id, status_id, reply_to, thread_id, query, stream,
             )
             .await;
         });

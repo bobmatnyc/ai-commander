@@ -277,6 +277,7 @@ impl EventDrivenAdapter for MpmSdkAdapter {
         &self,
         project_path: &str,
         prompt: &str,
+        resume_id: Option<&str>,
     ) -> Result<(SessionHandle, EventStream), String> {
         let handle_id = uuid::Uuid::new_v4().to_string();
 
@@ -285,6 +286,7 @@ impl EventDrivenAdapter for MpmSdkAdapter {
             let req = CreateSessionRequest {
                 cwd: Some(project_path.to_string()),
                 project_root: Some(project_path.to_string()),
+                resume_id: resume_id.map(|s| s.to_string()),
                 ..Default::default()
             };
 
@@ -318,7 +320,11 @@ impl EventDrivenAdapter for MpmSdkAdapter {
         }
 
         // Subprocess fallback.
-        let client = Self::build_client(project_path)?;
+        let mut client = Self::build_client(project_path)?;
+        // Pre-seed the session ID so `run_streaming` will use `--resume`.
+        if let Some(rid) = resume_id {
+            client.set_last_session_id(rid.to_string());
+        }
         let client = Arc::new(Mutex::new(client));
 
         {
