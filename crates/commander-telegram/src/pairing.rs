@@ -184,7 +184,7 @@ mod tests {
         // Fresh pairing
         let fresh = FilePairing {
             project_name: "test".to_string(),
-            session_name: "commander-test".to_string(),
+            session_name: "test".to_string(),
             created_at: now,
         };
         assert!(!fresh.is_expired());
@@ -192,7 +192,7 @@ mod tests {
         // Expired pairing (6 minutes ago)
         let expired = FilePairing {
             project_name: "test".to_string(),
-            session_name: "commander-test".to_string(),
+            session_name: "test".to_string(),
             created_at: now - 360,
         };
         assert!(expired.is_expired());

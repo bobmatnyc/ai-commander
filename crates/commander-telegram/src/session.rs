@@ -426,13 +426,13 @@ mod tests {
             ChatId(12345),
             "/path/to/project".to_string(),
             "my-project".to_string(),
-            "commander-my-project".to_string(),
+            "my-project".to_string(),
         );
 
         assert_eq!(session.chat_id.0, 12345);
         assert_eq!(session.project_path, "/path/to/project");
         assert_eq!(session.project_name, "my-project");
-        assert_eq!(session.tmux_session, "commander-my-project");
+        assert_eq!(session.tmux_session, "my-project");
         assert!(session.response_buffer.is_empty());
         assert!(!session.is_waiting);
         assert_eq!(session.last_progress_line_count, 0);

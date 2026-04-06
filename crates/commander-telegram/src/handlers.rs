@@ -183,12 +183,13 @@ async fn handle_deep_link_connect(
         return Ok(());
     }
 
-    // Get list of sessions and validate the session exists
+    // Get list of sessions and validate the session exists (tmux + event-driven)
     let sessions = state.list_tmux_sessions_with_status();
+    let event_sessions = state.list_event_driven_sessions().await;
     let session_exists = sessions.iter().any(|(name, _, _, _)| {
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
-        display_name == session_name
-    });
+        display_name == session_name || name == session_name
+    }) || event_sessions.iter().any(|(name, _, _)| name == session_name);
 
     if !session_exists {
         bot.send_message(
@@ -274,12 +275,13 @@ async fn handle_deep_link_stop(
         return Ok(());
     }
 
-    // Get list of sessions and validate the session exists
+    // Get list of sessions and validate the session exists (tmux + event-driven)
     let sessions = state.list_tmux_sessions_with_status();
+    let event_sessions = state.list_event_driven_sessions().await;
     let session_exists = sessions.iter().any(|(name, _, _, _)| {
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
-        display_name == session_name
-    });
+        display_name == session_name || name == session_name
+    }) || event_sessions.iter().any(|(name, _, _)| name == session_name);
 
     if !session_exists {
         bot.send_message(
@@ -298,13 +300,17 @@ async fn handle_deep_link_stop(
         }
     };
 
-    // Stop the session — try commander-prefixed first, fall back to bare name
+    // Stop the session — try bare name first, fall back to legacy commander- prefix
     let full_session = {
-        let prefixed = format!("commander-{}", session_name);
-        if tmux.session_exists(&prefixed) {
-            prefixed
-        } else {
+        if tmux.session_exists(session_name) {
             session_name.to_string()
+        } else {
+            let prefixed = format!("commander-{}", session_name);
+            if tmux.session_exists(&prefixed) {
+                prefixed
+            } else {
+                session_name.to_string()
+            }
         }
     };
 
@@ -520,10 +526,18 @@ fn parse_connect_args(arg: &str) -> Result<ConnectArgs, String> {
             }
         }
 
-        match (adapter, name) {
-            (Some(a), Some(n)) => Ok(ConnectArgs::New { path, adapter: a, name: n }),
-            (None, _) => Err("missing -a/--adapter <adapter> (cc, mpm)".to_string()),
-            (_, None) => Err("missing -n/--name <name>".to_string()),
+        match adapter {
+            Some(a) => {
+                let n = name.unwrap_or_else(|| {
+                    path.trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("unnamed")
+                        .to_string()
+                });
+                Ok(ConnectArgs::New { path, adapter: a, name: n })
+            }
+            None => Err("missing -a/--adapter <adapter> (cc, mpm)".to_string()),
         }
     } else if parts.len() == 1 {
         // Existing project by name
@@ -1120,9 +1134,10 @@ pub async fn handle_list(
     }
 
     let sessions = state.list_tmux_sessions_with_status();
+    let event_driven_sessions = state.list_event_driven_sessions().await;
 
-    if sessions.is_empty() {
-        bot.send_message(msg.chat.id, "No tmux sessions found.")
+    if sessions.is_empty() && event_driven_sessions.is_empty() {
+        bot.send_message(msg.chat.id, "No sessions found.")
             .await?;
         return Ok(());
     }
@@ -1133,7 +1148,7 @@ pub async fn handle_list(
     let current_session = state
         .get_session_info(msg.chat.id)
         .await
-        .map(|(_, path)| format!("commander-{}", path.rsplit('/').next().unwrap_or("")));
+        .map(|(name, _)| name);
 
     let mut text = String::from("🤖 <b>Available Sessions</b>\n\nTap a link to connect or stop:\n\n");
 
@@ -1173,6 +1188,7 @@ pub async fn handle_list(
         };
 
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
+        let display_name = display_name.strip_prefix("sdk-").unwrap_or(display_name);
 
         // Generate deep links for this session
         let connect_link = generate_session_link(&bot, display_name).await;
@@ -1184,6 +1200,31 @@ pub async fn handle_list(
             marker,
             html_escape(display_name),
             age_str,
+            status_display,
+            connect_link,
+            stop_link
+        ));
+    }
+
+    // Append event-driven (SDK) sessions that have no tmux presence
+    for (name, adapter, status) in &event_driven_sessions {
+        let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
+        let marker = if is_current { "✅" } else { "📂" };
+
+        let status_display = match status.as_str() {
+            "active" => "🔄 active".to_string(),
+            "starting" => "⏳ starting".to_string(),
+            _ => "💤 idle".to_string(),
+        };
+
+        let connect_link = generate_session_link(&bot, name).await;
+        let stop_link = generate_stop_link(&bot, name).await;
+
+        text.push_str(&format!(
+            "• {} <b>{}</b> [{}]\n  {}\n  👉 <a href=\"{}\">Connect</a> | 🛑 <a href=\"{}\">Stop</a>\n\n",
+            marker,
+            html_escape(name),
+            html_escape(adapter),
             status_display,
             connect_link,
             stop_link
@@ -1233,12 +1274,13 @@ pub async fn handle_link(
         return Ok(());
     }
 
-    // Validate session exists
+    // Validate session exists (tmux + event-driven)
     let sessions = state.list_tmux_sessions_with_status();
+    let event_sessions = state.list_event_driven_sessions().await;
     let session_exists = sessions.iter().any(|(name, _, _, _)| {
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
-        display_name == session_name
-    });
+        display_name == session_name || name == session_name
+    }) || event_sessions.iter().any(|(name, _, _)| name == session_name);
 
     if !session_exists {
         bot.send_message(
@@ -1741,8 +1783,7 @@ pub async fn handle_stop(
         // Use connected session
         match state.get_session_info(msg.chat.id).await {
             Some((name, path)) => {
-                let tmux_session = format!("commander-{}", name);
-                (tmux_session, path, true)
+                (name, path, true)
             }
             None => {
                 bot.send_message(
@@ -1757,30 +1798,31 @@ pub async fn handle_stop(
             }
         }
     } else {
-        // Use specified session — try commander-prefixed first, fall back to bare name
+        // Use specified session — try bare name first, fall back to legacy commander- prefix
         let tmux_session = {
-            let prefixed = if session_arg.starts_with("commander-") {
-                session_arg.to_string()
-            } else {
-                format!("commander-{}", session_arg)
-            };
-            // Resolve tmux to get the orchestrator for the existence check
+            let bare = session_arg.strip_prefix("commander-").unwrap_or(session_arg);
             let tmux_check = state.tmux();
-            if tmux_check.as_ref().map_or(false, |t| t.session_exists(&prefixed)) {
-                prefixed
+            if tmux_check.as_ref().map_or(false, |t| t.session_exists(bare)) {
+                bare.to_string()
             } else {
-                session_arg.to_string()
+                // Legacy fallback: check with commander- prefix
+                let prefixed = format!("commander-{}", bare);
+                if tmux_check.as_ref().map_or(false, |t| t.session_exists(&prefixed)) {
+                    prefixed
+                } else {
+                    bare.to_string()
+                }
             }
         };
 
         // Try to find project path from store; fall back to querying tmux directly
         let project_path = {
+            let search_name = session_arg.strip_prefix("commander-").unwrap_or(session_arg);
             let from_store = state
                 .store()
                 .load_all_projects()
                 .ok()
                 .and_then(|projects| {
-                    let search_name = session_arg.strip_prefix("commander-").unwrap_or(session_arg);
                     projects
                         .values()
                         .find(|p| p.name == search_name)
@@ -1797,11 +1839,20 @@ pub async fn handle_stop(
         let is_connected = state
             .get_session_info(msg.chat.id)
             .await
-            .map(|(name, _)| format!("commander-{}", name) == tmux_session)
+            .map(|(name, _)| name == tmux_session || format!("commander-{}", name) == tmux_session)
             .unwrap_or(false);
 
         (tmux_session, project_path, is_connected)
     };
+
+    // Event-driven sessions have no tmux session — handle them before tmux checks.
+    if state.is_event_driven_session(msg.chat.id).await {
+        let _ = state.disconnect(msg.chat.id).await;
+        bot.send_message(msg.chat.id, "🛑 Session stopped.")
+            .await?;
+        info!(chat_id = %msg.chat.id, "Event-driven session stopped via /stop");
+        return Ok(());
+    }
 
     // Check if tmux session exists
     let tmux = match state.tmux() {

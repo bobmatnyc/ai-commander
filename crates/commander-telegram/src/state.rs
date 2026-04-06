@@ -235,6 +235,7 @@ fn save_authorized_chats(chat_ids: &HashSet<i64>) {
 pub(crate) fn is_event_driven_session(session: &UserSession) -> bool {
     session.event_handle.is_active()
         || session.adapter_type == "mpm-sdk"
+        || session.tmux_session.starts_with("sdk-")
         || session.tmux_session.starts_with("event-driven-")
 }
 
@@ -656,7 +657,7 @@ impl TelegramState {
     /// Connect a user to a project.
     /// Connect to an existing project. Returns (project_name, tool_id).
     pub async fn connect(&self, chat_id: ChatId, project_name: &str) -> Result<(String, String)> {
-        // Strip commander- prefix if present for consistent lookup
+        // Strip legacy commander- prefix if present for backward compatibility
         let base_name = project_name
             .strip_prefix("commander-")
             .unwrap_or(project_name);
@@ -687,7 +688,7 @@ impl TelegramState {
             // Event-driven adapter branch: skip tmux spawn, skip launch command.
             // The actual `adapter.start_session` is deferred to the first user message.
             if self.adapters.is_event_driven(&tool_id) {
-                let synthetic_name = format!("event-driven-{}", project.name);
+                let synthetic_name = format!("sdk-{}", project.name);
                 info!(
                     project = %project.name,
                     adapter = %tool_id,
@@ -724,7 +725,7 @@ impl TelegramState {
                 TelegramError::TmuxError("tmux not available".to_string())
             })?;
 
-            let session_name = format!("commander-{}", project.name);
+            let session_name = project.name.clone();
 
             // Check if tmux session exists, create if not
             if !tmux.session_exists(&session_name) {
@@ -805,17 +806,13 @@ impl TelegramState {
         })?;
 
         let session_candidates = [
-            format!("commander-{}", base_name),
-            project_name.to_string(),
             base_name.to_string(),
+            project_name.to_string(),
         ];
 
         for session_name in &session_candidates {
             if tmux.session_exists(session_name) {
-                let display_name = session_name
-                    .strip_prefix("commander-")
-                    .unwrap_or(session_name)
-                    .to_string();
+                let display_name = session_name.to_string();
 
                 let project_path = get_tmux_cwd(session_name).await
                     .unwrap_or_else(|| "unknown".to_string());
@@ -909,7 +906,7 @@ impl TelegramState {
             validate_project_path(&project.path)
                 .map_err(TelegramError::SessionError)?;
 
-            let tmux_session_name = format!("commander-{}", project.name);
+            let tmux_session_name = project.name.clone();
 
             // Get tool_id from project config
             let tool_id = project
@@ -1031,17 +1028,13 @@ impl TelegramState {
 
         // Fallback to tmux session lookup
         let session_candidates = [
-            format!("commander-{}", base_name),
-            project_name.to_string(),
             base_name.to_string(),
+            project_name.to_string(),
         ];
 
         for tmux_session_name in &session_candidates {
             if tmux.session_exists(tmux_session_name) {
-                let display_name = tmux_session_name
-                    .strip_prefix("commander-")
-                    .unwrap_or(tmux_session_name)
-                    .to_string();
+                let display_name = tmux_session_name.to_string();
 
                 let topic_project_path = get_tmux_cwd(tmux_session_name).await
                     .unwrap_or_else(|| "unknown".to_string());
@@ -1798,7 +1791,9 @@ impl TelegramState {
         message: &str,
         message_id: Option<MessageId>,
     ) -> Result<String> {
-        let base_name = session_name.strip_prefix("commander-").unwrap_or(session_name);
+        let base_name = session_name
+            .strip_prefix("commander-")
+            .unwrap_or(session_name);
 
         // Ensure a UserSession exists for this chat (connect if needed).
         // `connect` handles both terminal and event-driven adapters.
@@ -2193,17 +2188,25 @@ impl TelegramState {
 
     /// List all tmux sessions.
     /// Returns (session_name, is_commander_session) pairs.
+    /// A session is considered "ours" if its name matches a known project name.
     pub fn list_tmux_sessions(&self) -> Vec<(String, bool)> {
         let Some(tmux) = &self.tmux else {
             return Vec::new();
         };
+
+        let known_projects: HashSet<String> = self
+            .store
+            .load_all_projects()
+            .map(|projects| projects.values().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
 
         tmux.list_sessions()
             .map(|sessions| {
                 sessions
                     .into_iter()
                     .map(|s| {
-                        let is_commander = s.name.starts_with("commander-");
+                        let is_commander = known_projects.contains(&s.name)
+                            || s.name.starts_with("commander-");
                         (s.name, is_commander)
                     })
                     .collect()
@@ -2213,17 +2216,25 @@ impl TelegramState {
 
     /// List all tmux sessions with extended status info.
     /// Returns (session_name, is_commander_session, created_at, screen_preview) tuples.
+    /// A session is considered "ours" if its name matches a known project name.
     pub fn list_tmux_sessions_with_status(&self) -> Vec<(String, bool, chrono::DateTime<chrono::Utc>, Option<String>)> {
         let Some(tmux) = &self.tmux else {
             return Vec::new();
         };
+
+        let known_projects: HashSet<String> = self
+            .store
+            .load_all_projects()
+            .map(|projects| projects.values().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
 
         tmux.list_sessions()
             .map(|sessions| {
                 sessions
                     .into_iter()
                     .map(|s| {
-                        let is_commander = s.name.starts_with("commander-");
+                        let is_commander = known_projects.contains(&s.name)
+                            || s.name.starts_with("commander-");
                         // Capture a small screen preview to determine idle/active state
                         let preview = tmux.capture_output(&s.name, None, Some(15))
                             .ok()
@@ -2249,6 +2260,24 @@ impl TelegramState {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// List event-driven sessions from the in-memory sessions map.
+    /// Returns (project_name, adapter_type, status) tuples.
+    pub async fn list_event_driven_sessions(&self) -> Vec<(String, String, String)> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .filter(|s| is_event_driven_session(s))
+            .map(|s| {
+                let status = match &s.event_handle {
+                    crate::session::EventHandleState::Ready { .. } => "active".to_string(),
+                    crate::session::EventHandleState::Starting => "starting".to_string(),
+                    crate::session::EventHandleState::None => "idle".to_string(),
+                };
+                (s.project_name.clone(), s.adapter_type.clone(), status)
+            })
+            .collect()
     }
 
     /// Connect with a git worktree in the current working directory.
@@ -2340,7 +2369,7 @@ impl TelegramState {
             .unwrap_or_else(|| "claude-code".to_string());
 
         // Create tmux session in worktree directory
-        let tmux_session_name = format!("commander-{}", session_name);
+        let tmux_session_name = session_name.to_string();
         if tmux.session_exists(&tmux_session_name) {
             return Err(TelegramError::SessionError(format!(
                 "Session '{}' already exists",
@@ -2621,7 +2650,7 @@ mod tests {
         let config = TopicConfig {
             thread_id: 999,
             session_name: "my-session".to_string(),
-            tmux_session: "commander-my-session".to_string(),
+            tmux_session: "my-session".to_string(),
             project_path: Some("/path/to/project".to_string()),
         };
 
@@ -2630,7 +2659,7 @@ mod tests {
 
         assert_eq!(parsed.thread_id, 999);
         assert_eq!(parsed.session_name, "my-session");
-        assert_eq!(parsed.tmux_session, "commander-my-session");
+        assert_eq!(parsed.tmux_session, "my-session");
         assert_eq!(parsed.project_path, Some("/path/to/project".to_string()));
     }
 
@@ -2641,7 +2670,7 @@ mod tests {
         config.topics.insert(123, TopicConfig {
             thread_id: 123,
             session_name: "test".to_string(),
-            tmux_session: "commander-test".to_string(),
+            tmux_session: "test".to_string(),
             project_path: None,
         });
 
