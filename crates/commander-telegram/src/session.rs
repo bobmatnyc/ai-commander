@@ -20,7 +20,12 @@ pub enum EventHandleState {
     /// Session is being initialized (first `start_session` call in progress).
     Starting,
     /// Active event-driven session with handle.
-    Ready(SessionHandle),
+    Ready {
+        handle: SessionHandle,
+        /// The serve-daemon session ID (if backed by `claude-mpm serve`),
+        /// cached here so persistence can read it without downcasting the adapter.
+        serve_session_id: Option<String>,
+    },
 }
 
 impl Default for EventHandleState {
@@ -30,9 +35,9 @@ impl Default for EventHandleState {
 }
 
 impl EventHandleState {
-    /// Returns `true` if the handle is `Ready(_)`.
+    /// Returns `true` if the handle is `Ready { .. }`.
     pub fn is_ready(&self) -> bool {
-        matches!(self, Self::Ready(_))
+        matches!(self, Self::Ready { .. })
     }
 
     /// Returns `true` if the handle is either `Starting` or `Ready(_)`.
@@ -43,11 +48,19 @@ impl EventHandleState {
     /// Extract the `SessionHandle` if `Ready`, resetting to `None`.
     pub fn take_handle(&mut self) -> Option<SessionHandle> {
         match std::mem::replace(self, EventHandleState::None) {
-            EventHandleState::Ready(h) => Some(h),
+            EventHandleState::Ready { handle, .. } => Some(handle),
             other => {
                 *self = other;
                 Option::None
             }
+        }
+    }
+
+    /// Returns the cached serve session ID if in the `Ready` state.
+    pub fn serve_session_id(&self) -> Option<&str> {
+        match self {
+            Self::Ready { serve_session_id, .. } => serve_session_id.as_deref(),
+            _ => Option::None,
         }
     }
 }
@@ -109,6 +122,9 @@ pub struct UserSession {
     /// Transitions: `None -> Starting` (first message) -> `Ready(handle)` (after `start_session`).
     /// The `Starting` sentinel prevents race conditions from concurrent messages.
     pub event_handle: EventHandleState,
+    /// Cached serve-daemon session ID for persistence across bot restarts.
+    /// Populated after `start_session` succeeds (from `MpmSdkAdapter::get_serve_session_id`).
+    pub serve_session_id: Option<String>,
 }
 
 /// Worktree information for sessions created with /connect-tree.
@@ -141,6 +157,12 @@ pub struct PersistedSession {
     pub created_at: u64,
     /// Timestamp of last activity (Unix timestamp).
     pub last_activity: u64,
+    /// Adapter type (e.g. "claude-code", "mpm-sdk"). Defaults to "claude-code" if absent.
+    #[serde(default)]
+    pub adapter_type: Option<String>,
+    /// Serve-daemon session ID for event-driven sessions (enables resume after restart).
+    #[serde(default)]
+    pub serve_session_id: Option<String>,
 }
 
 impl PersistedSession {
@@ -151,6 +173,13 @@ impl PersistedSession {
             .unwrap()
             .as_secs();
 
+        // Prefer the serve_session_id cached on the session struct itself,
+        // falling back to what the EventHandleState carries.
+        let serve_session_id = session
+            .serve_session_id
+            .clone()
+            .or_else(|| session.event_handle.serve_session_id().map(|s| s.to_string()));
+
         Self {
             chat_id: session.chat_id.0,
             project_path: session.project_path.clone(),
@@ -160,6 +189,8 @@ impl PersistedSession {
             worktree_info: session.worktree_info.clone(),
             created_at: now,
             last_activity: now,
+            adapter_type: Some(session.adapter_type.clone()),
+            serve_session_id,
         }
     }
 
@@ -181,7 +212,7 @@ impl PersistedSession {
     pub fn restore_to_user_session(&self) -> UserSession {
         let thread_id = self.thread_id.map(|tid| ThreadId(MessageId(tid)));
 
-        if let Some(tid) = thread_id {
+        let mut session = if let Some(tid) = thread_id {
             UserSession::with_thread_id(
                 ChatId(self.chat_id),
                 self.project_path.clone(),
@@ -190,15 +221,23 @@ impl PersistedSession {
                 tid,
             )
         } else {
-            let mut session = UserSession::new(
+            let mut s = UserSession::new(
                 ChatId(self.chat_id),
                 self.project_path.clone(),
                 self.project_name.clone(),
                 self.tmux_session.clone(),
             );
-            session.worktree_info = self.worktree_info.clone();
-            session
+            s.worktree_info = self.worktree_info.clone();
+            s
+        };
+
+        // Restore adapter type and serve session ID for event-driven sessions.
+        if let Some(ref adapter_type) = self.adapter_type {
+            session.adapter_type = adapter_type.clone();
         }
+        session.serve_session_id = self.serve_session_id.clone();
+
+        session
     }
 }
 
@@ -236,6 +275,7 @@ impl UserSession {
             chars_since_last_summary: 0,
             completion_detected_at: None,
             event_handle: EventHandleState::None,
+            serve_session_id: None,
         }
     }
 
@@ -273,6 +313,7 @@ impl UserSession {
             chars_since_last_summary: 0,
             completion_detected_at: None,
             event_handle: EventHandleState::None,
+            serve_session_id: None,
         }
     }
 

@@ -711,7 +711,10 @@ impl TelegramState {
                     project = %project.name,
                     "User connected to event-driven session"
                 );
-                // NOTE: event-driven sessions are NOT persisted in Phase 2 (in-memory only).
+
+                // Auto-save sessions after connection (event-driven sessions
+                // now persist so the user doesn't need to /connect again on restart).
+                self.save_sessions().await;
 
                 return Ok((project.name.clone(), tool_id));
             }
@@ -953,6 +956,11 @@ impl TelegramState {
                     project = %project.name,
                     "Topic connected to event-driven session"
                 );
+
+                // Persist so the topic mapping survives restarts.
+                drop(sessions);
+                self.save_sessions().await;
+
                 return Ok((project.name.clone(), tool_id));
             }
 
@@ -1523,7 +1531,7 @@ impl TelegramState {
     /// - `EventHandleState::None` -> set `Starting` under write lock, call
     ///   `start_session`, then store `Ready(handle)`.
     /// - `EventHandleState::Starting` -> return a "please wait" message.
-    /// - `EventHandleState::Ready(handle)` -> call `adapter.send`.
+    /// - `EventHandleState::Ready { handle, .. }` -> call `adapter.send`.
     pub async fn try_send_event_driven_keyed(
         &self,
         bot: Bot,
@@ -1624,7 +1632,7 @@ impl TelegramState {
                     }
                 }
             }
-            EventHandleState::Ready(handle) => match adapter.send(&handle, message).await {
+            EventHandleState::Ready { handle, .. } => match adapter.send(&handle, message).await {
                 Ok(stream) => (None, stream),
                 Err(e) => {
                     let _ = bot
@@ -1650,7 +1658,10 @@ impl TelegramState {
         if let Some(new_handle) = handle_for_store {
             let mut sessions = self.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_key) {
-                session.event_handle = EventHandleState::Ready(new_handle);
+                session.event_handle = EventHandleState::Ready {
+                    handle: new_handle,
+                    serve_session_id: None,
+                };
             }
         }
 
@@ -2433,13 +2444,14 @@ impl TelegramState {
 
     /// Save all active sessions to disk for persistence.
     ///
-    /// Event-driven sessions (e.g. mpm-sdk) are excluded — their persistence
-    /// is deferred to Phase 3.
+    /// Both terminal and event-driven sessions are now persisted. Event-driven
+    /// sessions store their `adapter_type` and `serve_session_id` so the
+    /// routing can be restored on restart (the actual conversation context may
+    /// not survive a daemon restart, but the user won't need to `/connect` again).
     pub async fn save_sessions(&self) {
         let sessions = self.sessions.read().await;
         let persisted: HashMap<i64, PersistedSession> = sessions
             .iter()
-            .filter(|(_, session)| !is_event_driven_session(session))
             .map(|(key, session)| (*key, PersistedSession::from_user_session(session)))
             .collect();
         save_persisted_sessions(&persisted);
@@ -2455,37 +2467,49 @@ impl TelegramState {
             return (0, 0);
         }
 
-        let tmux = match &self.tmux {
-            Some(t) => t,
-            None => {
-                warn!("Cannot restore sessions: tmux not available");
-                return (0, total_count);
-            }
-        };
-
         let mut sessions = self.sessions.write().await;
         let mut restored_count = 0;
 
         for (key, persisted_session) in persisted {
-            // Validate session: must be < 24h old and tmux session must exist
-            if !persisted_session.is_valid() {
-                debug!(
-                    session = %persisted_session.tmux_session,
-                    age_hours = persisted_session.age_seconds() / 3600,
-                    "Skipping expired session"
-                );
-                continue;
+            let is_event_driven = persisted_session
+                .adapter_type
+                .as_deref()
+                .map(|t| self.adapters.is_event_driven(t))
+                .unwrap_or(false);
+
+            // Event-driven sessions skip the 24h expiry and tmux-exists checks:
+            // they don't own a tmux pane, and the serve daemon is lazily
+            // reconnected on the first user message.
+            if !is_event_driven {
+                if !persisted_session.is_valid() {
+                    debug!(
+                        session = %persisted_session.tmux_session,
+                        age_hours = persisted_session.age_seconds() / 3600,
+                        "Skipping expired session"
+                    );
+                    continue;
+                }
+
+                let tmux = match &self.tmux {
+                    Some(t) => t,
+                    None => {
+                        warn!("Cannot restore terminal session: tmux not available");
+                        continue;
+                    }
+                };
+
+                if !tmux.session_exists(&persisted_session.tmux_session) {
+                    debug!(
+                        session = %persisted_session.tmux_session,
+                        "Skipping session: tmux session not found"
+                    );
+                    continue;
+                }
             }
 
-            if !tmux.session_exists(&persisted_session.tmux_session) {
-                debug!(
-                    session = %persisted_session.tmux_session,
-                    "Skipping session: tmux session not found"
-                );
-                continue;
-            }
-
-            // Restore session
+            // Restore session. Event-driven sessions come back with
+            // event_handle = None; the first user message will lazily
+            // call start_session via try_send_event_driven_keyed.
             let user_session = persisted_session.restore_to_user_session();
             sessions.insert(key, user_session);
             restored_count += 1;
@@ -2493,6 +2517,8 @@ impl TelegramState {
             info!(
                 session = %persisted_session.tmux_session,
                 chat_id = %persisted_session.chat_id,
+                adapter_type = ?persisted_session.adapter_type,
+                is_event_driven = is_event_driven,
                 "Restored session from disk"
             );
         }

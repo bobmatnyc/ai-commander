@@ -54,6 +54,8 @@ fn test_persisted_session_validation() {
         worktree_info: None,
         created_at: now - 3600, // 1 hour ago
         last_activity: now - 60, // 1 minute ago
+        adapter_type: None,
+        serve_session_id: None,
     };
 
     assert!(recent_session.is_valid(), "Recent session should be valid");
@@ -69,6 +71,8 @@ fn test_persisted_session_validation() {
         worktree_info: None,
         created_at: now - (25 * 60 * 60), // 25 hours ago
         last_activity: now - (24 * 60 * 60), // 24 hours ago
+        adapter_type: None,
+        serve_session_id: None,
     };
 
     assert!(!old_session.is_valid(), "Old session should be invalid");
@@ -90,6 +94,8 @@ fn test_session_restoration() {
         worktree_info: None,
         created_at: 1000,
         last_activity: 2000,
+        adapter_type: None,
+        serve_session_id: None,
     };
 
     let restored = persisted.restore_to_user_session();
@@ -109,6 +115,8 @@ fn test_session_restoration() {
         worktree_info: None,
         created_at: 1000,
         last_activity: 2000,
+        adapter_type: None,
+        serve_session_id: None,
     };
 
     let restored_with_thread = persisted_with_thread.restore_to_user_session();
@@ -129,6 +137,8 @@ fn test_session_serialization() {
         worktree_info: None,
         created_at: 1000,
         last_activity: 2000,
+        adapter_type: None,
+        serve_session_id: None,
     };
 
     // Serialize

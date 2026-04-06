@@ -11,10 +11,11 @@
 //! enums today — they are intentionally kept separate for Phase 2.
 
 use commander_adapters::{EventStream, RuntimeEvent};
+use commander_core::{is_summarization_available, summarize_incremental_tiered, summarize_with_fallback};
 use futures::StreamExt;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, MessageId, ReplyParameters, ThreadId};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Debounced cadence for live status-message edits (matches streaming UX
 /// in `handlers::spawn_agent_with_streaming`).
@@ -24,12 +25,21 @@ const PREVIEW_MAX_CHARS: usize = 3500;
 /// Final message truncation cap.
 const FINAL_MAX_CHARS: usize = 4000;
 
+/// Character threshold for triggering final summarization on completion.
+/// Responses longer than this are summarized before sending to Telegram.
+const SUMMARIZE_THRESHOLD: usize = 2000;
+
+/// Character delta between progressive summary snapshots during streaming.
+const PROGRESSIVE_SUMMARY_CHARS: usize = 500;
+
 /// Consume a `RuntimeEvent` stream, editing a Telegram status message with
 /// streaming progress and dispatching the final reply on completion.
 ///
 /// This function owns the entire response lifecycle for a single turn:
 /// - Text chunks accumulate and update the status message at most every 2s
+/// - Progressive summaries replace raw preview when content grows large
 /// - `Complete` deletes the status message and sends the final reply
+///   (optionally summarized via the 3-tier NLP+inference pipeline)
 /// - `Error` replaces the status message with an error notice
 ///
 /// # Arguments
@@ -50,13 +60,41 @@ pub async fn consume_runtime_events(
 ) {
     let mut accumulated = String::new();
     let mut last_edit = std::time::Instant::now();
+    let mut chars_since_last_summary: usize = 0;
+    let summarization_available = is_summarization_available();
 
     while let Some(event) = stream.next().await {
         match event {
             RuntimeEvent::TextChunk(chunk) => {
+                let chunk_len = chunk.len();
                 accumulated.push_str(&chunk);
+                chars_since_last_summary += chunk_len;
+
                 if last_edit.elapsed() >= EDIT_INTERVAL && !accumulated.is_empty() {
-                    let preview = truncate_for_telegram(&accumulated, PREVIEW_MAX_CHARS);
+                    // Try progressive summarization when enough new content has arrived.
+                    let preview = if summarization_available
+                        && chars_since_last_summary >= PROGRESSIVE_SUMMARY_CHARS
+                        && accumulated.len() > PROGRESSIVE_SUMMARY_CHARS
+                    {
+                        let line_count = accumulated.lines().count();
+                        match summarize_incremental_tiered(&accumulated, line_count).await {
+                            Ok(summary) => {
+                                chars_since_last_summary = 0;
+                                truncate_for_telegram(&summary, PREVIEW_MAX_CHARS)
+                            }
+                            Err(e) => {
+                                debug!(
+                                    chat_id = %chat_id.0,
+                                    error = %e,
+                                    "Progressive summary failed, falling back to raw preview"
+                                );
+                                truncate_for_telegram(&accumulated, PREVIEW_MAX_CHARS)
+                            }
+                        }
+                    } else {
+                        truncate_for_telegram(&accumulated, PREVIEW_MAX_CHARS)
+                    };
+
                     let _ = bot
                         .edit_message_text(
                             chat_id,
@@ -74,7 +112,33 @@ pub async fn consume_runtime_events(
                 // Prefer the explicit summary if present, otherwise fall back to
                 // the accumulated text chunks.
                 let final_text = summary.unwrap_or_else(|| accumulated.clone());
-                let display = truncate_for_telegram(&final_text, FINAL_MAX_CHARS);
+
+                // Summarize long responses via the 3-tier NLP+inference pipeline
+                // to stay within Telegram's message limits and improve readability.
+                let display = if summarization_available
+                    && final_text.len() > SUMMARIZE_THRESHOLD
+                {
+                    let summarized = summarize_with_fallback("", &final_text).await;
+                    if summarized.is_empty() || summarized.len() >= final_text.len() {
+                        // Summarization returned nothing useful; fall back to truncation.
+                        warn!(
+                            chat_id = %chat_id.0,
+                            text_len = final_text.len(),
+                            "Final summarization did not reduce output, using truncation"
+                        );
+                        truncate_for_telegram(&final_text, FINAL_MAX_CHARS)
+                    } else {
+                        debug!(
+                            chat_id = %chat_id.0,
+                            original_len = final_text.len(),
+                            summary_len = summarized.len(),
+                            "Summarized event-driven response"
+                        );
+                        truncate_for_telegram(&summarized, FINAL_MAX_CHARS)
+                    }
+                } else {
+                    truncate_for_telegram(&final_text, FINAL_MAX_CHARS)
+                };
 
                 // Delete the status message first (best-effort).
                 let _ = bot.delete_message(chat_id, status_msg_id).await;
