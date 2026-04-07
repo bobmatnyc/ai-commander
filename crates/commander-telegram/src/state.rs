@@ -1,6 +1,8 @@
 //! Shared state for the Telegram bot.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -291,6 +293,9 @@ pub struct TelegramState {
     at_reply_map: Arc<RwLock<HashMap<(i64, i32), String>>>,
     /// Per-chat typing indicator throttle (shared across poll loop and handlers).
     pub typing_throttle: TypingThrottle,
+    /// Cache for /ls summaries: session_name -> (output_hash, cached_summary).
+    /// Avoids redundant LLM calls when tmux output hasn't changed.
+    ls_summary_cache: RwLock<HashMap<String, (u64, String)>>,
     /// Agent orchestrator for LLM-based message processing (feature-gated).
     #[cfg(feature = "agents")]
     orchestrator: RwLock<Option<AgentOrchestrator>>,
@@ -337,6 +342,7 @@ impl TelegramState {
             bot_info: RwLock::new(None),
             at_reply_map: Arc::new(RwLock::new(HashMap::new())),
             typing_throttle: TypingThrottle::new(),
+            ls_summary_cache: RwLock::new(HashMap::new()),
             #[cfg(feature = "agents")]
             orchestrator: RwLock::new(None),
         }
@@ -355,6 +361,36 @@ impl TelegramState {
             .as_ref()
             .map(|me| me.username().to_string())
             .unwrap_or_else(|| "commander".to_string())
+    }
+
+    /// Compute a hash of the given output string for cache invalidation.
+    fn hash_output(output: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        output.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Get cached /ls summary if output hash matches, otherwise None.
+    pub async fn get_cached_summary(&self, session_name: &str, output: &str) -> Option<String> {
+        let hash = Self::hash_output(output);
+        let cache = self.ls_summary_cache.read().await;
+        cache
+            .get(session_name)
+            .filter(|(cached_hash, _)| *cached_hash == hash)
+            .map(|(_, summary)| summary.clone())
+    }
+
+    /// Store a /ls summary in the cache.
+    pub async fn set_cached_summary(&self, session_name: &str, output: &str, summary: String) {
+        let hash = Self::hash_output(output);
+        let mut cache = self.ls_summary_cache.write().await;
+        cache.insert(session_name.to_string(), (hash, summary));
+    }
+
+    /// Invalidate cached /ls summary for a session (e.g. on disconnect/stop).
+    pub async fn invalidate_summary_cache(&self, session_name: &str) {
+        let mut cache = self.ls_summary_cache.write().await;
+        cache.remove(session_name);
     }
 
     /// Initialize the agent orchestrator asynchronously (when agents feature is enabled).
@@ -867,6 +903,11 @@ impl TelegramState {
             None
         };
         drop(sessions); // Release lock before saving
+
+        // Invalidate /ls summary cache for the disconnected session
+        if let Some(ref name) = result {
+            self.invalidate_summary_cache(name).await;
+        }
 
         // Auto-save sessions after disconnection
         self.save_sessions().await;
