@@ -48,18 +48,48 @@ impl OptionDetector {
     /// Detect options in text output.
     ///
     /// Returns Some(DetectedOptions) if options are found, None otherwise.
+    /// Only returns options when the text appears to be asking for a choice
+    /// (contains a question or prompt), not when it's informational output
+    /// that happens to contain a numbered/lettered list.
     pub fn detect_options(text: &str) -> Option<DetectedOptions> {
         // Try to detect different option formats in priority order
         if let Some(opts) = Self::detect_yes_no(text) {
             return Some(opts);
         }
         if let Some(opts) = Self::detect_letter_options(text) {
-            return Some(opts);
+            // Only return if the preceding text looks like a question/prompt
+            if Self::has_question_context(opts.question.as_deref()) {
+                return Some(opts);
+            }
         }
         if let Some(opts) = Self::detect_number_options(text) {
-            return Some(opts);
+            // Only return if the preceding text looks like a question/prompt
+            if Self::has_question_context(opts.question.as_deref()) {
+                return Some(opts);
+            }
         }
         None
+    }
+
+    /// Check if the question/context text preceding options looks like an
+    /// actual prompt for selection, not an informational summary.
+    fn has_question_context(question: Option<&str>) -> bool {
+        let q = match question {
+            Some(q) if !q.is_empty() => q,
+            _ => return false, // No context → no buttons
+        };
+        let lower = q.to_lowercase();
+        // Must contain a question mark or selection-related keywords
+        lower.contains('?')
+            || lower.contains("choose")
+            || lower.contains("select")
+            || lower.contains("pick")
+            || lower.contains("prefer")
+            || lower.contains("which")
+            || lower.contains("would you")
+            || lower.contains("do you want")
+            || lower.contains("option")
+            || lower.contains("approach")
     }
 
     /// Detect yes/no questions.
@@ -263,13 +293,30 @@ mod tests {
 
     #[test]
     fn test_detect_letter_options_with_period() {
-        let text = "A. First option\nB. Second option";
+        // Has question context via "which approach?"
+        let text = "Which approach?\nA. First option\nB. Second option";
         let detected = OptionDetector::detect_options(text);
         assert!(detected.is_some());
 
         let opts = detected.unwrap();
         assert_eq!(opts.format, OptionFormat::Letters);
         assert_eq!(opts.options.len(), 2);
+    }
+
+    #[test]
+    fn test_no_buttons_on_informational_list() {
+        // Informational output — no question, no buttons
+        let text = "Done! Here's what I completed:\n1. Fixed the auth bug\n2. Added unit tests\n3. Updated the docs";
+        let detected = OptionDetector::detect_options(text);
+        assert!(detected.is_none(), "Informational lists should not produce buttons");
+    }
+
+    #[test]
+    fn test_no_buttons_without_question_context() {
+        // Sequential numbers but no question/prompt context
+        let text = "A. Refactored the module\nB. Created new tests";
+        let detected = OptionDetector::detect_options(text);
+        assert!(detected.is_none(), "Lists without question context should not produce buttons");
     }
 
     #[test]
@@ -289,7 +336,8 @@ mod tests {
 
     #[test]
     fn test_detect_number_options_with_period() {
-        let text = "1. First option\n2. Second option";
+        // Has question context via "Select"
+        let text = "Select an option:\n1. First option\n2. Second option";
         let detected = OptionDetector::detect_options(text);
         assert!(detected.is_some());
 

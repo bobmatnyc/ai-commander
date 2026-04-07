@@ -1090,6 +1090,15 @@ async fn generate_session_link(bot: &Bot, session_name: &str) -> String {
     format!("https://t.me/{}?start=connect_{}", bot_username, session_name)
 }
 
+/// Generate a deep link for stopping a session.
+async fn generate_stop_link(bot: &Bot, session_name: &str) -> String {
+    let bot_username = match bot.get_me().await {
+        Ok(me) => me.username().to_string(),
+        Err(_) => "commander".to_string(),
+    };
+    format!("https://t.me/{}?start=stop_{}", bot_username, session_name)
+}
+
 /// Call `interpret_screen_context` (blocking) from an async context.
 ///
 /// Returns `None` when the preview is empty or the OpenRouter key is absent.
@@ -1141,7 +1150,7 @@ pub async fn handle_list(
         .await
         .map(|(name, _)| name);
 
-    let mut text = String::from("📋 <b>Active Sessions</b>\n\n");
+    let mut text = String::from("🤖 <b>Available Sessions</b>\n\nTap a link to connect or stop:\n\n");
 
     for (name, is_commander, created_at, preview) in &sessions {
         let is_current = current_session.as_ref().map(|s| s == name).unwrap_or(false);
@@ -1194,13 +1203,18 @@ pub async fn handle_list(
         let display_name = name.strip_prefix("commander-").unwrap_or(name);
         let display_name = display_name.strip_prefix("sdk-").unwrap_or(display_name);
 
-        // Informational display only — use /connect and /stop commands to act
+        // Generate deep links for this session
+        let connect_link = generate_session_link(&bot, display_name).await;
+        let stop_link = generate_stop_link(&bot, display_name).await;
+
         text.push_str(&format!(
-            "{} <b>{}</b> · {}\n  {}\n\n",
+            "• {} <b>{}</b> · {}\n  {}\n  👉 <a href=\"{}\">Connect</a> | 🛑 <a href=\"{}\">Stop</a>\n\n",
             marker,
             html_escape(display_name),
             age_str,
             status_display,
+            connect_link,
+            stop_link
         ));
     }
 
@@ -1215,16 +1229,21 @@ pub async fn handle_list(
             _ => "💤 idle".to_string(),
         };
 
+        let connect_link = generate_session_link(&bot, name).await;
+        let stop_link = generate_stop_link(&bot, name).await;
+
         text.push_str(&format!(
-            "{} <b>{}</b> [{}]\n  {}\n\n",
+            "• {} <b>{}</b> [{}]\n  {}\n  👉 <a href=\"{}\">Connect</a> | 🛑 <a href=\"{}\">Stop</a>\n\n",
             marker,
             html_escape(name),
             html_escape(adapter),
             status_display,
+            connect_link,
+            stop_link
         ));
     }
 
-    text.push_str("<i>Use /connect &lt;name&gt; or /stop &lt;name&gt; to manage sessions.</i>");
+    text.push_str("<i>💡 Tip: Bookmark these links for quick access!</i>");
 
     bot.send_message(msg.chat.id, text)
         .parse_mode(teloxide::types::ParseMode::Html)
