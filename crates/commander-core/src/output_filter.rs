@@ -449,6 +449,289 @@ pub fn clean_screen_preview(output: &str, max_lines: usize) -> String {
         .join("\n")
 }
 
+/// A detected interactive selector prompt from Claude Code or MPM.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SelectorPrompt {
+    /// The question/prompt text (e.g. "How would you like to proceed?")
+    pub question: String,
+    /// All available options in display order
+    pub options: Vec<String>,
+    /// 0-based index of the currently highlighted option (❯)
+    pub selected_index: usize,
+    /// true = multi-select with checkboxes (◉/○), false = single select
+    pub is_multi: bool,
+    /// true = simple Y/N confirm prompt
+    pub is_confirm: bool,
+}
+
+/// A structured event from a terminal session, used by both GUI and Telegram adapters.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionEvent {
+    /// Raw terminal output (filtered, meaningful lines only)
+    Output {
+        session: String,
+        content: String,
+        line_count: usize,
+    },
+    /// Interactive selector prompt detected
+    Selector {
+        session: String,
+        prompt: SelectorPrompt,
+    },
+    /// Progress indicator while output is accumulating
+    Progress {
+        session: String,
+        line_count: usize,
+    },
+}
+
+/// Detect if the terminal output contains an interactive selector prompt.
+///
+/// Returns `Some(SelectorPrompt)` if a selector is visible, `None` otherwise.
+///
+/// Detects:
+/// - Inquirer.js single select: lines with ❯ prefix, question starts with ?
+/// - Inquirer.js multi select: lines with ❯◉ / ○ / ◉ prefixes
+/// - Numbered list selectors: "1." / "1)" style options
+/// - Y/N confirm: "? question (Y/n)" or "? question (y/N)"
+pub fn detect_selector(output: &str) -> Option<SelectorPrompt> {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    // Only check the last 30 lines — selector is always near bottom
+    let window_start = lines.len().saturating_sub(30);
+    let window = &lines[window_start..];
+
+    // Collect non-empty, ANSI-stripped lines
+    let clean: Vec<String> = window
+        .iter()
+        .map(|l| strip_ansi_basic(l.trim()))
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if clean.is_empty() {
+        return None;
+    }
+
+    // --- Pattern 1: Inquirer.js arrow-key selector (❯ prefix) ---
+    let has_arrow = clean.iter().any(|l| {
+        l.starts_with('❯') || l.starts_with("> ") || l.starts_with("❯◉") || l.starts_with("❯ ◉")
+    });
+
+    if has_arrow {
+        let first_arrow_idx = clean
+            .iter()
+            .position(|l| {
+                l.starts_with('❯') || l.starts_with("> ") || l.starts_with("❯◉")
+            })
+            .unwrap_or(0);
+
+        let question = if first_arrow_idx > 0 {
+            let q = clean[first_arrow_idx - 1].clone();
+            q.trim_start_matches('?')
+                .trim()
+                .split(" (Use arrow")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .split(" (Press")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        let is_multi = clean.iter().any(|l| l.contains('◉') || l.contains('○'));
+
+        let mut options = Vec::new();
+        let mut selected_index = 0;
+
+        for line in &clean[first_arrow_idx..] {
+            let l = line.as_str();
+            let is_option = l.starts_with('❯')
+                || l.starts_with("  ")
+                || l.starts_with("> ")
+                || l.starts_with("❯◉")
+                || l.starts_with("❯ ◉")
+                || l.starts_with(" ◉")
+                || l.starts_with(" ○");
+            if !is_option && !options.is_empty() {
+                break;
+            }
+            if !is_option {
+                continue;
+            }
+
+            let is_selected = l.starts_with('❯') || l.starts_with("> ");
+            let option_text = l
+                .trim_start_matches('❯')
+                .trim_start_matches('>')
+                .trim_start_matches('◉')
+                .trim_start_matches('○')
+                .trim_start_matches('✔')
+                .trim()
+                .to_string();
+
+            if !option_text.is_empty() {
+                if is_selected {
+                    selected_index = options.len();
+                }
+                options.push(option_text);
+            }
+        }
+
+        if options.len() >= 2 {
+            return Some(SelectorPrompt {
+                question,
+                options,
+                selected_index,
+                is_multi,
+                is_confirm: false,
+            });
+        }
+    }
+
+    // --- Pattern 2: Numbered list selector (1. / 1) style) ---
+    let numbered_options: Vec<String> = clean
+        .iter()
+        .filter_map(|l| {
+            let trimmed = l.trim();
+            if trimmed.len() < 3 {
+                return None;
+            }
+            let first = trimmed.chars().next()?;
+            if !first.is_ascii_digit() {
+                return None;
+            }
+            let second = trimmed.chars().nth(1)?;
+            let rest = if second == '.' || second == ')' {
+                trimmed[2..].trim()
+            } else if trimmed.len() > 3 {
+                let third = trimmed.chars().nth(2)?;
+                if trimmed.chars().nth(1)?.is_ascii_digit() && third == '.' {
+                    trimmed[3..].trim()
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            };
+            if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            }
+        })
+        .collect();
+
+    if numbered_options.len() >= 2 {
+        let question = clean
+            .iter()
+            .rev()
+            .skip_while(|l| {
+                let t = l.trim();
+                t.is_empty() || t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            })
+            .next()
+            .cloned()
+            .unwrap_or_default()
+            .trim_start_matches('?')
+            .trim()
+            .to_string();
+
+        // Only treat as a selector if there's question/prompt context.
+        // Plain numbered lists in informational output should NOT produce buttons.
+        let looks_like_prompt = {
+            let q = question.to_lowercase();
+            q.contains('?')
+                || q.contains("choose")
+                || q.contains("select")
+                || q.contains("pick")
+                || q.contains("prefer")
+                || q.contains("which")
+                || q.contains("would you")
+                || q.contains("do you want")
+                || q.contains("option")
+                || q.contains("approach")
+        };
+
+        if looks_like_prompt {
+            return Some(SelectorPrompt {
+                question,
+                options: numbered_options,
+                selected_index: 0,
+                is_multi: false,
+                is_confirm: false,
+            });
+        }
+    }
+
+    // --- Pattern 3: Y/N confirm ---
+    if let Some(last) = clean.last() {
+        let l = last.to_lowercase();
+        if (l.contains("(y/n)")
+            || l.contains("(yes/no)")
+            || l.contains("[y/n]"))
+            && last.trim_start_matches('?').trim().len() > 3
+        {
+            let question = last
+                .trim_start_matches('?')
+                .trim()
+                .split(" (Y")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .split(" (y")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .split(" [Y")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
+            return Some(SelectorPrompt {
+                question,
+                options: vec!["Yes".to_string(), "No".to_string()],
+                selected_index: if l.contains("(y/n)") || l.contains("(y/n") { 0 } else { 1 },
+                is_multi: false,
+                is_confirm: true,
+            });
+        }
+    }
+
+    None
+}
+
+/// Minimal ANSI escape code stripper (no external dependency).
+fn strip_ansi_basic(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c2 in chars.by_ref() {
+                    if c2.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+        } else if c >= ' ' {
+            result.push(c);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
