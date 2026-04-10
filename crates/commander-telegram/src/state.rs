@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use commander_adapters::AdapterRegistry;
 use commander_core::{
@@ -19,6 +20,7 @@ use teloxide::prelude::Requester;
 use teloxide::types::{ChatId, Me, MessageId, ThreadId};
 use teloxide::Bot;
 use tokio::sync::RwLock;
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "agents")]
@@ -266,6 +268,81 @@ fn validate_project_path(path: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Maximum time we allow a synchronous tmux `capture-pane` call to run before
+/// treating it as hung. Tmux normally returns in milliseconds; anything over
+/// this threshold indicates a stuck server or detached socket and we must not
+/// hold async locks while waiting.
+const TMUX_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Maximum time we allow a synchronous tmux `send-keys` call to run.
+const TMUX_SEND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Call `TmuxOrchestrator::capture_output` on a blocking thread with a
+/// bounded timeout.
+///
+/// This exists to protect the async runtime from a misbehaving tmux server
+/// (see `docs/research/handler-hang-2026-04-10.md`). Callers MUST NOT hold
+/// any `sessions` lock guard while awaiting this helper.
+async fn capture_output_safe(
+    tmux: Arc<TmuxOrchestrator>,
+    session_name: String,
+    lines: Option<u32>,
+) -> Result<String> {
+    let join = tokio::task::spawn_blocking(move || {
+        tmux.capture_output(&session_name, None, lines)
+    });
+
+    match timeout(TMUX_CAPTURE_TIMEOUT, join).await {
+        Ok(Ok(Ok(output))) => Ok(output),
+        Ok(Ok(Err(e))) => Err(TelegramError::TmuxError(format!(
+            "capture_output failed: {}",
+            e
+        ))),
+        Ok(Err(e)) => Err(TelegramError::TmuxError(format!(
+            "capture_output task join error: {}",
+            e
+        ))),
+        Err(_) => {
+            warn!(
+                timeout_secs = TMUX_CAPTURE_TIMEOUT.as_secs(),
+                "tmux capture_output timed out — treating as empty output"
+            );
+            Err(TelegramError::TmuxError(format!(
+                "capture_output timed out after {}s",
+                TMUX_CAPTURE_TIMEOUT.as_secs()
+            )))
+        }
+    }
+}
+
+/// Call `TmuxOrchestrator::send_line` on a blocking thread with a bounded
+/// timeout. Same rules as `capture_output_safe`: no async locks held.
+async fn send_line_safe(
+    tmux: Arc<TmuxOrchestrator>,
+    session_name: String,
+    text: String,
+) -> Result<()> {
+    let join = tokio::task::spawn_blocking(move || {
+        tmux.send_line(&session_name, None, &text)
+    });
+
+    match timeout(TMUX_SEND_TIMEOUT, join).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(e))) => Err(TelegramError::TmuxError(format!(
+            "send_line failed: {}",
+            e
+        ))),
+        Ok(Err(e)) => Err(TelegramError::TmuxError(format!(
+            "send_line task join error: {}",
+            e
+        ))),
+        Err(_) => Err(TelegramError::TmuxError(format!(
+            "send_line timed out after {}s",
+            TMUX_SEND_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
 /// Shared state for the Telegram bot, accessible across all handlers.
 pub struct TelegramState {
     /// Active user sessions (chat_id -> session).
@@ -273,7 +350,12 @@ pub struct TelegramState {
     /// For group topics: we use (chat_id, thread_id) key encoded as i64
     sessions: RwLock<HashMap<i64, UserSession>>,
     /// Tmux orchestrator for session management.
-    tmux: Option<TmuxOrchestrator>,
+    ///
+    /// Wrapped in `Arc` so it can be cheaply cloned into `spawn_blocking`
+    /// tasks when calling synchronous tmux commands. This allows us to run
+    /// `capture_output` / `send_line` on a blocking thread without holding
+    /// async locks across the call (see `capture_output_safe`).
+    tmux: Option<Arc<TmuxOrchestrator>>,
     /// Adapter registry for tool adapters.
     adapters: AdapterRegistry,
     /// State store for project persistence.
@@ -304,7 +386,7 @@ pub struct TelegramState {
 impl TelegramState {
     /// Create a new TelegramState instance.
     pub fn new(state_dir: &std::path::Path) -> Self {
-        let tmux = TmuxOrchestrator::new().ok();
+        let tmux = TmuxOrchestrator::new().ok().map(Arc::new);
         let adapters = AdapterRegistry::new();
         let store = StateStore::new(state_dir);
 
@@ -435,7 +517,15 @@ impl TelegramState {
 
     /// Get a reference to the tmux orchestrator.
     pub fn tmux(&self) -> Option<&TmuxOrchestrator> {
-        self.tmux.as_ref()
+        self.tmux.as_deref()
+    }
+
+    /// Get a cloned `Arc` to the tmux orchestrator, if available.
+    ///
+    /// Used for `spawn_blocking` call sites that need to move tmux into a
+    /// blocking thread.
+    fn tmux_arc(&self) -> Option<Arc<TmuxOrchestrator>> {
+        self.tmux.clone()
     }
 
     /// Get a reference to the adapter registry.
@@ -1161,7 +1251,7 @@ impl TelegramState {
         message: &str,
         message_id: Option<MessageId>,
     ) -> Result<()> {
-        let tmux = self.tmux.as_ref().ok_or_else(|| {
+        let tmux = self.tmux_arc().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
 
@@ -1193,37 +1283,61 @@ impl TelegramState {
         let processed_message = message.to_string();
 
         let session_key = Self::session_key(chat_id.0, Some(thread_id));
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(&session_key)
-            .ok_or(TelegramError::NotConnected)?;
 
-        // Capture initial output for comparison
-        let last_output = tmux
-            .capture_output(&session.tmux_session, None, Some(200))
-            .unwrap_or_default();
+        // Phase 1: snapshot under a SHORT read lock.
+        let (tmux_session_name, project_name, daemon_session_id) = {
+            let sessions = self.sessions.read().await;
+            let session = sessions
+                .get(&session_key)
+                .ok_or(TelegramError::NotConnected)?;
+            (
+                session.tmux_session.clone(),
+                session.project_name.clone(),
+                session.daemon_session_id.clone(),
+            )
+        };
 
-        // Send the processed message
-        tmux.send_line(&session.tmux_session, None, &processed_message)
-            .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+        // Phase 2: blocking work with no sessions lock held.
+        let last_output = capture_output_safe(
+            tmux.clone(),
+            tmux_session_name.clone(),
+            Some(200),
+        )
+        .await
+        .unwrap_or_default();
 
-        // Start response collection with message ID for reply threading
-        session.start_response_collection(&processed_message, last_output, message_id);
+        send_line_safe(
+            tmux.clone(),
+            tmux_session_name.clone(),
+            processed_message.clone(),
+        )
+        .await?;
 
-        // Log the user message for evals and debugging
+        // Phase 3: brief write lock to update state.
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_key) {
+                session.start_response_collection(
+                    &processed_message,
+                    last_output,
+                    message_id,
+                );
+            }
+        }
+
         self.session_logger.log_user_message(
             chat_id.0,
-            &session.tmux_session,
-            &session.project_name,
+            &tmux_session_name,
+            &project_name,
             &processed_message,
-            session.daemon_session_id.is_some(),
+            daemon_session_id.is_some(),
             message_id.map(|m| m.0).unwrap_or(0),
         );
 
         debug!(
             chat_id = %chat_id.0,
             thread_id = ?thread_id,
-            project = %session.project_name,
+            project = %project_name,
             message = %processed_message,
             "Message sent to topic session"
         );
@@ -1476,46 +1590,75 @@ impl TelegramState {
     /// The orchestrator processing was removed as it caused the LLM response to be sent
     /// to tmux instead of the user's actual message (output echo bug).
     pub async fn send_message(&self, chat_id: ChatId, message: &str, message_id: Option<MessageId>) -> Result<()> {
-        let tmux = self.tmux.as_ref().ok_or_else(|| {
+        let tmux = self.tmux_arc().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
 
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(&chat_id.0)
-            .ok_or(TelegramError::NotConnected)?;
+        // Phase 1: snapshot the fields we need under a SHORT read lock and
+        // drop the guard before doing any blocking tmux work. This prevents
+        // a hung `tmux capture-pane` from freezing every other async task
+        // that touches session state (see handler-hang-2026-04-10.md).
+        let (tmux_session_name, project_name, daemon_session_id) = {
+            let sessions = self.sessions.read().await;
+            let session = sessions
+                .get(&chat_id.0)
+                .ok_or(TelegramError::NotConnected)?;
+            (
+                session.tmux_session.clone(),
+                session.project_name.clone(),
+                session.daemon_session_id.clone(),
+            )
+        }; // read guard dropped here
 
-        // Capture initial output for comparison (always via tmux for polling)
-        let last_output = tmux
-            .capture_output(&session.tmux_session, None, Some(200))
-            .unwrap_or_default();
+        // Phase 2: do all blocking/external work with NO sessions lock held.
+        // capture_output_safe runs on a blocking thread with a 2s timeout.
+        let last_output = capture_output_safe(
+            tmux.clone(),
+            tmux_session_name.clone(),
+            Some(200),
+        )
+        .await
+        .unwrap_or_default();
 
-        // Send via daemon if available, otherwise fall back to tmux
+        // Send via daemon if available, otherwise fall back to tmux.
         if let (Some(ref daemon), Some(ref session_id)) =
-            (&self.daemon_client, &session.daemon_session_id)
+            (&self.daemon_client, &daemon_session_id)
         {
             daemon.session_send(session_id, message).await?;
         } else {
-            tmux.send_line(&session.tmux_session, None, message)
-                .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            send_line_safe(
+                tmux.clone(),
+                tmux_session_name.clone(),
+                message.to_string(),
+            )
+            .await?;
         }
 
-        // Start response collection with message ID for reply threading
-        session.start_response_collection(message, last_output, message_id);
+        // Phase 3: re-acquire the write lock ONLY for the brief state update.
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&chat_id.0) {
+                session.start_response_collection(message, last_output, message_id);
+            }
+            // If the session vanished between phases 1 and 3 (e.g. /disconnect
+            // raced us) we silently drop the state update — the message was
+            // already dispatched.
+        }
 
-        // Log the user message for evals and debugging
+        // Log the user message for evals and debugging. This takes no locks
+        // on `self.sessions`, so it's safe outside the guard.
         self.session_logger.log_user_message(
             chat_id.0,
-            &session.tmux_session,
-            &session.project_name,
+            &tmux_session_name,
+            &project_name,
             message,
-            session.daemon_session_id.is_some(),
+            daemon_session_id.is_some(),
             message_id.map(|m| m.0).unwrap_or(0),
         );
 
         debug!(
             chat_id = %chat_id.0,
-            project = %session.project_name,
+            project = %project_name,
             message = %message,
             "Message sent to project"
         );
@@ -1729,46 +1872,66 @@ impl TelegramState {
     /// This bypasses the orchestrator and sends the message exactly as provided,
     /// useful for sending commands that shouldn't be interpreted by the AI.
     pub async fn send_message_direct(&self, chat_id: ChatId, message: &str, message_id: Option<MessageId>) -> Result<()> {
-        let tmux = self.tmux.as_ref().ok_or_else(|| {
+        let tmux = self.tmux_arc().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
 
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(&chat_id.0)
-            .ok_or(TelegramError::NotConnected)?;
+        // Phase 1: snapshot under a SHORT read lock. See `send_message` for
+        // rationale.
+        let (tmux_session_name, project_name, daemon_session_id) = {
+            let sessions = self.sessions.read().await;
+            let session = sessions
+                .get(&chat_id.0)
+                .ok_or(TelegramError::NotConnected)?;
+            (
+                session.tmux_session.clone(),
+                session.project_name.clone(),
+                session.daemon_session_id.clone(),
+            )
+        };
 
-        // Capture initial output for comparison (always via tmux for polling)
-        let last_output = tmux
-            .capture_output(&session.tmux_session, None, Some(200))
-            .unwrap_or_default();
+        // Phase 2: blocking work with no sessions lock held.
+        let last_output = capture_output_safe(
+            tmux.clone(),
+            tmux_session_name.clone(),
+            Some(200),
+        )
+        .await
+        .unwrap_or_default();
 
-        // Send via daemon if available, otherwise fall back to tmux
         if let (Some(ref daemon), Some(ref session_id)) =
-            (&self.daemon_client, &session.daemon_session_id)
+            (&self.daemon_client, &daemon_session_id)
         {
             daemon.session_send(session_id, message).await?;
         } else {
-            tmux.send_line(&session.tmux_session, None, message)
-                .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            send_line_safe(
+                tmux.clone(),
+                tmux_session_name.clone(),
+                message.to_string(),
+            )
+            .await?;
         }
 
-        // Start response collection with message ID for reply threading
-        session.start_response_collection(message, last_output, message_id);
+        // Phase 3: brief write lock to update state.
+        {
+            let mut sessions = self.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&chat_id.0) {
+                session.start_response_collection(message, last_output, message_id);
+            }
+        }
 
-        // Log the user message for evals and debugging
         self.session_logger.log_user_message(
             chat_id.0,
-            &session.tmux_session,
-            &session.project_name,
+            &tmux_session_name,
+            &project_name,
             message,
-            session.daemon_session_id.is_some(),
+            daemon_session_id.is_some(),
             message_id.map(|m| m.0).unwrap_or(0),
         );
 
         debug!(
             chat_id = %chat_id.0,
-            project = %session.project_name,
+            project = %project_name,
             message = %message,
             "Message sent directly to project (bypassing LLM)"
         );
@@ -1876,38 +2039,49 @@ impl TelegramState {
         }
 
         // Terminal adapter path: requires tmux.
-        let tmux = self.tmux.as_ref().ok_or_else(|| {
+        let tmux = self.tmux_arc().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
 
-        let tmux_session = {
+        // Phase 1: snapshot needed fields under a SHORT read lock.
+        let (tmux_session, daemon_session_id) = {
             let sessions = self.sessions.read().await;
-            sessions.get(&chat_id.0)
-                .map(|s| s.tmux_session.clone())
-                .ok_or(TelegramError::NotConnected)?
+            let session = sessions.get(&chat_id.0).ok_or(TelegramError::NotConnected)?;
+            (
+                session.tmux_session.clone(),
+                session.daemon_session_id.clone(),
+            )
         };
 
-        // Capture current output for change detection
-        let last_output = tmux
-            .capture_output(&tmux_session, None, Some(200))
-            .unwrap_or_default();
+        // Phase 2: blocking work with no sessions lock held.
+        let last_output = capture_output_safe(
+            tmux.clone(),
+            tmux_session.clone(),
+            Some(200),
+        )
+        .await
+        .unwrap_or_default();
 
-        // Send the message
+        if let (Some(ref daemon), Some(ref sid)) = (&self.daemon_client, &daemon_session_id) {
+            daemon.session_send(sid, message).await?;
+        } else {
+            send_line_safe(
+                tmux.clone(),
+                tmux_session.clone(),
+                message.to_string(),
+            )
+            .await?;
+        }
+
+        // Phase 3: brief write lock to update state.
         {
             let mut sessions = self.sessions.write().await;
-            let session = sessions.get_mut(&chat_id.0)
-                .ok_or(TelegramError::NotConnected)?;
-
-            if let (Some(ref daemon), Some(ref sid)) = (&self.daemon_client, &session.daemon_session_id) {
-                daemon.session_send(sid, message).await?;
-            } else {
-                tmux.send_line(&session.tmux_session, None, message)
-                    .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            if let Some(session) = sessions.get_mut(&chat_id.0) {
+                session.start_response_collection(message, last_output, message_id);
+                // Record the session name so the poll loop can store the
+                // reply ID after sending.
+                session.at_session_name = Some(base_name.to_string());
             }
-
-            session.start_response_collection(message, last_output, message_id);
-            // Record the session name so the poll loop can store the reply ID after sending.
-            session.at_session_name = Some(base_name.to_string());
         }
 
         debug!(
@@ -1931,33 +2105,60 @@ impl TelegramState {
         selection: usize,
         current_selected: usize,
     ) -> Result<()> {
-        let tmux = self.tmux.as_ref().ok_or_else(|| {
+        let tmux = self.tmux_arc().ok_or_else(|| {
             TelegramError::TmuxError("tmux not available".to_string())
         })?;
 
-        let sessions = self.sessions.read().await;
-        let session = sessions
-            .get(&chat_id.0)
-            .ok_or(TelegramError::NotConnected)?;
+        // Snapshot the tmux session name under a SHORT read lock and drop
+        // the guard before issuing any synchronous tmux commands.
+        let tmux_session_name = {
+            let sessions = self.sessions.read().await;
+            let session = sessions
+                .get(&chat_id.0)
+                .ok_or(TelegramError::NotConnected)?;
+            session.tmux_session.clone()
+        };
 
         // Convert 1-based selection to 0-based target
         let target = selection.saturating_sub(1);
 
-        if target > current_selected {
-            for _ in 0..(target - current_selected) {
-                tmux.send_keys(&session.tmux_session, None, "Down")
-                    .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+        // Run the (potentially many) tmux send-keys calls on a blocking
+        // thread with a bounded timeout so a hung tmux can't freeze the
+        // async runtime.
+        let tmux_inner = tmux.clone();
+        let session_for_blocking = tmux_session_name.clone();
+        let join = tokio::task::spawn_blocking(move || -> Result<()> {
+            if target > current_selected {
+                for _ in 0..(target - current_selected) {
+                    tmux_inner
+                        .send_keys(&session_for_blocking, None, "Down")
+                        .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+                }
+            } else if target < current_selected {
+                for _ in 0..(current_selected - target) {
+                    tmux_inner
+                        .send_keys(&session_for_blocking, None, "Up")
+                        .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+                }
             }
-        } else if target < current_selected {
-            for _ in 0..(current_selected - target) {
-                tmux.send_keys(&session.tmux_session, None, "Up")
-                    .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
-            }
-        }
-        tmux.send_keys(&session.tmux_session, None, "Enter")
-            .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            tmux_inner
+                .send_keys(&session_for_blocking, None, "Enter")
+                .map_err(|e| TelegramError::TmuxError(e.to_string()))?;
+            Ok(())
+        });
 
-        Ok(())
+        match timeout(TMUX_SEND_TIMEOUT, join).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(e)) => Err(TelegramError::TmuxError(format!(
+                "send_selection task join error: {}",
+                e
+            ))),
+            Err(_) => Err(TelegramError::TmuxError(format!(
+                "send_selection timed out after {}s",
+                TMUX_SEND_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     /// Poll for new output from a user's project.
