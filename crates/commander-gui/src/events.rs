@@ -7,49 +7,110 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use tokio::time::{sleep, Duration};
 
+/// Maximum lines to capture from tmux scrollback per poll cycle.
+const CAPTURE_LINES: u32 = 500;
+
+/// Tracks polling state for a single session.
+struct SessionState {
+    /// Number of lines last observed (used to detect new content).
+    line_count: usize,
+    /// Hash of the full captured output (used to detect in-place edits when
+    /// the line count stays the same, e.g. Claude overwriting a status line).
+    content_hash: u64,
+}
+
 #[derive(Clone, Serialize)]
 pub struct SessionOutput {
     pub session: String,
-    pub output: String,
+    /// Incremental new lines appended since the last event.
+    /// Empty when a full refresh is needed instead.
+    pub content: String,
+    /// Full captured output snapshot.  Always populated so the frontend can
+    /// rebuild state after a screen clear or session restart.
+    pub full_content: String,
+}
+
+fn hash_str(s: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
 }
 
 pub async fn start_session_polling(app: AppHandle, state: GuiState) {
-    let last_hashes: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let session_states: Arc<Mutex<HashMap<String, SessionState>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let mut cleanup_counter: u32 = 0;
 
     loop {
         if let Some(session_name) = state.current_session.read().unwrap().clone() {
             if let Some(tmux) = &state.tmux {
-                if let Ok(output) = tmux.capture_output(&session_name, None, Some(50)) {
+                if let Ok(output) = tmux.capture_output(&session_name, None, Some(CAPTURE_LINES)) {
                     if !output.is_empty() {
-                        // Calculate hash of output
-                        let mut hasher = DefaultHasher::new();
-                        output.hash(&mut hasher);
-                        let current_hash = hasher.finish();
+                        let lines: Vec<&str> = output.lines().collect();
+                        let current_line_count = lines.len();
+                        let current_hash = hash_str(&output);
 
-                        // Check if output changed
-                        let mut hashes = last_hashes.lock().unwrap();
-                        let last_hash = hashes.get(&session_name).copied();
+                        let mut states = session_states.lock().unwrap();
+                        let prev = states.get(&session_name);
 
-                        if last_hash != Some(current_hash) {
-                            // Output changed - emit event
-                            hashes.insert(session_name.clone(), current_hash);
-                            drop(hashes); // Release lock before async emit
-
-                            let _ = app.emit(
-                                "session-output",
-                                SessionOutput {
+                        let event = match prev {
+                            None => {
+                                // First observation — emit full snapshot.
+                                Some(SessionOutput {
                                     session: session_name.clone(),
-                                    output,
-                                },
-                            );
+                                    content: output.clone(),
+                                    full_content: output.clone(),
+                                })
+                            }
+                            Some(s) if current_line_count > s.line_count => {
+                                // New lines appended — emit only the new tail.
+                                let new_lines = lines[s.line_count..].join("\n");
+                                Some(SessionOutput {
+                                    session: session_name.clone(),
+                                    content: new_lines,
+                                    full_content: output.clone(),
+                                })
+                            }
+                            Some(s) if current_line_count < s.line_count => {
+                                // Line count dropped: screen cleared or session restarted.
+                                // Emit full snapshot so the frontend can reset.
+                                Some(SessionOutput {
+                                    session: session_name.clone(),
+                                    content: output.clone(),
+                                    full_content: output.clone(),
+                                })
+                            }
+                            Some(s) if current_hash != s.content_hash => {
+                                // Same line count but content differs (e.g. Claude
+                                // overwrote a progress line).  Emit full refresh.
+                                Some(SessionOutput {
+                                    session: session_name.clone(),
+                                    content: String::new(),
+                                    full_content: output.clone(),
+                                })
+                            }
+                            _ => None, // No change detected.
+                        };
+
+                        // Update tracked state before dropping the lock.
+                        states.insert(
+                            session_name.clone(),
+                            SessionState {
+                                line_count: current_line_count,
+                                content_hash: current_hash,
+                            },
+                        );
+                        drop(states);
+
+                        if let Some(payload) = event {
+                            let _ = app.emit("session-output", payload);
                         }
                     }
                 }
             }
         }
 
-        // Periodically clean up stale hash entries for destroyed sessions (~every 30s)
+        // Periodically clean up stale state entries for destroyed sessions (~every 30s).
         cleanup_counter += 1;
         if cleanup_counter >= 60 {
             cleanup_counter = 0;
@@ -57,8 +118,8 @@ pub async fn start_session_polling(app: AppHandle, state: GuiState) {
                 if let Ok(active_sessions) = tmux.list_sessions() {
                     let active_names: std::collections::HashSet<String> =
                         active_sessions.into_iter().map(|s| s.name).collect();
-                    let mut hashes = last_hashes.lock().unwrap();
-                    hashes.retain(|name, _| active_names.contains(name));
+                    let mut states = session_states.lock().unwrap();
+                    states.retain(|name, _| active_names.contains(name));
                 }
             }
         }

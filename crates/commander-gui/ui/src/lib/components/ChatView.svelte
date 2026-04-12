@@ -99,11 +99,24 @@
 
   onMount(() => {
     const unlisten = listen('session-output', (event: any) => {
-      const { output } = event.payload;
-      if ($currentSession) {
-        addMessageToSession($currentSession.name, {
+      const { content, full_content } = event.payload;
+      if (!$currentSession) return;
+
+      const sessionName = $currentSession.name;
+
+      if (content && content.length > 0) {
+        // Incremental update — append only the new lines.
+        addMessageToSession(sessionName, {
           direction: 'received',
-          content: output,
+          content,
+          timestamp: new Date(),
+        });
+      } else if (full_content) {
+        // Full refresh (in-place edit detected or session reset).
+        // Replace the last received message if it exists, otherwise append.
+        addMessageToSession(sessionName, {
+          direction: 'received',
+          content: full_content,
           timestamp: new Date(),
         });
       }
