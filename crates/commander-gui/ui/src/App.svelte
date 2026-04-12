@@ -114,8 +114,9 @@
 </main>
 
 <style>
-  /* ── Theme CSS variables ── */
-  :root, [data-theme="dark"] {
+  /* ── Theme CSS variables (global so child components inherit them) ── */
+  :global(:root),
+  :global([data-theme="dark"]) {
     --bg-primary: #1e1e2e;
     --bg-secondary: #181825;
     --bg-surface: #313244;
@@ -125,9 +126,17 @@
     --accent: #6366f1;
     --header-bg: #181825;
     --header-border: #313244;
+    /* Semantic accent colors for terminal output */
+    --color-sent: #89dceb;
+    --color-system: #a6e3a1;
+    --color-connecting: #89b4fa;
+    --color-waiting: #f9e2af;
+    --color-scroll-btn: #89b4fa;
+    --color-scroll-btn-hover: #b4befe;
+    --color-scroll-btn-text: #1e1e2e;
   }
 
-  [data-theme="light"] {
+  :global([data-theme="light"]) {
     --bg-primary: #ffffff;
     --bg-secondary: #f8fafc;
     --bg-surface: #f1f5f9;
@@ -137,6 +146,21 @@
     --accent: #6366f1;
     --header-bg: #ffffff;
     --header-border: #e2e8f0;
+    /* Semantic accent colors for terminal output */
+    --color-sent: #0369a1;
+    --color-system: #15803d;
+    --color-connecting: #2563eb;
+    --color-waiting: #b45309;
+    --color-scroll-btn: #6366f1;
+    --color-scroll-btn-hover: #4f46e5;
+    --color-scroll-btn-text: #ffffff;
+  }
+
+  :global(body) {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    margin: 0;
+    padding: 0;
   }
 
   .app {
@@ -211,7 +235,7 @@
 
   .status-dot.active {
     color: #059669;
-    background: #ecfdf5;
+    background: rgba(5, 150, 105, 0.12);
   }
 
   .status-dot.active::before {

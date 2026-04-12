@@ -59,6 +59,19 @@ pub async fn disconnect_session(state: State<'_, GuiState>) -> Result<(), String
     Ok(())
 }
 
+/// Capture the current tmux output for a session immediately (synchronous snapshot).
+/// Called by the frontend right after connecting so the initial terminal state is shown
+/// without waiting for the polling loop.
+#[tauri::command]
+pub async fn capture_session_output(
+    name: String,
+    state: State<'_, GuiState>,
+) -> Result<String, String> {
+    let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
+    tmux.capture_output(&name, None, Some(500))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn stop_session(name: String, state: State<'_, GuiState>) -> Result<(), String> {
     let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;

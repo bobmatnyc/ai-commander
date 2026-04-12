@@ -234,9 +234,9 @@
   }
 
   .input-field.slash-command {
-    border-color: #cba6f7;
-    background-color: rgba(203, 166, 247, 0.06);
-    color: #cba6f7;
+    border-color: var(--accent);
+    background-color: rgba(99, 102, 241, 0.06);
+    color: var(--accent);
   }
 
   .input-field.sending {

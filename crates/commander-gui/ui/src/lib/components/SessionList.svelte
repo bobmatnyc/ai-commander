@@ -40,19 +40,39 @@
     if (errorTimeout) clearTimeout(errorTimeout);
 
     try {
+      // Snapshot prior message count before we add anything.
+      const priorMessages = $sessionMessages.get(name);
+      const hasCachedHistory = priorMessages && priorMessages.length > 0;
+
       await invoke('connect_session', { name });
       const session = $sessions.find(s => s.name === name);
       if (session) {
         currentSession.set({ ...session, is_connected: true });
 
-        // Add initial connection message only if this session has no messages yet
-        const existingMessages = $sessionMessages.get(name);
-        if (!existingMessages || existingMessages.length === 0) {
-          addMessageToSession(name, {
-            direction: 'system',
-            content: `Connected to session: ${getDisplayName(name)}`,
-            timestamp: new Date(),
-          });
+        // Always show a "Connected" system message so the user knows
+        // which session is active, regardless of prior message history.
+        addMessageToSession(name, {
+          direction: 'system',
+          content: `Connected to session: ${getDisplayName(name)}`,
+          timestamp: new Date(),
+        });
+
+        // For sessions with no prior message history, immediately capture
+        // the current terminal output so the user sees the tmux state right
+        // away instead of waiting for the poll cycle (~500 ms).
+        if (!hasCachedHistory) {
+          try {
+            const output = await invoke<string>('capture_session_output', { name });
+            if (output && output.trim().length > 0) {
+              addMessageToSession(name, {
+                direction: 'received',
+                content: output,
+                timestamp: new Date(),
+              });
+            }
+          } catch (_captureErr) {
+            // Non-fatal: polling will deliver output within 500 ms.
+          }
         }
       }
     } catch (err) {
@@ -154,8 +174,8 @@
   }
 
   .error-banner {
-    background: #fee2e2;
-    color: #991b1b;
+    background: rgba(220, 38, 38, 0.1);
+    color: #dc2626;
     padding: 0.75rem;
     margin: 0.5rem;
     border-radius: 4px;

@@ -88,6 +88,7 @@ fn main() {
             commands::rebuild_from_source,
             commands::generate_web_pairing_code,
             commands::open_in_iterm,
+            commands::capture_session_output,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

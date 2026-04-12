@@ -310,12 +310,12 @@
   }
 
   .status-badge.connecting {
-    color: #89b4fa;
+    color: var(--color-connecting);
     background: rgba(137, 180, 250, 0.12);
   }
 
   .status-badge.waiting {
-    color: #f9e2af;
+    color: var(--color-waiting);
     background: rgba(249, 226, 175, 0.12);
   }
 
@@ -380,12 +380,12 @@
   }
 
   .sent-text {
-    color: #89dceb;
+    color: var(--color-sent);
     font-weight: 500;
   }
 
   .system-text {
-    color: #a6e3a1;
+    color: var(--color-system);
     font-style: italic;
   }
 
@@ -414,8 +414,8 @@
     height: 2.25rem;
     border: none;
     border-radius: 50%;
-    background-color: #89b4fa;
-    color: #1e1e2e;
+    background-color: var(--color-scroll-btn);
+    color: var(--color-scroll-btn-text);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -425,7 +425,7 @@
   }
 
   .scroll-button:hover {
-    background-color: #b4befe;
+    background-color: var(--color-scroll-btn-hover);
     box-shadow: 0 6px 8px rgba(0, 0, 0, 0.4);
   }
 </style>
