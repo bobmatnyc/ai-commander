@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI Commander",
+  "productName": "AIC - AI Commander",
   "version": "0.1.0",
   "identifier": "com.ai-commander.gui",
   "build": {
@@ -15,7 +15,7 @@
     },
     "windows": [
       {
-        "title": "AI Commander",
+        "title": "AIC",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
