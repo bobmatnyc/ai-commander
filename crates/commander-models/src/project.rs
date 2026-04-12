@@ -34,6 +34,24 @@ impl Default for AdapterType {
     }
 }
 
+impl std::str::FromStr for AdapterType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "claude-code" | "cc" => Ok(Self::ClaudeCode),
+            "claude-mpm" | "mpm" => Ok(Self::ClaudeMpm),
+            "auggie" | "augment" => Ok(Self::Auggie),
+            "codex" => Ok(Self::Codex),
+            "shell" | "sh" => Ok(Self::Shell),
+            _ => Err(format!(
+                "Unknown adapter type: '{}'. Valid: claude-code, claude-mpm, auggie, codex, shell",
+                s
+            )),
+        }
+    }
+}
+
 impl fmt::Display for AdapterType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -894,6 +912,30 @@ mod tests {
         let project: Project = serde_json::from_str(json).unwrap();
         assert_eq!(project.adapter_type, None);
         assert_eq!(project.effective_adapter_type(), AdapterType::ClaudeCode);
+    }
+
+    #[test]
+    fn test_adapter_type_from_str_valid() {
+        use std::str::FromStr;
+
+        assert_eq!(AdapterType::from_str("claude-code").unwrap(), AdapterType::ClaudeCode);
+        assert_eq!(AdapterType::from_str("cc").unwrap(), AdapterType::ClaudeCode);
+        assert_eq!(AdapterType::from_str("claude-mpm").unwrap(), AdapterType::ClaudeMpm);
+        assert_eq!(AdapterType::from_str("mpm").unwrap(), AdapterType::ClaudeMpm);
+        assert_eq!(AdapterType::from_str("auggie").unwrap(), AdapterType::Auggie);
+        assert_eq!(AdapterType::from_str("augment").unwrap(), AdapterType::Auggie);
+        assert_eq!(AdapterType::from_str("codex").unwrap(), AdapterType::Codex);
+        assert_eq!(AdapterType::from_str("shell").unwrap(), AdapterType::Shell);
+        assert_eq!(AdapterType::from_str("sh").unwrap(), AdapterType::Shell);
+    }
+
+    #[test]
+    fn test_adapter_type_from_str_invalid() {
+        use std::str::FromStr;
+
+        let err = AdapterType::from_str("unknown").unwrap_err();
+        assert!(err.contains("Unknown adapter type"));
+        assert!(err.contains("unknown"));
     }
 
     #[test]

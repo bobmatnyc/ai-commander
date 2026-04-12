@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use commander_adapters::AdapterRegistry;
+use commander_models::project::AdapterType;
 use commander_models::Project;
 #[cfg(feature = "agents")]
 use commander_orchestrator::AgentOrchestrator;
@@ -155,6 +156,44 @@ static COMMAND_HELP: &[CommandHelp] = &[
         ],
     },
     CommandHelp {
+        name: "register",
+        aliases: &[],
+        brief: "Register a project instance",
+        description: "Registers a project directory as a named instance without starting it.\n\
+                      Use --adapter to specify the AI adapter (defaults to claude-code).\n\
+                      Use --name to give the project a nickname (defaults to directory basename).\n\
+                      Valid adapters: claude-code (cc), claude-mpm (mpm), auggie, codex, shell (sh)",
+        usage: "/register <path> [--adapter <type>] [--name <nickname>]",
+        examples: &[
+            ("/register ~/code/myapp", "Register with defaults (claude-code adapter, basename as name)"),
+            ("/register ~/code/api --adapter claude-mpm --name my-api", "Register with explicit adapter and name"),
+            ("/register /tmp/proj --adapter shell --name scratch", "Register with shell adapter"),
+        ],
+    },
+    CommandHelp {
+        name: "unregister",
+        aliases: &[],
+        brief: "Remove a registered project instance",
+        description: "Removes a project registration from the state store.\n\
+                      Looks up the project by name, alias, or path.\n\
+                      Does not stop any running session.",
+        usage: "/unregister <name-or-alias>",
+        examples: &[
+            ("/unregister myapp", "Unregister project named 'myapp'"),
+            ("/unregister prod", "Unregister project with alias 'prod'"),
+        ],
+    },
+    CommandHelp {
+        name: "instances",
+        aliases: &["list-instances"],
+        brief: "List all registered project instances",
+        description: "Lists all registered projects with name, path, adapter type, aliases, and tmux session status.",
+        usage: "/instances",
+        examples: &[
+            ("/instances", "List all registered instances"),
+        ],
+    },
+    CommandHelp {
         name: "telegram",
         aliases: &[],
         brief: "Generate pairing code for Telegram bot",
@@ -181,8 +220,9 @@ struct CommandCompleter {
 impl CommandCompleter {
     const COMMANDS: &'static [&'static str] = &[
         "/alias", "/clear", "/connect", "/disconnect", "/help", "/inspect",
-        "/list", "/quit", "/send", "/sessions", "/status", "/stop",
-        "/telegram", "/unalias",
+        "/instances", "/list", "/list-instances", "/quit", "/register",
+        "/send", "/sessions", "/status", "/stop", "/telegram", "/unalias",
+        "/unregister",
     ];
 
     fn new(state_dir: PathBuf) -> Self {
@@ -518,6 +558,19 @@ pub enum ReplCommand {
     Stop(Option<String>),
     /// Show help (optionally for a specific command)
     Help(Option<String>),
+    /// Register a new project instance
+    Register {
+        /// Path to the project directory.
+        path: std::path::PathBuf,
+        /// Adapter type for the project.
+        adapter: AdapterType,
+        /// Optional name/nickname for the project.
+        name: Option<String>,
+    },
+    /// Unregister a project instance by name or alias
+    Unregister(String),
+    /// List all registered project instances
+    Instances,
     /// Generate Telegram pairing code
     Telegram,
     /// Quit the REPL
@@ -562,6 +615,11 @@ impl ReplCommand {
                     .unwrap_or(ReplCommand::Unknown("send requires a message".to_string())),
                 "sessions" => ReplCommand::Sessions,
                 "stop" => ReplCommand::Stop(arg),
+                "register" => Self::parse_register(arg),
+                "unregister" => arg
+                    .map(ReplCommand::Unregister)
+                    .unwrap_or(ReplCommand::Unknown("unregister requires a name or alias".to_string())),
+                "instances" | "list-instances" => ReplCommand::Instances,
                 "help" | "h" | "?" => ReplCommand::Help(arg),
                 "telegram" => ReplCommand::Telegram,
                 "quit" | "q" | "exit" => ReplCommand::Quit,
@@ -694,6 +752,57 @@ impl ReplCommand {
                     .to_string(),
             )
         }
+    }
+
+    /// Parse register command arguments.
+    /// Supports:
+    /// - /register <path> [--adapter <type>] [--name <nickname>]
+    fn parse_register(arg: Option<String>) -> Self {
+        let Some(arg) = arg else {
+            return ReplCommand::Unknown("register requires a path argument".to_string());
+        };
+
+        let parts: Vec<&str> = arg.split_whitespace().collect();
+
+        if parts.is_empty() {
+            return ReplCommand::Unknown("register requires a path argument".to_string());
+        }
+
+        let path = std::path::PathBuf::from(shellexpand::tilde(parts[0]).to_string());
+        let mut adapter = AdapterType::ClaudeCode;
+        let mut name: Option<String> = None;
+
+        let mut i = 1;
+        while i < parts.len() {
+            match parts[i] {
+                "--adapter" | "-a" => {
+                    if i + 1 < parts.len() {
+                        match parts[i + 1].parse::<AdapterType>() {
+                            Ok(t) => {
+                                adapter = t;
+                                i += 2;
+                            }
+                            Err(e) => return ReplCommand::Unknown(e),
+                        }
+                    } else {
+                        return ReplCommand::Unknown("--adapter requires a value".to_string());
+                    }
+                }
+                "--name" | "-n" => {
+                    if i + 1 < parts.len() {
+                        name = Some(parts[i + 1].to_string());
+                        i += 2;
+                    } else {
+                        return ReplCommand::Unknown("--name requires a value".to_string());
+                    }
+                }
+                unknown => {
+                    return ReplCommand::Unknown(format!("unknown flag: {}", unknown));
+                }
+            }
+        }
+
+        ReplCommand::Register { path, adapter, name }
     }
 
     /// Parse @alias routing syntax.
@@ -1207,6 +1316,21 @@ impl Repl {
                 Ok(false)
             }
 
+            ReplCommand::Register { path, adapter, name } => {
+                self.handle_register(path, adapter, name)?;
+                Ok(false)
+            }
+
+            ReplCommand::Unregister(name_or_alias) => {
+                self.handle_unregister(&name_or_alias)?;
+                Ok(false)
+            }
+
+            ReplCommand::Instances => {
+                self.handle_instances()?;
+                Ok(false)
+            }
+
             ReplCommand::Telegram => {
                 self.generate_telegram_pairing()?;
                 Ok(false)
@@ -1607,6 +1731,172 @@ impl Repl {
                 println!("Failed to create pairing code: {}", e);
             }
         }
+
+        Ok(())
+    }
+
+    /// Handle /register command - registers a project without starting it.
+    fn handle_register(
+        &mut self,
+        path: std::path::PathBuf,
+        adapter: AdapterType,
+        name: Option<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Resolve path (expand ~ if needed)
+        let path = if path.starts_with("~") {
+            dirs::home_dir()
+                .map(|h| h.join(path.strip_prefix("~").unwrap_or(&path)))
+                .unwrap_or(path)
+        } else {
+            path
+        };
+
+        let path_str = path.to_string_lossy().to_string();
+
+        // Validate path exists
+        if let Err(e) = crate::validate_project_path(&path_str) {
+            println!("{}", e);
+            return Ok(());
+        }
+
+        // Determine name: use provided name, or fall back to directory basename
+        let project_name = name.unwrap_or_else(|| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unnamed")
+                .to_string()
+        });
+
+        // Check if a project with this name already exists
+        let projects = self.store.load_all_projects()?;
+        if projects.values().any(|p| p.name == project_name) {
+            println!(
+                "A project named '{}' is already registered. Use /unregister first or choose a different name.",
+                project_name
+            );
+            return Ok(());
+        }
+
+        // Create and save the project
+        let mut project = Project::new(&path_str, &project_name);
+        project.adapter_type = Some(adapter);
+
+        self.store.save_project(&project)?;
+
+        println!(
+            "Registered '{}' at {} (adapter: {})",
+            project_name, path_str, adapter
+        );
+
+        Ok(())
+    }
+
+    /// Handle /unregister command - removes a project registration.
+    fn handle_unregister(&mut self, name_or_alias: &str) -> Result<(), Box<dyn std::error::Error>> {
+        match self.store.find_project_by_name_or_alias(name_or_alias)? {
+            Some(project) => {
+                let id = project.id.clone();
+                let project_name = project.name.clone();
+                self.store.delete_project(&id)?;
+
+                // Disconnect if this was the connected project
+                if self.connected_project.as_deref() == Some(&project_name) {
+                    self.connected_project = None;
+                    println!("Disconnected from '{}'.", project_name);
+                }
+
+                println!("Unregistered '{}'.", project_name);
+            }
+            None => {
+                println!("No project found matching '{}'. Use /instances to list registered projects.", name_or_alias);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle /instances command - lists all registered projects.
+    fn handle_instances(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let projects = self.store.load_all_projects()?;
+
+        if projects.is_empty() {
+            println!("No registered instances. Use /register <path> to add one.");
+            return Ok(());
+        }
+
+        // Collect and sort projects by name for stable output
+        let mut sorted: Vec<&commander_models::Project> = projects.values().collect();
+        sorted.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Column widths
+        let name_width = sorted.iter().map(|p| p.name.len()).max().unwrap_or(4).max(4);
+        let adapter_width = 11; // "claude-code" is the longest
+
+        println!(
+            "{:<name_w$}  {:<adapter_w$}  {:<8}  {}",
+            "NAME",
+            "ADAPTER",
+            "SESSION",
+            "PATH",
+            name_w = name_width,
+            adapter_w = adapter_width
+        );
+        println!(
+            "{:-<name_w$}  {:-<adapter_w$}  {:-<8}  {:-<40}",
+            "",
+            "",
+            "",
+            "",
+            name_w = name_width,
+            adapter_w = adapter_width
+        );
+
+        for project in &sorted {
+            let adapter_label = project.effective_adapter_type().to_string();
+
+            // Check if a tmux session exists for this project
+            let session_name = project.session_name();
+            let session_status = if let Some(tmux) = &self.tmux {
+                if tmux.session_exists(&session_name) {
+                    "running"
+                } else {
+                    "stopped"
+                }
+            } else {
+                "unknown"
+            };
+
+            // Connected marker
+            let connected_marker = if self.connected_project.as_deref() == Some(&project.name) {
+                "*"
+            } else {
+                " "
+            };
+
+            println!(
+                "{}{:<name_w$}  {:<adapter_w$}  {:<8}  {}",
+                connected_marker,
+                project.name,
+                adapter_label,
+                session_status,
+                project.path,
+                name_w = name_width,
+                adapter_w = adapter_width
+            );
+
+            // Show aliases on the next line if any
+            if !project.aliases.is_empty() {
+                println!(
+                    " {:<name_w$}  aliases: {}",
+                    "",
+                    project.aliases.join(", "),
+                    name_w = name_width
+                );
+            }
+        }
+
+        println!();
+        println!("* = connected  Use /connect <name> to start a session");
 
         Ok(())
     }
@@ -2048,6 +2338,9 @@ fn print_help(topic: Option<&str>) {
             println!("    /status [project]                        Show project status");
             println!("    /sessions                                List tmux sessions");
             println!("    /stop [session]                          Stop session (commits changes, ends tmux)");
+            println!("    /register <path> [--adapter <t>] [--name <n>]  Register a project instance");
+            println!("    /unregister <name-or-alias>              Remove a registered instance");
+            println!("    /instances                               List all registered instances");
             println!("    list, list projects, show projects       (conversational)");
             println!("    status, show status, status of <name>    (conversational)");
             println!();
@@ -2066,7 +2359,10 @@ fn print_help(topic: Option<&str>) {
             println!();
             println!("ADAPTERS:");
             println!("    cc, claude-code                          Claude Code CLI");
-            println!("    mpm                                      Claude MPM");
+            println!("    mpm, claude-mpm                          Claude MPM");
+            println!("    auggie, augment                          Auggie");
+            println!("    codex                                    Codex");
+            println!("    shell, sh                                Shell");
             println!();
             println!("CLI OPTIONS:");
             println!("    -v, --verbose                            Increase verbosity (-v, -vv, -vvv)");
@@ -2434,6 +2730,117 @@ mod tests {
         assert!(super::is_prompt_line("%"));
         assert!(!super::is_prompt_line("This is actual output from the AI"));
         assert!(!super::is_prompt_line("The answer is 42"));
+    }
+
+    // Tests for register command parsing
+
+    #[test]
+    fn test_parse_register_defaults() {
+        let cmd = ReplCommand::parse("/register /tmp/myapp");
+        match cmd {
+            ReplCommand::Register { path, adapter, name } => {
+                assert_eq!(path, std::path::PathBuf::from("/tmp/myapp"));
+                assert_eq!(adapter, AdapterType::ClaudeCode);
+                assert_eq!(name, None);
+            }
+            _ => panic!("Expected Register, got {:?}", cmd),
+        }
+    }
+
+    #[test]
+    fn test_parse_register_with_adapter() {
+        let cmd = ReplCommand::parse("/register /tmp/api --adapter claude-mpm");
+        match cmd {
+            ReplCommand::Register { adapter, .. } => {
+                assert_eq!(adapter, AdapterType::ClaudeMpm);
+            }
+            _ => panic!("Expected Register, got {:?}", cmd),
+        }
+    }
+
+    #[test]
+    fn test_parse_register_with_adapter_shorthand() {
+        let cmd = ReplCommand::parse("/register /tmp/api --adapter cc");
+        match cmd {
+            ReplCommand::Register { adapter, .. } => {
+                assert_eq!(adapter, AdapterType::ClaudeCode);
+            }
+            _ => panic!("Expected Register, got {:?}", cmd),
+        }
+    }
+
+    #[test]
+    fn test_parse_register_with_name() {
+        let cmd = ReplCommand::parse("/register /tmp/api --name my-api");
+        match cmd {
+            ReplCommand::Register { name, .. } => {
+                assert_eq!(name, Some("my-api".to_string()));
+            }
+            _ => panic!("Expected Register, got {:?}", cmd),
+        }
+    }
+
+    #[test]
+    fn test_parse_register_all_options() {
+        let cmd = ReplCommand::parse("/register /tmp/proj --adapter shell --name scratch");
+        match cmd {
+            ReplCommand::Register { path, adapter, name } => {
+                assert_eq!(path, std::path::PathBuf::from("/tmp/proj"));
+                assert_eq!(adapter, AdapterType::Shell);
+                assert_eq!(name, Some("scratch".to_string()));
+            }
+            _ => panic!("Expected Register, got {:?}", cmd),
+        }
+    }
+
+    #[test]
+    fn test_parse_register_short_flags() {
+        let cmd = ReplCommand::parse("/register /tmp/proj -a mpm -n api");
+        match cmd {
+            ReplCommand::Register { adapter, name, .. } => {
+                assert_eq!(adapter, AdapterType::ClaudeMpm);
+                assert_eq!(name, Some("api".to_string()));
+            }
+            _ => panic!("Expected Register, got {:?}", cmd),
+        }
+    }
+
+    #[test]
+    fn test_parse_register_missing_path() {
+        assert!(matches!(
+            ReplCommand::parse("/register"),
+            ReplCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_register_invalid_adapter() {
+        assert!(matches!(
+            ReplCommand::parse("/register /tmp/proj --adapter nonexistent"),
+            ReplCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_unregister() {
+        assert_eq!(
+            ReplCommand::parse("/unregister myapp"),
+            ReplCommand::Unregister("myapp".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_unregister_missing_arg() {
+        assert!(matches!(
+            ReplCommand::parse("/unregister"),
+            ReplCommand::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_instances() {
+        assert_eq!(ReplCommand::parse("/instances"), ReplCommand::Instances);
+        assert_eq!(ReplCommand::parse("/list-instances"), ReplCommand::Instances);
     }
 
     // Tests for CommandCompleter
