@@ -492,6 +492,51 @@ pub async fn create_session(
 }
 
 #[tauri::command]
+pub async fn rename_session(
+    old_name: String,
+    new_name: String,
+    state: State<'_, GuiState>,
+) -> Result<(), String> {
+    let _tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
+
+    if new_name.trim().is_empty() {
+        return Err("Session name cannot be empty".to_string());
+    }
+
+    std::process::Command::new("tmux")
+        .args(["rename-session", "-t", &old_name, &new_name])
+        .output()
+        .map_err(|e| format!("Failed to rename session: {}", e))?;
+
+    // Update current session tracking if the renamed session was active
+    let mut current = state.current_session.write().unwrap();
+    if current.as_ref().map(|s| s == &old_name).unwrap_or(false) {
+        *current = Some(new_name);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_in_terminal_app(session_name: String) -> Result<(), String> {
+    let script = format!(
+        r#"tell application "Terminal"
+            activate
+            do script "tmux attach -t {}"
+        end tell"#,
+        session_name
+    );
+
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn()
+        .map_err(|e| format!("Failed to open Terminal.app: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn open_in_iterm(
     session_name: String,
     _state: State<'_, GuiState>,

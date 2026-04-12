@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { sessions, currentSession, sessionMessages, addMessageToSession } from '../stores/app';
-  import { Activity, Plus, Terminal } from 'lucide-svelte';
+  import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
 
@@ -10,6 +10,14 @@
   let showCreateModal = false;
   let lastError: string | null = null;
   let errorTimeout: number | null = null;
+
+  // Rename state
+  let renamingSession: string | null = null;
+  let renameValue = '';
+  let renameInput: HTMLInputElement | null = null;
+
+  // Dropdown state: tracks which session's gear menu is open
+  let openDropdown: string | null = null;
 
   function getDisplayName(sessionName: string): string {
     return sessionName;
@@ -35,12 +43,10 @@
   }
 
   async function connect(name: string) {
-    // Clear any previous error
     lastError = null;
     if (errorTimeout) clearTimeout(errorTimeout);
 
     try {
-      // Snapshot prior message count before we add anything.
       const priorMessages = $sessionMessages.get(name);
       const hasCachedHistory = priorMessages && priorMessages.length > 0;
 
@@ -49,17 +55,12 @@
       if (session) {
         currentSession.set({ ...session, is_connected: true });
 
-        // Always show a "Connected" system message so the user knows
-        // which session is active, regardless of prior message history.
         addMessageToSession(name, {
           direction: 'system',
           content: `Connected to session: ${getDisplayName(name)}`,
           timestamp: new Date(),
         });
 
-        // For sessions with no prior message history, immediately capture
-        // the current terminal output so the user sees the tmux state right
-        // away instead of waiting for the poll cycle (~500 ms).
         if (!hasCachedHistory) {
           try {
             const output = await invoke<string>('capture_session_output', { name });
@@ -77,16 +78,9 @@
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-
-      // Show error banner
       lastError = `Cannot connect to ${getDisplayName(name)}: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
 
-      // Auto-clear after 5 seconds
-      errorTimeout = setTimeout(() => {
-        lastError = null;
-      }, 5000);
-
-      // Also add to messages
       if ($currentSession) {
         addMessageToSession($currentSession.name, {
           direction: 'system',
@@ -100,7 +94,80 @@
   }
 
   async function openInIterm(sessionName: string) {
+    closeDropdown();
     await invoke('open_in_iterm', { sessionName });
+  }
+
+  async function openInTerminal(sessionName: string) {
+    closeDropdown();
+    await invoke('open_in_terminal_app', { sessionName });
+  }
+
+  async function stopSession(sessionName: string) {
+    closeDropdown();
+    try {
+      await invoke('stop_session', { name: sessionName });
+      await loadSessions();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      lastError = `Failed to stop ${sessionName}: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
+    }
+  }
+
+  function startRename(sessionName: string) {
+    closeDropdown();
+    renamingSession = sessionName;
+    renameValue = sessionName;
+    // Focus the input on next tick
+    setTimeout(() => renameInput?.focus(), 0);
+  }
+
+  async function commitRename() {
+    if (!renamingSession) return;
+    const oldName = renamingSession;
+    const newName = renameValue.trim();
+
+    renamingSession = null;
+
+    if (!newName || newName === oldName) return;
+
+    try {
+      await invoke('rename_session', { oldName, newName });
+      await loadSessions();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      lastError = `Failed to rename: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
+    }
+  }
+
+  function cancelRename() {
+    renamingSession = null;
+    renameValue = '';
+  }
+
+  function handleRenameKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelRename();
+    }
+  }
+
+  function toggleDropdown(sessionName: string, e: MouseEvent) {
+    e.stopPropagation();
+    openDropdown = openDropdown === sessionName ? null : sessionName;
+  }
+
+  function closeDropdown() {
+    openDropdown = null;
+  }
+
+  function handleGlobalClick() {
+    closeDropdown();
   }
 
   function handleSessionCreated() {
@@ -111,10 +178,12 @@
   onMount(() => {
     loadSessions();
     interval = window.setInterval(loadSessions, 2000);
+    window.addEventListener('click', handleGlobalClick);
   });
 
   onDestroy(() => {
     clearInterval(interval);
+    window.removeEventListener('click', handleGlobalClick);
   });
 </script>
 
@@ -126,35 +195,100 @@
       <span>New</span>
     </button>
   </div>
+
   {#if lastError}
     <div class="error-banner">
-      ⚠️ {lastError}
+      {lastError}
     </div>
   {/if}
+
   <div class="session-items">
     {#each $sessions as session}
       <div
         class="session-item"
         class:active={$currentSession?.name === session.name}
       >
-        <button class="session-main" on:click={() => connect(session.name)}>
-          <span class="session-name">{getDisplayName(session.name)}</span>
-          <Activity
-            size={16}
-            class={session.is_connected ? 'text-green-500' : 'text-gray-400'}
-          />
-        </button>
-        <button
-          class="iterm-btn"
-          on:click|stopPropagation={() => openInIterm(session.name)}
-          title="Open in iTerm2"
-        >
-          <Terminal size={14} />
-        </button>
+        {#if renamingSession === session.name}
+          <!-- Inline rename editor -->
+          <div class="rename-row">
+            <input
+              bind:this={renameInput}
+              bind:value={renameValue}
+              class="rename-input"
+              on:keydown={handleRenameKeydown}
+              on:blur={commitRename}
+              spellcheck="false"
+            />
+          </div>
+        {:else}
+          <!-- Normal session row -->
+          <button class="session-main" on:click={() => connect(session.name)}>
+            <span class="session-name">{getDisplayName(session.name)}</span>
+            <Activity
+              size={16}
+              class={session.is_connected ? 'text-green-500' : 'text-gray-400'}
+            />
+          </button>
+
+          <!-- Action buttons: always visible -->
+          <div class="session-actions">
+            <!-- iTerm2 button - always visible -->
+            <button
+              class="action-btn iterm-btn"
+              on:click|stopPropagation={() => openInIterm(session.name)}
+              title="Open in iTerm2"
+            >
+              <Terminal size={14} />
+            </button>
+
+            <!-- Rename button -->
+            <button
+              class="action-btn rename-btn"
+              on:click|stopPropagation={() => startRename(session.name)}
+              title="Rename session"
+            >
+              <Pencil size={13} />
+            </button>
+
+            <!-- Gear dropdown button -->
+            <div class="dropdown-wrapper">
+              <button
+                class="action-btn gear-btn"
+                class:gear-open={openDropdown === session.name}
+                on:click={(e) => toggleDropdown(session.name, e)}
+                title="Session options"
+              >
+                <Settings size={13} />
+              </button>
+
+              {#if openDropdown === session.name}
+                <div class="dropdown-menu" on:click|stopPropagation>
+                  <button class="dropdown-item" on:click={() => startRename(session.name)}>
+                    <Pencil size={13} />
+                    <span>Rename</span>
+                  </button>
+                  <button class="dropdown-item" on:click={() => openInIterm(session.name)}>
+                    <Terminal size={13} />
+                    <span>Open in iTerm2</span>
+                  </button>
+                  <button class="dropdown-item" on:click={() => openInTerminal(session.name)}>
+                    <Monitor size={13} />
+                    <span>Open in Terminal.app</span>
+                  </button>
+                  <div class="dropdown-divider"></div>
+                  <button class="dropdown-item danger" on:click={() => stopSession(session.name)}>
+                    <Square size={13} />
+                    <span>Stop Session</span>
+                  </button>
+                </div>
+              {/if}
+            </div>
+          </div>
+        {/if}
       </div>
     {:else}
       <div class="no-sessions">
-        <p class="text-gray-500 text-sm">No sessions available</p>
+        <p>No sessions available</p>
       </div>
     {/each}
   </div>
@@ -250,7 +384,7 @@
     flex: 1;
     justify-content: space-between;
     align-items: center;
-    padding: 0.75rem 1rem;
+    padding: 0.625rem 0.75rem;
     border: none;
     background: transparent;
     cursor: pointer;
@@ -267,35 +401,135 @@
     white-space: nowrap;
   }
 
-  .iterm-btn {
+  /* Action buttons row - always visible */
+  .session-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.125rem;
+    padding-right: 0.375rem;
+    flex-shrink: 0;
+  }
+
+  .action-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0.375rem;
-    margin-right: 0.375rem;
+    width: 26px;
+    height: 26px;
     border: 1px solid var(--border);
     border-radius: 0.25rem;
     background: transparent;
     color: var(--text-secondary);
     cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
     flex-shrink: 0;
   }
 
-  .session-item:hover .iterm-btn {
-    opacity: 1;
+  .action-btn:hover {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
   }
 
   .iterm-btn:hover {
-    background: var(--bg-surface);
     color: var(--accent);
     border-color: var(--accent);
+  }
+
+  .rename-btn:hover {
+    color: #f59e0b;
+    border-color: #f59e0b;
+  }
+
+  .gear-btn:hover,
+  .gear-btn.gear-open {
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
+    background: var(--bg-surface);
+  }
+
+  /* Rename inline input */
+  .rename-row {
+    flex: 1;
+    padding: 0.375rem 0.5rem;
+  }
+
+  .rename-input {
+    width: 100%;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    border: 1px solid var(--accent);
+    border-radius: 0.25rem;
+    outline: none;
+    box-sizing: border-box;
+  }
+
+  .rename-input:focus {
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
+  }
+
+  /* Dropdown */
+  .dropdown-wrapper {
+    position: relative;
+  }
+
+  .dropdown-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 100;
+    min-width: 180px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    padding: 0.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.45rem 0.625rem;
+    border: none;
+    border-radius: 0.25rem;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 0.8125rem;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.1s;
+  }
+
+  .dropdown-item:hover {
+    background: var(--bg-surface);
+  }
+
+  .dropdown-item.danger {
+    color: #dc2626;
+  }
+
+  .dropdown-item.danger:hover {
+    background: rgba(220, 38, 38, 0.1);
+  }
+
+  .dropdown-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 0.25rem 0;
   }
 
   .no-sessions {
     padding: 2rem 1rem;
     text-align: center;
     color: var(--text-secondary);
+    font-size: 0.875rem;
   }
 </style>

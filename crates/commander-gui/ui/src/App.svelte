@@ -5,8 +5,9 @@
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
   import BotStatus from './lib/components/BotStatus.svelte';
-  import { RotateCw, Sun, Moon } from 'lucide-svelte';
+  import { RotateCw, Sun, Moon, Terminal } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
+  import { currentSession } from './lib/stores/app';
 
   function toggleTheme() {
     setTheme($resolvedTheme === 'dark' ? 'light' : 'dark');
@@ -76,6 +77,17 @@
     </div>
 
     <div class="header-right">
+      {#if $currentSession}
+        <button
+          class="iterm-global-btn"
+          on:click={() => invoke('open_in_iterm', { sessionName: $currentSession!.name })}
+          title="Open current session in iTerm2: {$currentSession!.name}"
+          aria-label="Open in iTerm2"
+        >
+          <Terminal size={14} />
+          <span class="iterm-label">iTerm2</span>
+        </button>
+      {/if}
       <button
         class="theme-btn"
         on:click={toggleTheme}
@@ -245,6 +257,34 @@
     border-radius: 50%;
     background: #10b981;
     flex-shrink: 0;
+  }
+
+  .iterm-global-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 0.75rem;
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+
+  .iterm-global-btn:hover {
+    background: var(--bg-surface);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .iterm-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
   }
 
   .theme-btn,
