@@ -82,6 +82,9 @@ pub async fn stop_session(name: String, state: State<'_, GuiState>) -> Result<()
 
 #[tauri::command]
 pub async fn send_message(content: String, state: State<'_, GuiState>) -> Result<(), String> {
+    // Note: GUI-specific slash commands (/status, /health, /usage, etc.) should be
+    // intercepted in the frontend (InputArea.svelte) before calling this command.
+    // Everything that reaches here goes directly to the tmux session / adapter.
     let session_name = state
         .current_session
         .read()
@@ -449,6 +452,51 @@ pub async fn create_session(
     // Create session in specified directory
     tmux.create_session_in_dir(&name, Some(&directory))
         .map_err(|e| e.to_string())?;
+
+    // Determine the adapter launch command
+    let launch_cmd = match adapter.as_str() {
+        "claude-code" => "claude",
+        "claude-mpm" => "claude-mpm",
+        "auggie" => "auggie",
+        "codex" => "codex",
+        "shell" => "", // No command needed for bare shell
+        _ => "claude", // Default to claude
+    };
+
+    // Launch the adapter inside the tmux session
+    if !launch_cmd.is_empty() {
+        eprintln!("[GUI] Launching adapter '{}' in session '{}'", launch_cmd, name);
+        // Small delay to let the shell initialize before sending the command
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tmux.send_line(&name, None, launch_cmd)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_in_iterm(
+    session_name: String,
+    _state: State<'_, GuiState>,
+) -> Result<(), String> {
+    // Open iTerm2 and attach to the named tmux session
+    let script = format!(
+        r#"tell application "iTerm2"
+            activate
+            create window with default profile
+            tell current session of current window
+                write text "tmux attach -t {}"
+            end tell
+        end tell"#,
+        session_name
+    );
+
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn()
+        .map_err(|e| format!("Failed to open iTerm2: {}", e))?;
 
     Ok(())
 }
