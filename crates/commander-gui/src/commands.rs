@@ -205,6 +205,24 @@ pub struct ProjectDirectory {
     pub project_type: String, // "claude-code" or "mpm"
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct AdapterInfo {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+}
+
+#[tauri::command]
+pub fn list_adapters() -> Vec<AdapterInfo> {
+    vec![
+        AdapterInfo { id: "claude-code".to_string(), name: "Claude Code".to_string(), command: "claude".to_string() },
+        AdapterInfo { id: "claude-mpm".to_string(), name: "Claude MPM".to_string(), command: "claude-mpm".to_string() },
+        AdapterInfo { id: "auggie".to_string(), name: "Auggie".to_string(), command: "auggie".to_string() },
+        AdapterInfo { id: "codex".to_string(), name: "Codex".to_string(), command: "codex".to_string() },
+        AdapterInfo { id: "shell".to_string(), name: "Shell".to_string(), command: "bash".to_string() },
+    ]
+}
+
 #[tauri::command]
 pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String> {
     let mut dirs = Vec::new();
@@ -263,6 +281,7 @@ pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String>
 pub async fn create_session(
     name: String,
     directory: String,
+    adapter: String,
     state: State<'_, GuiState>,
 ) -> Result<(), String> {
     let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
@@ -271,6 +290,8 @@ pub async fn create_session(
     if tmux.session_exists(&name) {
         return Err(format!("Session '{}' already exists", name));
     }
+
+    eprintln!("[GUI] Creating session '{}' with adapter '{}' in '{}'", name, adapter, directory);
 
     // Create session in specified directory
     tmux.create_session_in_dir(&name, Some(&directory))

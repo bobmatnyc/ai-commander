@@ -12,7 +12,7 @@
   let errorTimeout: number | null = null;
 
   function getDisplayName(sessionName: string): string {
-    return sessionName.replace(/^commander-/, '');
+    return sessionName;
   }
 
   function sessionsEqual(a: Session[], b: Session[]): boolean {

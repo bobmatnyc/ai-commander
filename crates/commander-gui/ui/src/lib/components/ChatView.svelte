@@ -53,7 +53,7 @@
     if (!$currentSession || isActionLoading) return;
     const sessionName = $currentSession.name;
 
-    const confirmed = confirm(`Are you sure you want to stop session "${sessionName.replace(/^commander-/, '')}"? This will terminate the session.`);
+    const confirmed = confirm(`Are you sure you want to stop session "${sessionName}"? This will terminate the session.`);
     if (!confirmed) return;
 
     isActionLoading = true;
@@ -82,7 +82,7 @@
       await invoke('disconnect_session');
       addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Disconnected from session "${sessionName.replace(/^commander-/, '')}".`,
+        content: `Disconnected from session "${sessionName}".`,
         timestamp: new Date(),
       });
       currentSession.set(null);

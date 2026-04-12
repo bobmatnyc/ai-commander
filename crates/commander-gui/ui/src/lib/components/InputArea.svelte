@@ -35,7 +35,7 @@
 
         case '/list':
           const sessionList = $sessions
-            .map(s => `  ${s.name.replace(/^commander-/, '')}${s.is_connected ? ' (connected)' : ''}`)
+            .map(s => `  ${s.name}${s.is_connected ? ' (connected)' : ''}`)
             .join('\n');
           addMessageToSession(sessionName, {
             direction: 'system',
@@ -55,7 +55,7 @@
           break;
 
         case '/stop':
-          if (confirm(`Stop session "${sessionName.replace(/^commander-/, '')}"? This cannot be undone.`)) {
+          if (confirm(`Stop session "${sessionName}"? This cannot be undone.`)) {
             await invoke('stop_session', { name: sessionName });
             clearSessionMessages(sessionName);
             currentSession.set(null);

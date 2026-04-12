@@ -13,9 +13,23 @@
     project_type: string;
   }
 
+  interface AdapterOption {
+    id: string;
+    label: string;
+  }
+
+  const ADAPTERS: AdapterOption[] = [
+    { id: 'claude-code', label: 'Claude Code' },
+    { id: 'claude-mpm', label: 'Claude MPM' },
+    { id: 'auggie', label: 'Auggie' },
+    { id: 'codex', label: 'Codex' },
+    { id: 'shell', label: 'Shell' },
+  ];
+
   let directories: ProjectDirectory[] = [];
   let selectedDirectory: ProjectDirectory | null = null;
   let sessionName = '';
+  let selectedAdapter = 'claude-code';
   let loading = false;
   let error = '';
 
@@ -43,8 +57,9 @@
 
     try {
       await invoke('create_session', {
-        name: `commander-${sessionName}`,
-        directory: selectedDirectory.path
+        name: sessionName,
+        directory: selectedDirectory.path,
+        adapter: selectedAdapter,
       });
 
       dispatch('created');
@@ -59,6 +74,7 @@
   function close() {
     show = false;
     sessionName = '';
+    selectedAdapter = 'claude-code';
     selectedDirectory = null;
     error = '';
   }
@@ -82,18 +98,31 @@
 
       <div class="modal-body">
         <div class="form-group">
-          <label>Session Name</label>
+          <label for="session-name">Session Name</label>
           <input
+            id="session-name"
             type="text"
             bind:value={sessionName}
             placeholder="my-session"
             class="input"
           />
-          <p class="hint">Will be created as: commander-{sessionName || '...'}</p>
         </div>
 
         <div class="form-group">
-          <label for="directory-list">Project Directory</label>
+          <label for="adapter-select">Adapter</label>
+          <select
+            id="adapter-select"
+            bind:value={selectedAdapter}
+            class="input select"
+          >
+            {#each ADAPTERS as adapter}
+              <option value={adapter.id}>{adapter.label}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="directory-list">Project Path</label>
           <div class="directory-list" id="directory-list" role="listbox">
             {#each directories as dir}
               <button
@@ -213,6 +242,7 @@
     border: 1px solid #d1d5db;
     border-radius: 6px;
     font-size: 0.875rem;
+    box-sizing: border-box;
   }
 
   .input:focus {
@@ -221,16 +251,19 @@
     box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
   }
 
-  .hint {
-    margin-top: 0.25rem;
-    font-size: 0.75rem;
-    color: #6b7280;
+  .select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    padding-right: 2.5rem;
+    cursor: pointer;
   }
 
   .directory-list {
     border: 1px solid #d1d5db;
     border-radius: 6px;
-    max-height: 300px;
+    max-height: 240px;
     overflow-y: auto;
   }
 

@@ -83,6 +83,7 @@ fn main() {
             commands::check_telegram_connection,
             commands::list_project_directories,
             commands::create_session,
+            commands::list_adapters,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
