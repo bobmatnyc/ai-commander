@@ -17,6 +17,10 @@ commander-tmux = { path = "../commander-tmux" }
 commander-core = { path = "../commander-core" }
 commander-telegram = { path = "../commander-telegram" }
 commander-adapters = { path = "../commander-adapters" }
+commander-api = { path = "../commander-api" }
+commander-daemon = { path = "../commander-daemon" }
+commander-events = { path = "../commander-events" }
+commander-work = { path = "../commander-work" }
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }

@@ -2,6 +2,7 @@ use anyhow::Result;
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
 use std::sync::{Arc, RwLock};
+use tauri::async_runtime::JoinHandle;
 
 #[derive(Clone)]
 pub struct GuiState {
@@ -9,6 +10,10 @@ pub struct GuiState {
     pub tmux: Option<Arc<TmuxOrchestrator>>,
     pub current_session: Arc<RwLock<Option<String>>>,
     pub bot_status: Arc<RwLock<DaemonStatus>>,
+    /// Handle to the running API server task (abort on shutdown).
+    pub api_server_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// Handle to the running daemon service task (abort on shutdown).
+    pub daemon_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +37,8 @@ impl GuiState {
                 running: false,
                 pid: None,
             })),
+            api_server_handle: Arc::new(RwLock::new(None)),
+            daemon_handle: Arc::new(RwLock::new(None)),
         })
     }
 }
