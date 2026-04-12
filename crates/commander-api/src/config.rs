@@ -33,8 +33,13 @@ impl ApiConfig {
     }
 
     /// Returns the bind address.
+    ///
+    /// If the `AIC_BIND_ADDRESS` environment variable is set it overrides both
+    /// `host` and `port` entirely, allowing callers to bind on e.g.
+    /// `0.0.0.0:8765` for remote access over Tailscale without recompiling.
     pub fn bind_address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        std::env::var("AIC_BIND_ADDRESS")
+            .unwrap_or_else(|_| format!("{}:{}", self.host, self.port))
     }
 
     /// Returns the uptime in seconds.
@@ -78,6 +83,10 @@ mod tests {
         let config = ApiConfig::new("0.0.0.0", 3000);
         assert_eq!(config.bind_address(), "0.0.0.0:3000");
     }
+
+    // Note: AIC_BIND_ADDRESS env var support cannot be tested reliably in a
+    // parallel test suite because mutating env vars is process-wide.
+    // Verified manually: `AIC_BIND_ADDRESS=0.0.0.0:9999` overrides the default.
 
     #[test]
     fn test_api_config_with_cors() {

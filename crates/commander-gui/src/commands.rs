@@ -162,6 +162,48 @@ pub async fn generate_pairing_code() -> Result<String, String> {
     Ok(code)
 }
 
+/// Generate a web client pairing code via the daemon's PairingManager.
+///
+/// The returned code is displayed to the user in the GUI and must be entered
+/// in the web client to obtain a session token via `POST /api/auth/pair`.
+#[tauri::command]
+pub async fn generate_web_pairing_code() -> Result<WebPairingCode, String> {
+    use commander_daemon::PairingManager;
+
+    let mut manager =
+        PairingManager::new().map_err(|e| format!("Failed to create pairing manager: {}", e))?;
+
+    let code = manager
+        .generate_code(None, None)
+        .map_err(|e| format!("Failed to generate pairing code: {}", e))?;
+
+    let entry = manager
+        .get_entry(&code)
+        .ok_or_else(|| "Generated code not found in pairing store".to_string())?;
+
+    let now = chrono::Utc::now();
+    let expires_in_seconds = (entry.expires_at - now)
+        .num_seconds()
+        .max(0) as u64;
+
+    Ok(WebPairingCode {
+        code,
+        expires_at: entry.expires_at.to_rfc3339(),
+        expires_in_seconds,
+    })
+}
+
+/// Response from `generate_web_pairing_code`.
+#[derive(Serialize, Deserialize)]
+pub struct WebPairingCode {
+    /// 6-character alphanumeric code the user enters in the web client.
+    pub code: String,
+    /// RFC 3339 timestamp when the code expires.
+    pub expires_at: String,
+    /// Seconds remaining until expiry.
+    pub expires_in_seconds: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TelegramConnection {
     pub connected: bool,

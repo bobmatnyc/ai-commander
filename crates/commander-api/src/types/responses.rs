@@ -302,6 +302,37 @@ impl From<&AdapterInfo> for AdapterSummary {
     }
 }
 
+/// Pairing response returned after a successful code validation.
+#[derive(Debug, Clone, Serialize)]
+pub struct PairResponse {
+    /// Bearer token to use for subsequent requests.
+    pub token: String,
+    /// When the session was established.
+    pub paired_at: DateTime<Utc>,
+}
+
+/// Auth status response.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthStatusResponse {
+    /// Whether the token is valid.
+    pub authenticated: bool,
+    /// When the client was originally paired (present when authenticated).
+    pub paired_at: Option<DateTime<Utc>>,
+    /// When the token was last used (present when authenticated).
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
+/// Generate pairing code response.
+#[derive(Debug, Clone, Serialize)]
+pub struct GenerateCodeResponse {
+    /// The 6-character pairing code.
+    pub code: String,
+    /// When the code expires.
+    pub expires_at: DateTime<Utc>,
+    /// Seconds until expiry.
+    pub expires_in_seconds: i64,
+}
+
 /// Generic success response.
 #[derive(Debug, Clone, Serialize)]
 pub struct SuccessResponse {

@@ -22,6 +22,10 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         // Health
         .route("/api/health", get(handlers::health))
+        // Auth
+        .route("/api/auth/pair", post(handlers::pair))
+        .route("/api/auth/status", get(handlers::auth_status))
+        .route("/api/auth/generate-code", post(handlers::generate_code))
         // Projects
         .route("/api/projects", get(handlers::list_projects))
         .route("/api/projects", post(handlers::create_project))
@@ -78,12 +82,13 @@ mod tests {
         let event_store = EventStore::new(&path);
         let work_store = WorkStore::new(&path);
 
-        AppState::new(
+        AppState::new_with_storage(
             ApiConfig::default(),
             None,
             EventManager::new(event_store),
             WorkQueue::new(work_store),
             AdapterRegistry::new(),
+            path,
         )
     }
 

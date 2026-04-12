@@ -12,6 +12,8 @@ commander-adapters = { path = "../commander-adapters" }
 commander-events = { path = "../commander-events" }
 commander-work = { path = "../commander-work" }
 commander-runtime = { path = "../commander-runtime" }
+commander-core = { path = "../commander-core" }
+commander-daemon = { path = "../commander-daemon" }
 
 axum.workspace = true
 tower.workspace = true
@@ -22,6 +24,7 @@ serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 axum-test = "20"

@@ -60,6 +60,15 @@ pub struct CompleteWorkRequest {
     pub result: Option<String>,
 }
 
+/// Validate a pairing code and obtain a session token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PairRequest {
+    /// 6-character alphanumeric pairing code.
+    pub code: String,
+    /// Optional client identifier (user-agent or device name).
+    pub client_info: Option<String>,
+}
+
 /// Work list query parameters.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WorkListQuery {

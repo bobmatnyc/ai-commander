@@ -31,12 +31,13 @@ fn main() {
                 let event_store = EventStore::new(&state_dir);
                 let work_store = WorkStore::new(&state_dir);
 
-                let api_state = AppState::new(
+                let api_state = AppState::new_with_storage(
                     ApiConfig::default(),
                     None,
                     EventManager::new(event_store),
                     WorkQueue::new(work_store),
                     AdapterRegistry::new(),
+                    state_dir.clone(),
                 );
 
                 if let Err(e) = commander_api::serve(ApiConfig::default(), api_state).await {
@@ -85,6 +86,7 @@ fn main() {
             commands::create_session,
             commands::list_adapters,
             commands::rebuild_from_source,
+            commands::generate_web_pairing_code,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

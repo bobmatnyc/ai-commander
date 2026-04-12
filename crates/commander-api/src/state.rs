@@ -1,17 +1,20 @@
 //! Application state shared across handlers.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
 use commander_adapters::AdapterRegistry;
+use commander_core::config;
 use commander_events::EventManager;
 use commander_models::Project;
 use commander_runtime::Runtime;
 use commander_work::WorkQueue;
 
 use crate::config::ApiConfig;
+use crate::web_clients::WebClientStore;
 
 /// Application state shared across all handlers.
 #[derive(Clone)]
@@ -28,6 +31,8 @@ pub struct AppState {
     pub adapter_registry: Arc<AdapterRegistry>,
     /// In-memory project store.
     pub projects: Arc<RwLock<HashMap<String, Project>>>,
+    /// Web client token store for browser-based auth.
+    pub web_clients: WebClientStore,
 }
 
 impl AppState {
@@ -39,6 +44,20 @@ impl AppState {
         work_queue: WorkQueue,
         adapter_registry: AdapterRegistry,
     ) -> Self {
+        // Default storage directory for web clients (same dir as other runtime state).
+        let storage_dir = config::runtime_state_dir();
+        Self::new_with_storage(config, runtime, event_manager, work_queue, adapter_registry, storage_dir)
+    }
+
+    /// Creates a new AppState with an explicit storage directory (useful in tests).
+    pub fn new_with_storage(
+        config: ApiConfig,
+        runtime: Option<Runtime>,
+        event_manager: EventManager,
+        work_queue: WorkQueue,
+        adapter_registry: AdapterRegistry,
+        storage_dir: PathBuf,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             runtime: runtime.map(|r| Arc::new(RwLock::new(r))),
@@ -46,6 +65,7 @@ impl AppState {
             work_queue: Arc::new(work_queue),
             adapter_registry: Arc::new(adapter_registry),
             projects: Arc::new(RwLock::new(HashMap::new())),
+            web_clients: WebClientStore::new(&storage_dir),
         }
     }
 
@@ -88,12 +108,13 @@ mod tests {
         let event_store = EventStore::new(&path);
         let work_store = WorkStore::new(&path);
 
-        AppState::new(
+        AppState::new_with_storage(
             ApiConfig::default(),
             None, // No runtime in tests
             EventManager::new(event_store),
             WorkQueue::new(work_store),
             AdapterRegistry::new(),
+            path,
         )
     }
 

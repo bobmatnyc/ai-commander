@@ -29,6 +29,7 @@ pub mod handlers;
 pub mod router;
 pub mod state;
 pub mod types;
+pub mod web_clients;
 
 pub use config::ApiConfig;
 pub use error::{ApiError, Result};
