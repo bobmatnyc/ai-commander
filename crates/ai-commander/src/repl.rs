@@ -1743,7 +1743,8 @@ impl Repl {
         Ok(())
     }
 
-    /// Show unread MPM messages from the messaging store.
+    /// Show unread MPM messages from the messaging store and dispatch them
+    /// to active tmux sessions via `/mpm-message read`.
     fn handle_messages(&self) -> Result<(), Box<dyn std::error::Error>> {
         use commander_daemon::message_poller::MessagePoller;
 
@@ -1786,10 +1787,85 @@ impl Repl {
             println!();
             println!("#{} [{}] From: {}", i + 1, msg.priority, from);
             println!("   Subject: {}", msg.subject);
+            println!("   To: {}", msg.to_project);
             println!("   {}", age);
         }
 
         println!();
+
+        // --- Dispatch phase ---
+        // For each unique destination project, look it up in the StateStore and
+        // inject `/mpm-message read` into the running tmux session if one exists.
+        let tmux = match &self.tmux {
+            Some(t) => t,
+            None => {
+                println!("Note: tmux not available — cannot dispatch messages to sessions.");
+                return Ok(());
+            }
+        };
+
+        // Collect unique destination projects so we only dispatch once per project
+        // even when there are multiple pending messages for it.
+        let mut seen_destinations: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut dispatched_count: usize = 0;
+        let mut no_session_count: usize = 0;
+
+        for msg in &messages {
+            let to_project = msg.to_project.trim();
+            if to_project.is_empty() || !seen_destinations.insert(to_project.to_string()) {
+                continue;
+            }
+
+            // Resolve the project from StateStore by name/alias or path.
+            let project = match self.store.find_project_by_name_or_alias(to_project) {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => {
+                    // Fall back to path match.
+                    match self.store.load_all_projects() {
+                        Ok(all) => all.into_values().find(|p| p.path == to_project),
+                        Err(_) => None,
+                    }
+                }
+                Err(_) => None,
+            };
+
+            let session_name = match &project {
+                Some(p) => p.name.replace([' ', '.', '/', ':'], "-"),
+                // If not registered, sanitise the raw to_project value and try anyway.
+                None => to_project.replace([' ', '.', '/', ':'], "-"),
+            };
+
+            if tmux.session_exists(&session_name) {
+                match tmux.send_line(&session_name, None, "/mpm-message read") {
+                    Ok(_) => {
+                        let display_name = project
+                            .as_ref()
+                            .map(|p| p.name.as_str())
+                            .unwrap_or(to_project);
+                        println!("  Dispatched to '{}'", display_name);
+                        dispatched_count += 1;
+                    }
+                    Err(e) => {
+                        println!("  Warning: failed to dispatch to '{}': {}", session_name, e);
+                    }
+                }
+            } else {
+                let display_name = project
+                    .as_ref()
+                    .map(|p| p.name.as_str())
+                    .unwrap_or(to_project);
+                println!("  Warning: '{}' has no active session — start it to receive messages", display_name);
+                no_session_count += 1;
+            }
+        }
+
+        println!();
+        println!(
+            "Dispatch summary: {} session(s) notified, {} project(s) need manual start",
+            dispatched_count, no_session_count
+        );
+        println!();
+
         Ok(())
     }
 
