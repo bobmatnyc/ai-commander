@@ -267,55 +267,121 @@ pub fn list_adapters() -> Vec<AdapterInfo> {
 
 #[tauri::command]
 pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String> {
-    let mut dirs = Vec::new();
+    use std::collections::HashSet;
+
+    let mut dirs: Vec<ProjectDirectory> = Vec::new();
+    let mut seen_paths: HashSet<String> = HashSet::new();
     let home = std::env::var("HOME").map_err(|e| e.to_string())?;
 
-    // Check ~/.claude/projects/ for Claude Code projects
-    let cc_path = PathBuf::from(&home).join(".claude/projects");
-    if let Ok(entries) = std::fs::read_dir(&cc_path) {
+    // Phase 1: Scan common project roots for directories containing .claude or .claude-mpm
+    let scan_roots = [
+        PathBuf::from(&home).join("Projects"),
+        PathBuf::from(&home).join("projects"),
+        PathBuf::from(&home).join("src"),
+        PathBuf::from(&home).join("work"),
+        PathBuf::from(&home).join("dev"),
+    ];
+
+    for root in &scan_roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
         for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    dirs.push(ProjectDirectory {
-                        name: name.to_string(),
-                        path: entry.path().to_string_lossy().to_string(),
-                        project_type: "claude-code".to_string(),
-                    });
-                }
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
             }
+
+            let has_claude = path.join(".claude").is_dir();
+            let has_mpm = path.join(".claude-mpm").is_dir();
+
+            if !has_claude && !has_mpm {
+                continue;
+            }
+
+            let path_str = path.to_string_lossy().to_string();
+            if !seen_paths.insert(path_str.clone()) {
+                continue;
+            }
+
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            let mut adapters: Vec<&str> = Vec::new();
+            if has_claude {
+                adapters.push("claude-code");
+            }
+            if has_mpm {
+                adapters.push("claude-mpm");
+            }
+
+            dirs.push(ProjectDirectory {
+                name,
+                path: path_str,
+                project_type: adapters.join(", "),
+            });
         }
     }
 
-    // Check ~/.claude-mpm/projects/ for MPM projects
-    let mpm_path = PathBuf::from(&home).join(".claude-mpm/projects");
-    if let Ok(entries) = std::fs::read_dir(&mpm_path) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    dirs.push(ProjectDirectory {
-                        name: name.to_string(),
-                        path: entry.path().to_string_lossy().to_string(),
-                        project_type: "mpm".to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    // Also check current working directory for any projects
-    if let Ok(current_dir) = std::env::current_dir() {
-        // Check if current directory has .claude or package.json
-        if current_dir.join(".claude").exists() || current_dir.join("package.json").exists() {
-            if let Some(name) = current_dir.file_name().and_then(|n| n.to_str()) {
+    // Phase 2: Load registered projects from StateStore (authoritative source)
+    let state_dir = commander_core::config::state_dir();
+    let store = commander_persistence::StateStore::new(state_dir);
+    if let Ok(projects) = store.load_all_projects() {
+        for (_id, project) in projects {
+            let path_str = project.path.clone();
+            if seen_paths.insert(path_str.clone()) {
+                let adapter = project
+                    .adapter_type
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "claude-code".to_string());
                 dirs.push(ProjectDirectory {
-                    name: name.to_string(),
-                    path: current_dir.to_string_lossy().to_string(),
-                    project_type: "current-dir".to_string(),
+                    name: project.name,
+                    path: path_str,
+                    project_type: adapter,
                 });
             }
         }
     }
 
+    // Phase 3: Decode ~/.claude/projects/ entries as fallback
+    // Directory names are dash-encoded paths: "-Users-masa-Projects-foo" → "/Users/masa/Projects/foo"
+    let cc_config_path = PathBuf::from(&home).join(".claude/projects");
+    if let Ok(entries) = std::fs::read_dir(&cc_config_path) {
+        for entry in entries.flatten() {
+            let encoded = entry.file_name();
+            let Some(encoded_str) = encoded.to_str() else {
+                continue;
+            };
+            // The encoding: leading '-' represents the root '/', remaining '-' are path separators.
+            // "-Users-masa-Projects-hot-flash" → "/Users/masa/Projects/hot-flash"
+            // We reconstruct by replacing the first '-' with '/' and all subsequent '-' with '/'.
+            // However, project names with hyphens are ambiguous, so we only include paths that
+            // actually exist on disk.
+            let decoded = format!("/{}", encoded_str.trim_start_matches('-').replace('-', "/"));
+            let decoded_path = PathBuf::from(&decoded);
+            if !decoded_path.is_dir() {
+                continue;
+            }
+            if !seen_paths.insert(decoded.clone()) {
+                continue;
+            }
+            let proj_name = decoded_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            dirs.push(ProjectDirectory {
+                name: proj_name,
+                path: decoded,
+                project_type: "claude-code".to_string(),
+            });
+        }
+    }
+
+    dirs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(dirs)
 }
 

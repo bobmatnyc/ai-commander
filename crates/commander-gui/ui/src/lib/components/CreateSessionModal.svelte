@@ -29,9 +29,18 @@
   let directories: ProjectDirectory[] = [];
   let selectedDirectory: ProjectDirectory | null = null;
   let sessionName = '';
-  let selectedAdapter = 'claude-code';
+  let selectedAdapter = 'claude-mpm';
   let loading = false;
   let error = '';
+  let filterText = '';
+
+  $: filteredDirectories = directories.filter(dir => {
+    if (!filterText) return true;
+    const search = filterText.toLowerCase();
+    return dir.name.toLowerCase().includes(search)
+      || dir.path.toLowerCase().includes(search)
+      || dir.project_type.toLowerCase().includes(search);
+  });
 
   async function loadDirectories() {
     try {
@@ -74,9 +83,10 @@
   function close() {
     show = false;
     sessionName = '';
-    selectedAdapter = 'claude-code';
+    selectedAdapter = 'claude-mpm';
     selectedDirectory = null;
     error = '';
+    filterText = '';
   }
 
   function handleOverlayClick(event: MouseEvent) {
@@ -122,13 +132,28 @@
         </div>
 
         <div class="form-group">
-          <label for="directory-list">Project Path</label>
-          <div class="directory-list" id="directory-list" role="listbox">
-            {#each directories as dir}
+          <label for="directory-filter">Project Path</label>
+          <div class="filter-wrapper">
+            <span class="filter-icon" aria-hidden="true">&#x1F50D;</span>
+            <input
+              id="directory-filter"
+              type="text"
+              bind:value={filterText}
+              placeholder="Filter projects..."
+              class="input filter-input"
+            />
+          </div>
+          {#if directories.length > 0}
+            <p class="filter-count">
+              Showing {filteredDirectories.length} of {directories.length} project{directories.length === 1 ? '' : 's'}
+            </p>
+          {/if}
+          <div class="directory-list" id="directory-list" role="listbox" aria-label="Project directories">
+            {#each filteredDirectories as dir}
               <button
                 class="directory-item"
                 class:selected={selectedDirectory?.path === dir.path}
-                on:click={() => selectedDirectory = dir}
+                on:click={() => { selectedDirectory = dir; if (!sessionName) sessionName = dir.name; }}
                 role="option"
                 aria-selected={selectedDirectory?.path === dir.path}
               >
@@ -142,6 +167,8 @@
 
             {#if directories.length === 0}
               <p class="no-dirs">No project directories found</p>
+            {:else if filteredDirectories.length === 0}
+              <p class="no-dirs">No projects match &ldquo;{filterText}&rdquo;</p>
             {/if}
           </div>
         </div>
@@ -260,10 +287,45 @@
     cursor: pointer;
   }
 
+  .filter-wrapper {
+    position: relative;
+    margin-bottom: 0.375rem;
+  }
+
+  .filter-icon {
+    position: absolute;
+    left: 0.625rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.75rem;
+    pointer-events: none;
+    opacity: 0.5;
+  }
+
+  .filter-input {
+    padding-left: 1.875rem;
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
+    font-size: 0.8125rem;
+    border-color: #e5e7eb;
+    background: #f9fafb;
+  }
+
+  .filter-input:focus {
+    background: white;
+    border-color: #3b82f6;
+  }
+
+  .filter-count {
+    margin: 0 0 0.375rem;
+    font-size: 0.75rem;
+    color: #9ca3af;
+  }
+
   .directory-list {
     border: 1px solid #d1d5db;
     border-radius: 6px;
-    max-height: 240px;
+    max-height: 220px;
     overflow-y: auto;
   }
 
