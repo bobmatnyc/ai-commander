@@ -27,6 +27,9 @@
 //! ```
 
 pub mod error;
+pub mod health;
+pub mod idle_tracker;
+pub mod message_poller;
 pub mod monitoring;
 pub mod pairing;
 pub mod service;
@@ -35,6 +38,7 @@ pub mod ipc;
 
 // Re-export main types
 pub use error::{DaemonError, Result};
+pub use health::{HealthChecker, HealthResult, HealthStatus};
 pub use service::DaemonService;
 pub use sessions::SessionManager;
 pub use monitoring::MemoryMonitor;

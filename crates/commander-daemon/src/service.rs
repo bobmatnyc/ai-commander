@@ -15,6 +15,7 @@ use tokio::time;
 use tracing::{debug, info, warn};
 
 use crate::error::{DaemonError, Result};
+use crate::health::HealthChecker;
 use crate::ipc::{IpcConfig, IpcServer, protocol::{HealthStatusResponse, MemoryStatusResponse, SystemInfo, SessionInfo}};
 use crate::monitoring::MemoryUsage;
 use crate::pairing::{PairingManager, PairingEntry};
@@ -217,6 +218,10 @@ pub struct DaemonService {
     started_at: Instant,
     /// Cleanup task handle
     cleanup_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Idle monitor task handle
+    idle_monitor_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Shutdown channel for the idle monitor
+    idle_monitor_shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
     /// Shutdown signal
     shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
 }
@@ -252,6 +257,8 @@ impl DaemonService {
             ipc_server: None,
             started_at: Instant::now(),
             cleanup_handle: None,
+            idle_monitor_handle: None,
+            idle_monitor_shutdown_tx: None,
             shutdown_tx: None,
         })
     }
@@ -272,11 +279,21 @@ impl DaemonService {
 
         info!("Created PID file with PID: {}", std::process::id());
 
+        // Run startup health checks
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let checker = HealthChecker::new(project_root);
+        let health_results = checker.run_all();
+        let report = HealthChecker::format_report(&health_results);
+        info!("Startup health check complete:\n{}", report);
+
         // Start IPC server
         self.start_ipc_server().await?;
 
         // Start cleanup task
         self.start_cleanup_task();
+
+        // Start idle monitor for MPM sessions
+        self.start_idle_monitor();
 
         // Setup signal handling
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
@@ -639,6 +656,14 @@ impl DaemonService {
             handle.abort();
         }
 
+        // Stop idle monitor task
+        if let Some(tx) = self.idle_monitor_shutdown_tx.take() {
+            let _ = tx.send(true);
+        }
+        if let Some(handle) = self.idle_monitor_handle.take() {
+            handle.abort();
+        }
+
         // Terminate all sessions
         let session_ids: Vec<String> = {
             let session_manager = self.session_manager.read().await;
@@ -711,6 +736,31 @@ impl DaemonService {
         });
 
         self.cleanup_handle = Some(handle);
+    }
+
+    /// Start the idle monitor task for MPM sessions.
+    fn start_idle_monitor(&mut self) {
+        use commander_persistence::StateStore;
+        use commander_tmux::TmuxOrchestrator;
+        use crate::idle_tracker::run_idle_monitor;
+
+        let tmux = match TmuxOrchestrator::new() {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                warn!(error = %e, "idle_monitor: tmux not available, skipping idle monitor");
+                return;
+            }
+        };
+
+        let state_dir = commander_core::config::state_dir();
+        let store = Arc::new(StateStore::new(state_dir));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let handle = tokio::spawn(run_idle_monitor(tmux, store, shutdown_rx));
+
+        self.idle_monitor_handle = Some(handle);
+        self.idle_monitor_shutdown_tx = Some(shutdown_tx);
     }
 }
 

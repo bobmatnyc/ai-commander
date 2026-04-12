@@ -30,8 +30,14 @@ libc = "0.2"
 
 # Commander crates
 commander-core = { path = "../commander-core" }
+commander-models = { path = "../commander-models" }
 commander-orchestrator = { path = "../commander-orchestrator" }
 commander-memory = { path = "../commander-memory" }
+commander-persistence = { path = "../commander-persistence" }
+commander-tmux = { path = "../commander-tmux" }
+
+# SQLite for MPM messaging store
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Optional dependencies for enhanced monitoring
 psutil = { version = "3.2", optional = true }

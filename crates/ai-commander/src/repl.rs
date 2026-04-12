@@ -194,6 +194,40 @@ static COMMAND_HELP: &[CommandHelp] = &[
         ],
     },
     CommandHelp {
+        name: "usage",
+        aliases: &[],
+        brief: "Show Claude plan usage (costs per session/day/week)",
+        description: "Displays cost statistics for the current session, today, this week, and all time.\n\
+                      Also shows the active Claude subscription tier by querying `claude auth status`.",
+        usage: "/usage",
+        examples: &[
+            ("/usage", "Show usage report with plan tier and cost breakdown"),
+        ],
+    },
+    CommandHelp {
+        name: "health",
+        aliases: &[],
+        brief: "Run startup health checks",
+        description: "Checks that required MCP servers (kuzu-memory, mcp-vector-search) and \
+                      Claude authentication are healthy. Auto-fixes where possible and reports status.",
+        usage: "/health",
+        examples: &[
+            ("/health", "Run all health checks and print a report"),
+        ],
+    },
+    CommandHelp {
+        name: "messages",
+        aliases: &["msgs"],
+        brief: "Show unread MPM messages",
+        description: "Polls ~/.claude-mpm/messaging.db and displays unread messages.\n\
+                      Messages are shown ordered by priority (HIGH first), then age (oldest first).",
+        usage: "/messages",
+        examples: &[
+            ("/messages", "Show all unread MPM messages"),
+            ("/msgs", "Same as /messages"),
+        ],
+    },
+    CommandHelp {
         name: "telegram",
         aliases: &[],
         brief: "Generate pairing code for Telegram bot",
@@ -219,10 +253,10 @@ struct CommandCompleter {
 
 impl CommandCompleter {
     const COMMANDS: &'static [&'static str] = &[
-        "/alias", "/clear", "/connect", "/disconnect", "/help", "/inspect",
-        "/instances", "/list", "/list-instances", "/quit", "/register",
+        "/alias", "/clear", "/connect", "/disconnect", "/health", "/help", "/inspect",
+        "/instances", "/list", "/list-instances", "/messages", "/msgs", "/quit", "/register",
         "/send", "/sessions", "/status", "/stop", "/telegram", "/unalias",
-        "/unregister",
+        "/unregister", "/usage",
     ];
 
     fn new(state_dir: PathBuf) -> Self {
@@ -573,6 +607,12 @@ pub enum ReplCommand {
     Instances,
     /// Generate Telegram pairing code
     Telegram,
+    /// Show unread MPM messages
+    Messages,
+    /// Run startup health checks
+    Health,
+    /// Show Claude plan usage report
+    Usage,
     /// Quit the REPL
     Quit,
     /// Unknown command
@@ -622,6 +662,9 @@ impl ReplCommand {
                 "instances" | "list-instances" => ReplCommand::Instances,
                 "help" | "h" | "?" => ReplCommand::Help(arg),
                 "telegram" => ReplCommand::Telegram,
+                "messages" | "msgs" => ReplCommand::Messages,
+                "health" => ReplCommand::Health,
+                "usage" => ReplCommand::Usage,
                 "quit" | "q" | "exit" => ReplCommand::Quit,
                 _ => ReplCommand::Unknown(cmd),
             }
@@ -1336,6 +1379,21 @@ impl Repl {
                 Ok(false)
             }
 
+            ReplCommand::Messages => {
+                self.handle_messages()?;
+                Ok(false)
+            }
+
+            ReplCommand::Health => {
+                self.handle_health();
+                Ok(false)
+            }
+
+            ReplCommand::Usage => {
+                self.handle_usage()?;
+                Ok(false)
+            }
+
             ReplCommand::Help(topic) => {
                 print_help(topic.as_deref());
                 Ok(false)
@@ -1685,6 +1743,56 @@ impl Repl {
         Ok(())
     }
 
+    /// Show unread MPM messages from the messaging store.
+    fn handle_messages(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use commander_daemon::message_poller::MessagePoller;
+
+        let db_path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .join(".claude-mpm")
+            .join("messaging.db");
+
+        let poller = MessagePoller::new(db_path);
+
+        let messages = match poller.poll_unread() {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                println!("Failed to read messages: {}", e);
+                return Ok(());
+            }
+        };
+
+        let total = match poller.get_unread_count() {
+            Ok(n) => n,
+            Err(_) => messages.len() as u64,
+        };
+
+        if messages.is_empty() {
+            println!("No unread messages.");
+            return Ok(());
+        }
+
+        println!();
+        println!("Unread Messages ({})", total);
+        println!("{}", "-".repeat(26));
+
+        for (i, msg) in messages.iter().enumerate() {
+            let age = format_message_age(&msg.created_at);
+            let from = if msg.from_project.is_empty() {
+                "unknown"
+            } else {
+                &msg.from_project
+            };
+            println!();
+            println!("#{} [{}] From: {}", i + 1, msg.priority, from);
+            println!("   Subject: {}", msg.subject);
+            println!("   {}", age);
+        }
+
+        println!();
+        Ok(())
+    }
+
     /// Generate a pairing code for Telegram bot.
     fn generate_telegram_pairing(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Ensure telegram bot is running
@@ -1813,6 +1921,14 @@ impl Repl {
         }
 
         Ok(())
+    }
+
+    /// Handle /health command - runs startup health checks and prints a report.
+    fn handle_health(&self) {
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let checker = commander_daemon::HealthChecker::new(project_root);
+        let results = checker.run_all();
+        println!("{}", commander_daemon::HealthChecker::format_report(&results));
     }
 
     /// Handle /instances command - lists all registered projects.
@@ -1985,6 +2101,25 @@ impl Repl {
         {
             false
         }
+    }
+
+    /// Handle /usage — show Claude plan usage report.
+    fn handle_usage(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use commander_core::usage::UsageTracker;
+
+        let state_dir = commander_core::runtime_state_dir();
+        let mut tracker = UsageTracker::new(state_dir);
+
+        // Attempt to refresh plan info from `claude auth status`.
+        match tracker.refresh_plan_info() {
+            Ok(_) => {}
+            Err(e) => {
+                println!("(Could not fetch plan info: {})", e);
+            }
+        }
+
+        println!("{}", tracker.format_report());
+        Ok(())
     }
 }
 
@@ -2280,6 +2415,35 @@ fn is_ui_noise(line: &str) -> bool {
     false
 }
 
+/// Formats a message creation timestamp as a human-readable age string.
+///
+/// Accepts ISO-8601 or SQLite `datetime()` format strings.
+fn format_message_age(created_at: &str) -> String {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+
+    let dt: Option<DateTime<Utc>> = DateTime::parse_from_rfc3339(created_at)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(created_at, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|ndt| ndt.and_utc())
+        });
+
+    let Some(dt) = dt else {
+        return created_at.to_string();
+    };
+
+    let secs = Utc::now().signed_duration_since(dt).num_seconds();
+    match secs {
+        s if s < 0 => "just now".to_string(),
+        0..=59 => format!("{} seconds ago", secs),
+        60..=3599 => format!("{} minutes ago", secs / 60),
+        3600..=86399 => format!("{} hours ago", secs / 3600),
+        s => format!("{} days ago", s / 86400),
+    }
+}
+
 /// Finds help for a command by name or alias.
 fn find_command_help(name: &str) -> Option<&'static CommandHelp> {
     let name_lower = name.to_lowercase();
@@ -2349,6 +2513,9 @@ fn print_help(topic: Option<&str>) {
             println!("    @alias1 @alias2 message                  Send to multiple sessions");
             println!("    <message>                                Send to connected project (if any)");
             println!("    [disconnected] <message>                 Interpreted as Commander instruction");
+            println!();
+            println!("  MPM Messaging:");
+            println!("    /messages, /msgs                         Show unread MPM messages");
             println!();
             println!("  Telegram Integration:");
             println!("    /telegram                                Generate pairing code for Telegram bot");

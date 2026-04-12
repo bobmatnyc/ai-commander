@@ -21,6 +21,7 @@ pub mod options;
 pub mod output_filter;
 pub mod structured_summarizer;
 pub mod summarizer;
+pub mod usage;
 
 // Re-export commonly used items for convenience
 pub use config::{
