@@ -4,6 +4,8 @@
   import { botRunning, botPid } from '../stores/app';
   import { Power, Link, Check, X, Copy, CheckCheck } from 'lucide-svelte';
 
+  export let compact = false;
+
   interface TelegramConnection {
     connected: boolean;
     chat_ids: number[];
@@ -16,7 +18,6 @@
   let pairingCode = '';
   let generatingCode = false;
   let telegramConnection: TelegramConnection | null = null;
-  let checkingConnection = false;
   let copied = false;
   let starting = false;
   let stopping = false;
@@ -37,14 +38,11 @@
       return;
     }
 
-    checkingConnection = true;
     try {
       telegramConnection = await invoke('check_telegram_connection');
     } catch (err) {
       console.error('Failed to check telegram connection:', err);
       telegramConnection = null;
-    } finally {
-      checkingConnection = false;
     }
   }
 
@@ -55,7 +53,6 @@
       botRunning.set(info.running);
       botPid.set(info.pid);
 
-      // Check connection after starting
       setTimeout(checkTelegramConnection, 2000);
     } catch (err) {
       alert(`Failed to start bot: ${err}`);
@@ -100,7 +97,6 @@
     pairingCode = '';
     copied = false;
 
-    // Check if user connected after closing modal
     setTimeout(checkTelegramConnection, 1000);
   }
 
@@ -132,62 +128,107 @@
   });
 </script>
 
-<div class="bot-status">
-  <div class="status-row">
-    <div class="status-indicator">
-      <Power
-        size={16}
-        class={$botRunning ? 'text-green-500' : 'text-gray-400'}
-      />
-      <span class="status-text">
-        Bot {$botRunning ? 'Running' : 'Stopped'}
-      </span>
-      {#if $botPid}
-        <span class="pid">(PID: {$botPid})</span>
-      {/if}
-    </div>
+{#if compact}
+  <!-- Compact inline indicator for the header toolbar -->
+  <button
+    class="compact-indicator"
+    class:running={$botRunning}
+    on:click={$botRunning ? stopBot : startBot}
+    disabled={starting || stopping}
+    title={$botRunning
+      ? `Bot running (PID: ${$botPid}) — click to stop`
+      : 'Bot stopped — click to start'}
+  >
+    <Power size={10} />
+    {#if starting}
+      Starting…
+    {:else if stopping}
+      Stopping…
+    {:else}
+      Bot {$botRunning ? 'On' : 'Off'}
+    {/if}
+  </button>
 
-    <div class="connection-status" class:visible={$botRunning && telegramConnection}>
-      {#if $botRunning && telegramConnection}
-        {#if telegramConnection.connected}
-          <Check size={14} class="text-green-500" />
-          <span class="connected">Connected</span>
-          <span class="count">({telegramConnection.count} chat{telegramConnection.count !== 1 ? 's' : ''})</span>
-        {:else}
-          <X size={14} class="text-gray-400" />
-          <span class="not-connected">Not connected</span>
-        {/if}
-      {/if}
-    </div>
-  </div>
-
-  <div class="controls">
+  {#if $botRunning && telegramConnection?.connected}
     <button
-      on:click={startBot}
-      disabled={$botRunning || starting}
-      class="control-button start"
-      class:loading={starting}
-    >
-      {starting ? 'Starting...' : 'Start'}
-    </button>
-    <button
-      on:click={stopBot}
-      disabled={!$botRunning || stopping}
-      class="control-button stop"
-      class:loading={stopping}
-    >
-      {stopping ? 'Stopping...' : 'Stop'}
-    </button>
-    <button
+      class="compact-indicator running"
       on:click={generatePairingCode}
-      disabled={!$botRunning || generatingCode}
-      class="control-button pair"
+      disabled={generatingCode}
+      title={`Telegram connected (${telegramConnection.count} chat${telegramConnection.count !== 1 ? 's' : ''}) — click to pair`}
     >
-      <Link size={14} />
-      {generatingCode ? 'Generating...' : 'Pair'}
+      <Check size={10} />
+      TG
     </button>
+  {:else if $botRunning}
+    <button
+      class="compact-indicator"
+      on:click={generatePairingCode}
+      disabled={generatingCode}
+      title="Telegram not paired — click to generate pairing code"
+    >
+      <Link size={10} />
+      Pair
+    </button>
+  {/if}
+{:else}
+  <!-- Full panel mode (standalone use) -->
+  <div class="bot-status">
+    <div class="status-row">
+      <div class="status-indicator">
+        <Power
+          size={16}
+          class={$botRunning ? 'text-green-500' : 'text-gray-400'}
+        />
+        <span class="status-text">
+          Bot {$botRunning ? 'Running' : 'Stopped'}
+        </span>
+        {#if $botPid}
+          <span class="pid">(PID: {$botPid})</span>
+        {/if}
+      </div>
+
+      <div class="connection-status" class:visible={$botRunning && telegramConnection}>
+        {#if $botRunning && telegramConnection}
+          {#if telegramConnection.connected}
+            <Check size={14} class="text-green-500" />
+            <span class="connected">Connected</span>
+            <span class="count">({telegramConnection.count} chat{telegramConnection.count !== 1 ? 's' : ''})</span>
+          {:else}
+            <X size={14} class="text-gray-400" />
+            <span class="not-connected">Not connected</span>
+          {/if}
+        {/if}
+      </div>
+    </div>
+
+    <div class="controls">
+      <button
+        on:click={startBot}
+        disabled={$botRunning || starting}
+        class="control-button start"
+        class:loading={starting}
+      >
+        {starting ? 'Starting...' : 'Start'}
+      </button>
+      <button
+        on:click={stopBot}
+        disabled={!$botRunning || stopping}
+        class="control-button stop"
+        class:loading={stopping}
+      >
+        {stopping ? 'Stopping...' : 'Stop'}
+      </button>
+      <button
+        on:click={generatePairingCode}
+        disabled={!$botRunning || generatingCode}
+        class="control-button pair"
+      >
+        <Link size={14} />
+        {generatingCode ? 'Generating...' : 'Pair'}
+      </button>
+    </div>
   </div>
-</div>
+{/if}
 
 {#if showPairingModal}
   <div class="modal-overlay" on:click={closePairingModal} role="presentation">
@@ -232,6 +273,43 @@
 {/if}
 
 <style>
+  /* ── Compact mode ── */
+  .compact-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #6b7280;
+    padding: 0.2rem 0.5rem;
+    border-radius: 9999px;
+    background: #f3f4f6;
+    border: none;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    user-select: none;
+  }
+
+  .compact-indicator:hover:not(:disabled) {
+    background: #e5e7eb;
+    color: #374151;
+  }
+
+  .compact-indicator.running {
+    color: #059669;
+    background: #ecfdf5;
+  }
+
+  .compact-indicator.running:hover:not(:disabled) {
+    background: #d1fae5;
+  }
+
+  .compact-indicator:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  /* ── Full panel mode ── */
   .bot-status {
     display: flex;
     flex-direction: column;
@@ -274,7 +352,7 @@
     opacity: 0;
     visibility: hidden;
     transition: opacity 0.3s ease, visibility 0.3s ease;
-    min-width: 120px; /* Reserve space to prevent layout shift */
+    min-width: 120px;
   }
 
   .connection-status.visible {
@@ -354,14 +432,11 @@
   }
 
   @keyframes pulse {
-    0%, 100% {
-      opacity: 0.7;
-    }
-    50% {
-      opacity: 1;
-    }
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
   }
 
+  /* ── Pairing modal ── */
   .modal-overlay {
     position: fixed;
     top: 0;
