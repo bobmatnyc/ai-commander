@@ -14,6 +14,20 @@
   <path d="M 448 198 Q 396 136 334 148 Q 272 160 272 256 Q 272 352 334 364 Q 396 376 448 314"
         fill="none" stroke="#6366F1" stroke-width="48" stroke-linecap="round"/>
 
+  <!-- Robot head accent: top-center above letters -->
+  <g transform="translate(256, 68)">
+    <!-- Antenna -->
+    <line x1="0" y1="-28" x2="0" y2="-12" stroke="#A5B4FC" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="0" cy="-32" r="5" fill="#A5B4FC"/>
+    <!-- Head -->
+    <rect x="-24" y="-10" width="48" height="36" rx="8" ry="8" fill="#A5B4FC" opacity="0.9"/>
+    <!-- Eyes -->
+    <circle cx="-10" cy="6" r="5" fill="#1E1E2E"/>
+    <circle cx="10" cy="6" r="5" fill="#1E1E2E"/>
+    <!-- Mouth -->
+    <rect x="-8" y="16" width="16" height="3" rx="1.5" fill="#1E1E2E"/>
+  </g>
+
   <!-- Terminal cursor accent: solid indigo block bottom-left -->
   <rect x="52" y="398" width="36" height="46" rx="4" ry="4" fill="#A5B4FC" opacity="0.85"/>
 </svg>

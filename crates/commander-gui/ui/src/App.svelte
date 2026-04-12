@@ -1,20 +1,33 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import SessionList from './lib/components/SessionList.svelte';
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
   import BotStatus from './lib/components/BotStatus.svelte';
   import { RotateCw } from 'lucide-svelte';
 
-  function reloadUI() {
-    location.reload();
+  let rebuilding = false;
+
+  async function handleReload() {
+    if (rebuilding) return;
+
+    rebuilding = true;
+    try {
+      await invoke('rebuild_from_source');
+      // Build succeeded — reload the webview to pick up the new binary.
+      location.reload();
+    } catch (_e) {
+      // Source not available or build failed — fall back to a plain webview reload.
+      location.reload();
+    }
   }
 
   onMount(() => {
     function handleKeydown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key === 'r') {
         event.preventDefault();
-        reloadUI();
+        handleReload();
       }
     }
 
@@ -29,9 +42,11 @@
     <BotStatus />
     <button
       class="reload-btn"
-      on:click={reloadUI}
-      title="Reload UI (Cmd+R / Ctrl+R)"
-      aria-label="Reload UI"
+      class:spinning={rebuilding}
+      on:click={handleReload}
+      disabled={rebuilding}
+      title={rebuilding ? 'Building from source…' : 'Rebuild & reload (Cmd+R / Ctrl+R)'}
+      aria-label={rebuilding ? 'Building from source' : 'Rebuild and reload'}
     >
       <RotateCw size={16} />
     </button>
@@ -95,6 +110,20 @@
   .reload-btn:active {
     transform: rotate(180deg);
     background: #e5e7eb;
+  }
+
+  .reload-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .reload-btn.spinning :global(svg) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
   }
 
   .content {

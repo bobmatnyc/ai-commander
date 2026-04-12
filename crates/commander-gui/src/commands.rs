@@ -278,6 +278,51 @@ pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String>
 }
 
 #[tauri::command]
+pub async fn rebuild_from_source() -> Result<String, String> {
+    // CARGO_MANIFEST_DIR is embedded at compile time — it points to the
+    // commander-gui crate directory.  Walk up two levels to reach the
+    // workspace root that owns the top-level Cargo.toml.
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()           // crates/
+        .and_then(|p| p.parent()) // workspace root
+        .ok_or_else(|| "Cannot determine workspace root from CARGO_MANIFEST_DIR".to_string())?;
+
+    let workspace_cargo = workspace_root.join("Cargo.toml");
+    if !workspace_cargo.exists() {
+        return Err(format!(
+            "Source code not found: {} does not exist",
+            workspace_cargo.display()
+        ));
+    }
+
+    eprintln!(
+        "[GUI] rebuild_from_source: running cargo build in {}",
+        workspace_root.display()
+    );
+
+    let output = tokio::process::Command::new("cargo")
+        .args(["build", "-p", "commander-gui", "--release"])
+        .current_dir(workspace_root)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to spawn cargo: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}{}", stdout, stderr).trim().to_string();
+
+    if output.status.success() {
+        eprintln!("[GUI] rebuild_from_source: build succeeded");
+        Ok(combined)
+    } else {
+        let code = output.status.code().unwrap_or(-1);
+        eprintln!("[GUI] rebuild_from_source: build failed (exit {})", code);
+        Err(format!("Build failed (exit {}):\n{}", code, combined))
+    }
+}
+
+#[tauri::command]
 pub async fn create_session(
     name: String,
     directory: String,
