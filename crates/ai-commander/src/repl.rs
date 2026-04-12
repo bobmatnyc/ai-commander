@@ -940,8 +940,7 @@ impl Repl {
                 let id = project.as_ref().or(self.connected_project.as_ref());
                 match id {
                     Some(id) => {
-                        // Strip commander- prefix if present (user might use session name)
-                        let id = id.strip_prefix("commander-").unwrap_or(id);
+                        let id = id.as_str();
                         let projects = self.store.load_all_projects()?;
                         match projects
                             .values()
@@ -1113,10 +1112,10 @@ impl Repl {
                         let session_name = if let Some(session) = self.sessions.get(target) {
                             Some(session.clone())
                         } else {
-                            // Try commander- prefix
-                            let prefixed = format!("commander-{}", target);
-                            if tmux.session_exists(&prefixed) {
-                                Some(prefixed)
+                            // Try sanitized name
+                            let sanitized = target.replace([' ', '.', '/', ':'], "-");
+                            if tmux.session_exists(&sanitized) {
+                                Some(sanitized)
                             } else if tmux.session_exists(target) {
                                 Some(target.clone())
                             } else {
@@ -1166,13 +1165,16 @@ impl Repl {
                             } else {
                                 println!("Available tmux sessions:");
                                 for session in sessions {
-                                    let is_commander = session.name.starts_with("commander-");
                                     let is_connected = self.sessions.values().any(|s| s == &session.name);
+                                    let is_registered = self.sessions.values().any(|s| s == &session.name)
+                                        || self.store.load_all_projects().ok()
+                                            .map(|p| p.values().any(|proj| proj.name == session.name))
+                                            .unwrap_or(false);
 
                                     let marker = if is_connected { "*" } else { " " };
                                     let suffix = if is_connected {
                                         " (connected)"
-                                    } else if !is_commander {
+                                    } else if !is_registered {
                                         " (external)"
                                     } else {
                                         ""
@@ -1331,15 +1333,14 @@ impl Repl {
             }
 
             ConnectTarget::Existing(name) => {
-                // Strip commander- prefix if present (user might use session name)
-                let name = name.strip_prefix("commander-").unwrap_or(&name);
+                let name = name.as_str();
                 let projects = self.store.load_all_projects()?;
                 if let Some(project) = projects
                     .values()
                     .find(|p| p.name == name || p.id.as_str() == name)
                 {
                     // Check if session is already tracked locally
-                    let session_name = format!("commander-{}", project.name);
+                    let session_name = project.name.replace([' ', '.', '/', ':'], "-");
                     let already_tracked = self.sessions.contains_key(&project.name);
 
                     // Check if tmux session actually exists
@@ -1389,7 +1390,7 @@ impl Repl {
             return Err(e.into());
         }
 
-        let session_name = format!("commander-{}", name);
+        let session_name = name.replace([' ', '.', '/', ':'], "-");
 
         if let Some(tmux) = &self.tmux {
             // Check if session already exists
@@ -1435,7 +1436,7 @@ impl Repl {
 
     /// Stop a session: commit git changes and destroy tmux session.
     fn stop_session(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let session_name = format!("commander-{}", name);
+        let session_name = name.replace([' ', '.', '/', ':'], "-");
 
         // Find project path for git operations
         let project_path = {
@@ -1581,7 +1582,7 @@ impl Repl {
 
         // Don't require connected project - pairing authorizes for the whole instance
         let (project_name, session_name) = match &self.connected_project {
-            Some(p) => (p.clone(), format!("commander-{}", p)),
+            Some(p) => (p.clone(), p.replace([' ', '.', '/', ':'], "-")),
             None => (String::new(), String::new()),
         };
 

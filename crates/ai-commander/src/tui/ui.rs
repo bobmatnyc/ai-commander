@@ -86,7 +86,7 @@ fn draw_inspect(frame: &mut Frame, app: &App) {
 
     // Tmux content area
     let session_name = app.project.as_ref()
-        .map(|p| format!("commander-{}", p))
+        .map(|p| p.replace([' ', '.', '/', ':'], "-"))
         .unwrap_or_else(|| "none".to_string());
 
     let inner_height = chunks[1].height.saturating_sub(2) as usize;
@@ -525,8 +525,8 @@ mod tests {
 
     #[test]
     fn test_extract_clickable_session_claude() {
-        let result = extract_clickable_session("  [Claude] commander-myproject (connected) - Waiting for input");
-        assert_eq!(result, Some("commander-myproject".to_string()));
+        let result = extract_clickable_session("  [Claude] myproject (connected) - Waiting for input");
+        assert_eq!(result, Some("myproject".to_string()));
     }
 
     #[test]

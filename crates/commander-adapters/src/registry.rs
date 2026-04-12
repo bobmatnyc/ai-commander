@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::auggie::AuggieAdapter;
 use crate::claude_code::ClaudeCodeAdapter;
+use crate::codex::CodexAdapter;
 use crate::event_driven::EventDrivenAdapter;
 use crate::mpm::MpmAdapter;
 use crate::mpm_sdk::MpmSdkAdapter;
@@ -53,6 +55,12 @@ impl AdapterRegistry {
 
         let shell = Arc::new(ShellAdapter::new());
         adapters.insert(shell.info().id.clone(), shell);
+
+        let auggie = Arc::new(AuggieAdapter::new());
+        adapters.insert(auggie.info().id.clone(), auggie);
+
+        let codex = Arc::new(CodexAdapter::new());
+        adapters.insert(codex.info().id.clone(), codex);
 
         let mut event_driven: HashMap<String, Arc<dyn EventDrivenAdapter>> = HashMap::new();
         let mpm_sdk = Arc::new(MpmSdkAdapter::new());
@@ -138,6 +146,8 @@ impl AdapterRegistry {
             "mpm" => Some("mpm"),
             "mpm-sdk" => Some("mpm-sdk"),
             "shell" | "sh" | "bash" | "zsh" => Some("shell"),
+            "auggie" | "augment" => Some("auggie"),
+            "codex" => Some("codex"),
             _ => {
                 // Check if it's a registered adapter ID
                 if self.adapters.contains_key(alias) {
@@ -166,8 +176,8 @@ mod tests {
     fn test_registry_new() {
         let registry = AdapterRegistry::new();
         assert!(!registry.is_empty());
-        // claude-code, mpm, shell (terminal) + mpm-sdk (event-driven)
-        assert!(registry.len() >= 4);
+        // claude-code, mpm, shell, auggie, codex (terminal) + mpm-sdk (event-driven)
+        assert!(registry.len() >= 6);
     }
 
     #[test]
@@ -187,6 +197,8 @@ mod tests {
         assert!(list.contains(&"claude-code"));
         assert!(list.contains(&"mpm"));
         assert!(list.contains(&"shell"));
+        assert!(list.contains(&"auggie"));
+        assert!(list.contains(&"codex"));
         assert!(list.contains(&"mpm-sdk"));
     }
 
@@ -238,8 +250,33 @@ mod tests {
         assert_eq!(registry.resolve("bash"), Some("shell"));
         assert_eq!(registry.resolve("zsh"), Some("shell"));
 
+        // Test auggie aliases
+        assert_eq!(registry.resolve("auggie"), Some("auggie"));
+        assert_eq!(registry.resolve("augment"), Some("auggie"));
+
+        // Test codex alias
+        assert_eq!(registry.resolve("codex"), Some("codex"));
+
         // Test unknown alias
         assert_eq!(registry.resolve("unknown"), None);
+    }
+
+    #[test]
+    fn test_auggie_adapter() {
+        let registry = AdapterRegistry::new();
+
+        let adapter = registry.get("auggie");
+        assert!(adapter.is_some());
+        assert_eq!(adapter.unwrap().info().id, "auggie");
+    }
+
+    #[test]
+    fn test_codex_adapter() {
+        let registry = AdapterRegistry::new();
+
+        let adapter = registry.get("codex");
+        assert!(adapter.is_some());
+        assert_eq!(adapter.unwrap().info().id, "codex");
     }
 
     #[test]

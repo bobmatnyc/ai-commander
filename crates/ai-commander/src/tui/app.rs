@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn test_session_info() {
         let session = SessionInfo {
-            name: "commander-test".to_string(),
+            name: "test".to_string(),
             adapter: commander_core::Adapter::Claude,
             is_connected: false,
         };
@@ -488,12 +488,12 @@ mod tests {
         // Set up some test sessions
         app.session_list = vec![
             SessionInfo {
-                name: "commander-proj1".to_string(),
+                name: "proj1".to_string(),
                 adapter: commander_core::Adapter::Claude,
                 is_connected: false,
             },
             SessionInfo {
-                name: "commander-proj2".to_string(),
+                name: "proj2".to_string(),
                 adapter: commander_core::Adapter::Claude,
                 is_connected: true,
             },

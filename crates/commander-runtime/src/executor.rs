@@ -141,7 +141,7 @@ impl RuntimeExecutor {
         }
 
         // Generate session name from project
-        let session_name = format!("cmd-{}", project.name.replace([' ', '.', '/'], "-"));
+        let session_name = project.name.replace([' ', '.', '/', ':'], "-");
 
         // Get launch command
         let (cmd, args) = adapter.launch_command(&project.path);

@@ -6,10 +6,45 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::event::Event;
 use crate::ids::{EventId, MessageId, ProjectId, SessionId};
 use crate::work::WorkItem;
+
+/// Adapter type for a project's runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdapterType {
+    /// Claude Code adapter.
+    ClaudeCode,
+    /// Claude MPM adapter.
+    ClaudeMpm,
+    /// Auggie adapter.
+    Auggie,
+    /// Codex adapter.
+    Codex,
+    /// Shell adapter.
+    Shell,
+}
+
+impl Default for AdapterType {
+    fn default() -> Self {
+        Self::ClaudeCode
+    }
+}
+
+impl fmt::Display for AdapterType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ClaudeCode => write!(f, "claude-code"),
+            Self::ClaudeMpm => write!(f, "claude-mpm"),
+            Self::Auggie => write!(f, "auggie"),
+            Self::Codex => write!(f, "codex"),
+            Self::Shell => write!(f, "shell"),
+        }
+    }
+}
 
 /// State of a project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -193,6 +228,10 @@ pub struct Project {
     #[serde(default)]
     pub aliases: Vec<String>,
 
+    /// Adapter type for this project's runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_type: Option<AdapterType>,
+
     /// When the project was created.
     pub created_at: DateTime<Utc>,
 
@@ -220,6 +259,7 @@ impl Project {
             event_history: Vec::new(),
             thread: Vec::new(),
             aliases: Vec::new(),
+            adapter_type: None,
             created_at: Utc::now(),
             last_activity: None,
         }
@@ -338,6 +378,18 @@ impl Project {
         self.state = state;
         self.state_reason = reason;
         self.touch();
+    }
+
+    /// Returns the adapter type, defaulting to ClaudeCode if not set.
+    pub fn effective_adapter_type(&self) -> AdapterType {
+        self.adapter_type.unwrap_or_default()
+    }
+
+    /// Returns the tmux session name for this project.
+    /// Uses the project name directly (no prefix).
+    /// Sanitizes characters that tmux doesn't allow in session names.
+    pub fn session_name(&self) -> String {
+        self.name.replace([' ', '.', '/', ':'], "-")
     }
 }
 
@@ -715,7 +767,8 @@ mod tests {
 
     #[test]
     fn test_aliases_backward_compatible() {
-        // Old JSON without aliases field should deserialize with empty aliases
+        // Old JSON without aliases or adapter_type field should deserialize with empty aliases
+        // and adapter_type: None.
         let json = r#"{
             "id": "proj-123",
             "path": "/path",
@@ -734,5 +787,128 @@ mod tests {
 
         let project: Project = serde_json::from_str(json).unwrap();
         assert!(project.aliases.is_empty());
+        assert_eq!(project.adapter_type, None);
+    }
+
+    // === AdapterType Tests ===
+
+    #[test]
+    fn test_adapter_type_serialization_roundtrip() {
+        let cases = [
+            (AdapterType::ClaudeCode, "\"claude-code\""),
+            (AdapterType::ClaudeMpm, "\"claude-mpm\""),
+            (AdapterType::Auggie, "\"auggie\""),
+            (AdapterType::Codex, "\"codex\""),
+            (AdapterType::Shell, "\"shell\""),
+        ];
+
+        for (variant, expected_json) in cases {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_json, "serialization mismatch for {:?}", variant);
+
+            let deserialized: AdapterType = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, variant, "deserialization mismatch for {:?}", variant);
+        }
+    }
+
+    #[test]
+    fn test_adapter_type_display() {
+        assert_eq!(AdapterType::ClaudeCode.to_string(), "claude-code");
+        assert_eq!(AdapterType::ClaudeMpm.to_string(), "claude-mpm");
+        assert_eq!(AdapterType::Auggie.to_string(), "auggie");
+        assert_eq!(AdapterType::Codex.to_string(), "codex");
+        assert_eq!(AdapterType::Shell.to_string(), "shell");
+    }
+
+    #[test]
+    fn test_effective_adapter_type_default() {
+        let project = Project::new("/path", "test");
+        // adapter_type is None, so effective_adapter_type should default to ClaudeCode.
+        assert_eq!(project.adapter_type, None);
+        assert_eq!(project.effective_adapter_type(), AdapterType::ClaudeCode);
+    }
+
+    #[test]
+    fn test_effective_adapter_type_explicit() {
+        let mut project = Project::new("/path", "test");
+        project.adapter_type = Some(AdapterType::Shell);
+        assert_eq!(project.effective_adapter_type(), AdapterType::Shell);
+    }
+
+    #[test]
+    fn test_session_name_simple() {
+        let project = Project::new("/path", "my-project");
+        assert_eq!(project.session_name(), "my-project");
+    }
+
+    #[test]
+    fn test_session_name_sanitizes_spaces() {
+        let project = Project::new("/path", "my project");
+        assert_eq!(project.session_name(), "my-project");
+    }
+
+    #[test]
+    fn test_session_name_sanitizes_dots() {
+        let project = Project::new("/path", "my.project");
+        assert_eq!(project.session_name(), "my-project");
+    }
+
+    #[test]
+    fn test_session_name_sanitizes_slashes() {
+        let project = Project::new("/path", "org/repo");
+        assert_eq!(project.session_name(), "org-repo");
+    }
+
+    #[test]
+    fn test_session_name_sanitizes_colons() {
+        let project = Project::new("/path", "host:port");
+        assert_eq!(project.session_name(), "host-port");
+    }
+
+    #[test]
+    fn test_session_name_sanitizes_multiple_chars() {
+        let project = Project::new("/path", "my project/v1.0:beta");
+        assert_eq!(project.session_name(), "my-project-v1-0-beta");
+    }
+
+    #[test]
+    fn test_adapter_type_backward_compatible() {
+        // JSON with adapter_type field missing should deserialize with adapter_type: None.
+        let json = r#"{
+            "id": "proj-456",
+            "path": "/some/path",
+            "name": "my-project",
+            "state": "idle",
+            "config_loaded": false,
+            "config": {},
+            "sessions": {},
+            "work_queue": [],
+            "completed_work": [],
+            "pending_events": [],
+            "event_history": [],
+            "thread": [],
+            "aliases": [],
+            "created_at": "2024-06-01T00:00:00Z"
+        }"#;
+
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.adapter_type, None);
+        assert_eq!(project.effective_adapter_type(), AdapterType::ClaudeCode);
+    }
+
+    #[test]
+    fn test_adapter_type_not_serialized_when_none() {
+        let project = Project::new("/path", "test");
+        let json = serde_json::to_string(&project).unwrap();
+        // adapter_type: None should be skipped in serialized output.
+        assert!(!json.contains("adapter_type"));
+    }
+
+    #[test]
+    fn test_adapter_type_serialized_when_set() {
+        let mut project = Project::new("/path", "test");
+        project.adapter_type = Some(AdapterType::ClaudeMpm);
+        let json = serde_json::to_string(&project).unwrap();
+        assert!(json.contains("\"adapter_type\":\"claude-mpm\""));
     }
 }

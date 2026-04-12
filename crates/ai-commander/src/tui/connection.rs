@@ -22,8 +22,7 @@ impl App {
     /// 1. Try registered project (has adapter, path, etc.)
     /// 2. Try tmux session directly (if no project found)
     pub fn connect(&mut self, name: &str) -> Result<(), String> {
-        // Strip commander- prefix if present (user might use session name)
-        let base_name = name.strip_prefix("commander-").unwrap_or(name);
+        let base_name = name;
 
         // Load all projects
         let projects = self.store.load_all_projects()
@@ -47,7 +46,7 @@ impl App {
             // Validate project path still exists and is accessible
             validate_project_path(&project.path)?;
 
-            let session_name = format!("commander-{}", project.name);
+            let session_name = project.name.replace([' ', '.', '/', ':'], "-");
 
             // Check if tmux session exists
             if let Some(ref tmux) = self.tmux {
@@ -113,16 +112,14 @@ impl App {
         if let Some(ref tmux) = self.tmux {
             // Try multiple session name variants
             let session_candidates = [
-                format!("commander-{}", base_name),
+                base_name.replace([' ', '.', '/', ':'], "-"),
                 name.to_string(),
-                base_name.to_string(),
             ];
 
             for session_name in session_candidates {
                 if tmux.session_exists(&session_name) {
                     // Connect to tmux session (registered or not)
-                    let display_name = session_name.strip_prefix("commander-")
-                        .unwrap_or(&session_name);
+                    let display_name = &session_name;
 
                     // Detect adapter type from screen content
                     let adapter = tmux.capture_output(&session_name, None, Some(50))
@@ -245,10 +242,7 @@ impl App {
                 if output.status.success() {
                     let session = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if !session.is_empty() {
-                        // Strip "commander-" prefix if present for consistency
-                        return Some(session.strip_prefix("commander-")
-                            .unwrap_or(&session)
-                            .to_string());
+                        return Some(session);
                     }
                 }
             }
@@ -281,12 +275,8 @@ impl App {
             return;
         };
 
-        // Determine new session name (add commander- prefix if old had it)
-        let new_session = if old_session.starts_with("commander-") {
-            format!("commander-{}", new_name)
-        } else {
-            new_name.to_string()
-        };
+        // Determine new session name (sanitize for tmux)
+        let new_session = new_name.replace([' ', '.', '/', ':'], "-");
 
         // Run tmux rename-session
         match std::process::Command::new("tmux")
@@ -299,20 +289,17 @@ impl App {
                     old_session, new_session
                 )));
 
-                // Update internal tracking if this was a commander session
-                if let Some(old_project) = old_session.strip_prefix("commander-") {
-                    // Remove old mapping
-                    self.sessions.remove(old_project);
-                    // Add new mapping
-                    self.sessions.insert(new_name.to_string(), new_session.clone());
+                // Update internal tracking
+                let old_project = old_session.as_str();
+                self.sessions.remove(old_project);
+                self.sessions.insert(new_name.to_string(), new_session.clone());
 
-                    // Update connected project if it was the old one
-                    if self.project.as_deref() == Some(old_project) {
-                        self.project = Some(new_name.to_string());
-                        self.messages.push(Message::system(format!(
-                            "Updated connection to '{}'", new_name
-                        )));
-                    }
+                // Update connected project if it was the old one
+                if self.project.as_deref() == Some(old_project) {
+                    self.project = Some(new_name.to_string());
+                    self.messages.push(Message::system(format!(
+                        "Updated connection to '{}'", new_name
+                    )));
                 }
             }
             Ok(output) => {
@@ -331,9 +318,7 @@ impl App {
 
     /// Stop a session: commit git changes and destroy tmux session.
     pub fn stop_session(&mut self, name: &str) {
-        // Strip commander- prefix if present (user might use session name)
-        let name = name.strip_prefix("commander-").unwrap_or(name);
-        let session_name = format!("commander-{}", name);
+        let session_name = name.replace([' ', '.', '/', ':'], "-");
 
         // Find project path for git operations
         let project_path = {

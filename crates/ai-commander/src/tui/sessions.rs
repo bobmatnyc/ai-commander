@@ -97,7 +97,7 @@ impl App {
             // Use the actual session name (might be commander-prefixed or not)
             let session_name = self.sessions.get(&name)
                 .cloned()
-                .unwrap_or_else(|| format!("commander-{}", name));
+                .unwrap_or_else(|| name.replace([' ', '.', '/', ':'], "-"));
             if let Err(e) = commander_telegram::notify_session_ready(
                 &session_name,
                 if preview.is_empty() { None } else { Some(&preview) }
@@ -154,7 +154,7 @@ impl App {
         }
 
         // Exclude currently connected session
-        let connected = self.project.as_ref().map(|p| format!("commander-{}", p));
+        let connected = self.project.as_ref().map(|p| p.replace([' ', '.', '/', ':'], "-"));
         if let Some(ref conn) = connected {
             current_waiting.remove(conn);
         }
@@ -183,7 +183,7 @@ impl App {
             self.messages.push(Message::system(header));
 
             for name in &newly_waiting {
-                let display_name = name.strip_prefix("commander-").unwrap_or(name);
+                let display_name = name.as_str();
                 let preview = waiting_previews.get(name).map(|s| s.as_str()).unwrap_or("");
 
                 // Parse and convert to conversational format
@@ -214,7 +214,7 @@ impl App {
         // Report sessions that resumed work (conversational)
         if !no_longer_waiting.is_empty() && no_longer_waiting.len() <= 3 {
             for name in &no_longer_waiting {
-                let display_name = name.strip_prefix("commander-").unwrap_or(name);
+                let display_name = name.as_str();
                 self.messages.push(Message::system(format!(
                     "Session \"{}\" resumed work",
                     display_name
@@ -278,9 +278,7 @@ impl App {
     /// Connect to the currently selected session.
     pub fn connect_selected_session(&mut self) {
         if let Some(session) = self.session_list.get(self.session_selected) {
-            // Extract display name (strip commander- prefix if present)
-            let display_name = session.name.strip_prefix("commander-")
-                .unwrap_or(&session.name).to_string();
+            let display_name = session.name.clone();
 
             // Look up project path if this is a registered project
             let path = self.store.load_all_projects().ok()
@@ -309,11 +307,10 @@ impl App {
                     self.messages.push(Message::system(format!("Failed to delete: {}", e)));
                 } else {
                     // Remove from tracking if it was ours
-                    if let Some(proj) = session.name.strip_prefix("commander-") {
-                        self.sessions.remove(proj);
-                        if self.project.as_deref() == Some(proj) {
-                            self.project = None;
-                        }
+                    let proj = session.name.as_str();
+                    self.sessions.remove(proj);
+                    if self.project.as_deref() == Some(proj) {
+                        self.project = None;
                     }
                     self.refresh_session_list();
                     // Adjust selection if needed

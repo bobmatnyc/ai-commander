@@ -123,7 +123,7 @@ impl App {
 
                         // Check for project aliases
                         let alias_info = if let Some(ref projs) = projects {
-                            let project_name = session.name.strip_prefix("commander-").unwrap_or(&session.name);
+                            let project_name = session.name.as_str();
                             projs.values()
                                 .find(|p| p.name == project_name)
                                 .and_then(|p| {
@@ -163,7 +163,7 @@ impl App {
                     // Check if we're stopping the session we're running in
                     let current_session = self.get_current_tmux_session();
                     let stopping_self = current_session.as_ref() == Some(&name)
-                        || current_session.as_ref().map(|s| s == &format!("commander-{}", name)).unwrap_or(false);
+                        || current_session.as_ref().map(|s| s == &name.replace([' ', '.', '/', ':'], "-")).unwrap_or(false);
 
                     if stopping_self {
                         self.messages.push(Message::system(format!("Stopping current session '{}'...", name)));
@@ -242,7 +242,7 @@ impl App {
         match name {
             Some(name) => {
                 // Check if session exists
-                let session_name = format!("commander-{}", name);
+                let session_name = name.replace([' ', '.', '/', ':'], "-");
                 let session_exists = self.tmux.as_ref()
                     .map(|t| t.session_exists(&session_name))
                     .unwrap_or(false);
@@ -345,7 +345,7 @@ impl App {
         }
 
         let (project_name, session_name) = match &self.project {
-            Some(p) => (p.clone(), format!("commander-{}", p)),
+            Some(p) => (p.clone(), p.replace([' ', '.', '/', ':'], "-")),
             None => (String::new(), String::new()),
         };
 
@@ -384,10 +384,10 @@ impl App {
                         let session_name = if let Some(session) = sessions.get(target) {
                             Some(session.clone())
                         } else {
-                            // Try commander- prefix
-                            let prefixed = format!("commander-{}", target);
-                            if tmux.session_exists(&prefixed) {
-                                Some(prefixed)
+                            // Try sanitized name
+                            let sanitized = target.replace([' ', '.', '/', ':'], "-");
+                            if tmux.session_exists(&sanitized) {
+                                Some(sanitized)
                             } else if tmux.session_exists(target) {
                                 Some(target.clone())
                             } else {

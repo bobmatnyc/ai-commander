@@ -30,7 +30,9 @@
 //! println!("State: {:?}, Confidence: {}", analysis.state, analysis.confidence);
 //! ```
 
+pub mod auggie;
 pub mod claude_code;
+pub mod codex;
 pub mod event_driven;
 pub mod mpm;
 pub mod mpm_sdk;
@@ -39,7 +41,9 @@ pub mod registry;
 pub mod shell;
 pub mod traits;
 
+pub use auggie::AuggieAdapter;
 pub use claude_code::ClaudeCodeAdapter;
+pub use codex::CodexAdapter;
 pub use event_driven::{EventDrivenAdapter, EventStream, RuntimeEvent, SessionHandle};
 pub use mpm::MpmAdapter;
 pub use mpm_sdk::MpmSdkAdapter;
