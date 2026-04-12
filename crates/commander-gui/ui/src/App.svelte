@@ -5,7 +5,12 @@
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
   import BotStatus from './lib/components/BotStatus.svelte';
-  import { RotateCw } from 'lucide-svelte';
+  import { RotateCw, Sun, Moon } from 'lucide-svelte';
+  import { resolvedTheme, setTheme } from './lib/stores/theme';
+
+  function toggleTheme() {
+    setTheme($resolvedTheme === 'dark' ? 'light' : 'dark');
+  }
 
   let rebuilding = false;
   let apiRunning = false;
@@ -71,6 +76,18 @@
 
     <div class="header-right">
       <button
+        class="theme-btn"
+        on:click={toggleTheme}
+        title="Toggle theme"
+        aria-label="Toggle light/dark theme"
+      >
+        {#if $resolvedTheme === 'dark'}
+          <Sun size={14} />
+        {:else}
+          <Moon size={14} />
+        {/if}
+      </button>
+      <button
         class="reload-btn"
         class:spinning={rebuilding}
         on:click={handleReload}
@@ -96,19 +113,45 @@
 </main>
 
 <style>
+  /* ── Theme CSS variables ── */
+  :root, [data-theme="dark"] {
+    --bg-primary: #1e1e2e;
+    --bg-secondary: #181825;
+    --bg-surface: #313244;
+    --text-primary: #cdd6f4;
+    --text-secondary: #a6adc8;
+    --border: #45475a;
+    --accent: #6366f1;
+    --header-bg: #181825;
+    --header-border: #313244;
+  }
+
+  [data-theme="light"] {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f8fafc;
+    --bg-surface: #f1f5f9;
+    --text-primary: #1e293b;
+    --text-secondary: #64748b;
+    --border: #e2e8f0;
+    --accent: #6366f1;
+    --header-bg: #ffffff;
+    --header-border: #e2e8f0;
+  }
+
   .app {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    background-color: white;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
   }
 
   header {
     display: flex;
     align-items: center;
     padding: 0.5rem 1rem;
-    border-bottom: 1px solid #e5e7eb;
-    background-color: white;
+    border-bottom: 1px solid var(--header-border);
+    background-color: var(--header-bg);
     gap: 0.75rem;
     min-height: 3rem;
   }
@@ -124,13 +167,16 @@
   }
 
   .header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
     flex-shrink: 0;
   }
 
   h1 {
     font-size: 1.125rem;
     font-weight: 700;
-    color: #1f2937;
+    color: var(--text-primary);
     margin: 0;
   }
 
@@ -145,10 +191,10 @@
     align-items: center;
     gap: 0.25rem;
     font-size: 0.7rem;
-    color: #6b7280;
+    color: var(--text-secondary);
     padding: 0.2rem 0.5rem;
     border-radius: 9999px;
-    background: #f3f4f6;
+    background: var(--bg-surface);
     font-weight: 500;
     user-select: none;
   }
@@ -167,29 +213,31 @@
     flex-shrink: 0;
   }
 
+  .theme-btn,
   .reload-btn {
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0.3rem;
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border);
     border-radius: 0.375rem;
     background: transparent;
-    color: #6b7280;
+    color: var(--text-secondary);
     cursor: pointer;
     transition: all 0.2s;
     flex-shrink: 0;
   }
 
+  .theme-btn:hover,
   .reload-btn:hover {
-    background: #f3f4f6;
-    border-color: #9ca3af;
-    color: #374151;
+    background: var(--bg-surface);
+    border-color: var(--text-secondary);
+    color: var(--text-primary);
   }
 
   .reload-btn:active {
     transform: rotate(180deg);
-    background: #e5e7eb;
+    background: var(--bg-surface);
   }
 
   .reload-btn:disabled {
@@ -214,7 +262,7 @@
 
   aside {
     width: 250px;
-    border-right: 1px solid #e5e7eb;
+    border-right: 1px solid var(--border);
     overflow-y: auto;
   }
 

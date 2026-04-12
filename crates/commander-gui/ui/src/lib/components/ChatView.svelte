@@ -259,7 +259,7 @@
     display: flex;
     flex-direction: column;
     position: relative;
-    background-color: #1e1e2e;
+    background-color: var(--bg-primary);
     overflow: hidden;
   }
 
@@ -268,17 +268,17 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid #313244;
-    background-color: #181825;
+    border-bottom: 1px solid var(--border);
+    background-color: var(--bg-secondary);
     flex-shrink: 0;
   }
 
   .tab {
     padding: 0.3rem 0.75rem;
-    border: 1px solid #45475a;
+    border: 1px solid var(--border);
     border-radius: 0.25rem;
-    background-color: #181825;
-    color: #cdd6f4;
+    background-color: var(--bg-secondary);
+    color: var(--text-primary);
     font-size: 0.75rem;
     font-weight: 500;
     cursor: pointer;
@@ -286,12 +286,12 @@
   }
 
   .tab:hover:not(:disabled) {
-    background-color: #313244;
-    border-color: #6c7086;
+    background-color: var(--bg-surface);
+    border-color: var(--text-secondary);
   }
 
   .tab:active:not(:disabled) {
-    background-color: #45475a;
+    background-color: var(--bg-surface);
   }
 
   .tab:disabled {
@@ -342,8 +342,8 @@
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
     font-size: 13px;
     line-height: 1.6;
-    color: #cdd6f4;
-    background: #1e1e2e;
+    color: var(--text-primary);
+    background: var(--bg-primary);
   }
 
   .terminal-output::-webkit-scrollbar {
@@ -351,11 +351,11 @@
   }
 
   .terminal-output::-webkit-scrollbar-track {
-    background: #1e1e2e;
+    background: var(--bg-primary);
   }
 
   .terminal-output::-webkit-scrollbar-thumb {
-    background: #45475a;
+    background: var(--border);
     border-radius: 3px;
   }
 
@@ -371,12 +371,12 @@
   }
 
   .line-prefix {
-    color: #6c7086;
+    color: var(--text-secondary);
     user-select: none;
   }
 
   .line-content {
-    color: #cdd6f4;
+    color: var(--text-primary);
   }
 
   .sent-text {
@@ -390,7 +390,7 @@
   }
 
   .terminal-empty {
-    color: #6c7086;
+    color: var(--text-secondary);
     font-style: italic;
     padding: 0.5rem 0;
   }
@@ -400,8 +400,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #1e1e2e;
-    color: #6c7086;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
     font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
     font-size: 0.875rem;
   }

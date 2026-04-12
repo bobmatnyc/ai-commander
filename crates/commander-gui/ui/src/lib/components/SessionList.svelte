@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { sessions, currentSession, sessionMessages, addMessageToSession } from '../stores/app';
-  import { Activity, Plus } from 'lucide-svelte';
+  import { Activity, Plus, Terminal } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
 
@@ -79,6 +79,10 @@
     }
   }
 
+  async function openInIterm(sessionName: string) {
+    await invoke('open_in_iterm', { sessionName });
+  }
+
   function handleSessionCreated() {
     showCreateModal = false;
     loadSessions();
@@ -109,17 +113,25 @@
   {/if}
   <div class="session-items">
     {#each $sessions as session}
-      <button
+      <div
         class="session-item"
         class:active={$currentSession?.name === session.name}
-        on:click={() => connect(session.name)}
       >
-        <span class="session-name">{getDisplayName(session.name)}</span>
-        <Activity
-          size={16}
-          class={session.is_connected ? 'text-green-500' : 'text-gray-400'}
-        />
-      </button>
+        <button class="session-main" on:click={() => connect(session.name)}>
+          <span class="session-name">{getDisplayName(session.name)}</span>
+          <Activity
+            size={16}
+            class={session.is_connected ? 'text-green-500' : 'text-gray-400'}
+          />
+        </button>
+        <button
+          class="iterm-btn"
+          on:click|stopPropagation={() => openInIterm(session.name)}
+          title="Open in iTerm2"
+        >
+          <Terminal size={14} />
+        </button>
+      </div>
     {:else}
       <div class="no-sessions">
         <p class="text-gray-500 text-sm">No sessions available</p>
@@ -138,7 +150,7 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    background-color: #fafafa;
+    background-color: var(--bg-secondary);
   }
 
   .error-banner {
@@ -156,14 +168,14 @@
     justify-content: space-between;
     align-items: center;
     padding: 0.75rem 1rem;
-    border-bottom: 1px solid #e5e7eb;
-    background-color: white;
+    border-bottom: 1px solid var(--border);
+    background-color: var(--bg-primary);
   }
 
   .header-title {
     font-size: 1.125rem;
     font-weight: 600;
-    color: #1f2937;
+    color: var(--text-primary);
     margin: 0;
   }
 
@@ -172,7 +184,7 @@
     align-items: center;
     gap: 0.25rem;
     padding: 0.375rem 0.75rem;
-    background: #3b82f6;
+    background: var(--accent);
     color: white;
     border: none;
     border-radius: 6px;
@@ -183,7 +195,7 @@
   }
 
   .create-btn:hover {
-    background: #2563eb;
+    filter: brightness(1.1);
   }
 
   .session-items {
@@ -194,37 +206,76 @@
 
   .session-item {
     display: flex;
-    justify-content: space-between;
     align-items: center;
     width: 100%;
-    padding: 0.75rem 1rem;
     margin-bottom: 0.5rem;
-    border: none;
+    border: 1px solid transparent;
     border-radius: 0.5rem;
-    background-color: white;
-    cursor: pointer;
+    background-color: var(--bg-primary);
     transition: all 0.2s;
-    text-align: left;
   }
 
   .session-item:hover {
-    background-color: #f3f4f6;
+    background-color: var(--bg-surface);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   }
 
   .session-item.active {
-    background-color: #dbeafe;
-    border: 1px solid #3b82f6;
+    background-color: var(--bg-surface);
+    border-color: var(--accent);
+  }
+
+  .session-main {
+    display: flex;
+    flex: 1;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+    min-width: 0;
   }
 
   .session-name {
     font-size: 0.875rem;
     font-weight: 500;
-    color: #1f2937;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .iterm-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.375rem;
+    margin-right: 0.375rem;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    flex-shrink: 0;
+  }
+
+  .session-item:hover .iterm-btn {
+    opacity: 1;
+  }
+
+  .iterm-btn:hover {
+    background: var(--bg-surface);
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   .no-sessions {
     padding: 2rem 1rem;
     text-align: center;
+    color: var(--text-secondary);
   }
 </style>

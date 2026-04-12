@@ -184,35 +184,36 @@
     display: flex;
     gap: 0.5rem;
     padding: 0.75rem 1rem;
-    border-top: 1px solid #313244;
-    background-color: #181825;
+    border-top: 1px solid var(--border);
+    background-color: var(--bg-secondary);
   }
 
   .input-field {
     flex: 1;
     padding: 0.625rem 0.875rem;
-    border: 1px solid #45475a;
+    border: 1px solid var(--border);
     border-radius: 0.375rem;
     font-size: 0.875rem;
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
-    background: #1e1e2e;
-    color: #cdd6f4;
+    background: var(--bg-primary);
+    color: var(--text-primary);
     outline: none;
     transition: border-color 0.15s, background 0.15s;
   }
 
   .input-field::placeholder {
-    color: #6c7086;
+    color: var(--text-secondary);
   }
 
   .input-field:focus {
-    border-color: #89b4fa;
+    border-color: var(--accent);
   }
 
   .input-field:disabled {
-    background-color: #181825;
-    color: #585b70;
+    background-color: var(--bg-secondary);
+    color: var(--text-secondary);
     cursor: not-allowed;
+    opacity: 0.6;
   }
 
   .input-field.slash-command {
@@ -230,8 +231,8 @@
     padding: 0.625rem 0.875rem;
     border: none;
     border-radius: 0.375rem;
-    background-color: #89b4fa;
-    color: #1e1e2e;
+    background-color: var(--accent);
+    color: white;
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -241,12 +242,12 @@
   }
 
   .send-button:hover:not(:disabled) {
-    background-color: #b4befe;
+    filter: brightness(1.15);
   }
 
   .send-button:disabled {
-    background-color: #313244;
-    color: #6c7086;
+    background-color: var(--bg-surface);
+    color: var(--text-secondary);
     cursor: not-allowed;
   }
 
