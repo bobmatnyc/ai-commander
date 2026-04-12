@@ -389,7 +389,7 @@ pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String>
 }
 
 #[tauri::command]
-pub async fn rebuild_from_source() -> Result<String, String> {
+pub async fn rebuild_from_source(app: tauri::AppHandle) -> Result<String, String> {
     // CARGO_MANIFEST_DIR is embedded at compile time — it points to the
     // commander-gui crate directory.  Walk up two levels to reach the
     // workspace root that owns the top-level Cargo.toml.
@@ -407,30 +407,33 @@ pub async fn rebuild_from_source() -> Result<String, String> {
         ));
     }
 
+    let gui_dir = workspace_root.join("crates/commander-gui");
+
     eprintln!(
-        "[GUI] rebuild_from_source: running cargo build in {}",
+        "[GUI] rebuild_from_source: spawning cargo tauri build (fire-and-forget) in {}",
         workspace_root.display()
     );
 
-    let output = tokio::process::Command::new("cargo")
-        .args(["build", "-p", "commander-gui", "--release"])
+    // Build frontend first, then cargo tauri build — fire and forget
+    let script = format!(
+        "cd {:?}/ui && npm run build && cd {:?} && cargo tauri build --bundles app",
+        gui_dir, gui_dir
+    );
+
+    std::process::Command::new("sh")
+        .args(["-c", &script])
         .current_dir(workspace_root)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to spawn cargo: {}", e))?;
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn rebuild: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = format!("{}{}", stdout, stderr).trim().to_string();
+    eprintln!("[GUI] rebuild_from_source: build spawned, quitting app");
 
-    if output.status.success() {
-        eprintln!("[GUI] rebuild_from_source: build succeeded");
-        Ok(combined)
-    } else {
-        let code = output.status.code().unwrap_or(-1);
-        eprintln!("[GUI] rebuild_from_source: build failed (exit {})", code);
-        Err(format!("Build failed (exit {}):\n{}", code, combined))
-    }
+    // Quit the app so the new build replaces it
+    app.exit(0);
+
+    Ok("Rebuilding... app will quit now.".to_string())
 }
 
 #[tauri::command]
