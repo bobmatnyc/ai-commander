@@ -12,7 +12,7 @@
   let isSending = false;
 
   $: isDisabled = !$currentSession || isSending;
-  $: isSlashCommand = input.trim().startsWith('/') && !input.trim().startsWith('/send ');
+  $: isSlashCommand = input.trim().startsWith('/') && !input.trim().startsWith('/aic:send ');
 
   async function handleSlashCommand(command: string) {
     const sessionName = $currentSession?.name;
@@ -24,10 +24,9 @@
     try {
       switch (cmd) {
         case '/status':
-          await invoke('send_message', { content: '/status' });
           addMessageToSession(sessionName, {
             direction: 'system',
-            content: 'Sent status command',
+            content: `Session: ${sessionName}\nStatus: Connected\nAdapter: ${$currentSession?.name || 'unknown'}`,
             timestamp: new Date(),
           });
           break;
@@ -80,9 +79,27 @@
   /stop - Stop this session
   /clear - Clear message history
   /help - Show this help
-  /send <text> - Send literal text (bypass interpreter)`,
+  /iterm - Open session in iTerm2
+  /aic:send <text> - Send raw text to tmux (bypass command handler)`,
             timestamp: new Date(),
           });
+          break;
+
+        case '/iterm':
+          try {
+            await invoke('open_in_iterm', { sessionName });
+            addMessageToSession(sessionName, {
+              direction: 'system',
+              content: 'Opening session in iTerm2...',
+              timestamp: new Date(),
+            });
+          } catch (e) {
+            addMessageToSession(sessionName, {
+              direction: 'system',
+              content: `Failed to open iTerm2: ${e}`,
+              timestamp: new Date(),
+            });
+          }
           break;
 
         default:
@@ -112,8 +129,8 @@
 
     try {
       if (content.startsWith('/')) {
-        if (content.startsWith('/send ')) {
-          const actualContent = content.substring(6);
+        if (content.startsWith('/aic:send ')) {
+          const actualContent = content.substring(10);
           await invoke('send_message', { content: actualContent });
           addMessageToSession(sessionName, {
             direction: 'sent',

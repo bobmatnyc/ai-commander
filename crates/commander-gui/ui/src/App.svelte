@@ -63,7 +63,8 @@
 <main class="app">
   <header>
     <div class="header-left">
-      <h1>AIC</h1>
+      <img src="/aic-logo.svg" alt="AIC" class="header-logo" />
+      <h1>AI Commander</h1>
     </div>
 
     <div class="header-center">
@@ -158,6 +159,15 @@
 
   .header-left {
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .header-logo {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
   }
 
   .header-center {
