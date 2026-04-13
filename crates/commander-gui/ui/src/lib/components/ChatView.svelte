@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
-  import { ArrowDown } from 'lucide-svelte';
+  import { ArrowDown, Terminal } from 'lucide-svelte';
 
   let terminalEl: HTMLDivElement;
   let autoScroll = true;
@@ -115,6 +115,19 @@
     }
   }
 
+  async function handleOpenIterm() {
+    if (!$currentSession) return;
+    try {
+      await invoke('open_in_iterm', { sessionName: $currentSession.name });
+    } catch (err) {
+      addMessageToSession($currentSession.name, {
+        direction: 'system',
+        content: `Failed to open iTerm2: ${err}`,
+        timestamp: new Date(),
+      });
+    }
+  }
+
   onMount(() => {
     connecting = true;
 
@@ -204,6 +217,14 @@
         title="Disconnect from this session"
       >
         Disconnect
+      </button>
+      <button
+        class="tab iterm-tab"
+        on:click={handleOpenIterm}
+        title="Open in iTerm2 (tmux attach)"
+      >
+        <Terminal size={12} />
+        iTerm2
       </button>
 
       {#if connecting}
@@ -297,6 +318,21 @@
   .tab:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  .iterm-tab {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: auto;
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .iterm-tab:hover {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
   }
 
   .status-badge {
