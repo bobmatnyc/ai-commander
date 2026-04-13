@@ -5,9 +5,13 @@
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
   import BotStatus from './lib/components/BotStatus.svelte';
+  import MonitorView from './lib/components/MonitorView.svelte';
   import { RotateCw, Sun, Moon } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
   import { currentSession } from './lib/stores/app';
+
+  type SidebarView = 'sessions' | 'monitor';
+  let currentView: SidebarView = 'sessions';
 
   function toggleTheme() {
     setTheme($resolvedTheme === 'dark' ? 'light' : 'dark');
@@ -104,7 +108,28 @@
 
   <div class="content">
     <aside>
-      <SessionList />
+      <nav class="sidebar-nav">
+        <button
+          class="nav-tab"
+          class:active={currentView === 'sessions'}
+          on:click={() => currentView = 'sessions'}
+        >
+          Sessions
+        </button>
+        <button
+          class="nav-tab"
+          class:active={currentView === 'monitor'}
+          on:click={() => currentView = 'monitor'}
+        >
+          Monitor
+        </button>
+      </nav>
+
+      {#if currentView === 'sessions'}
+        <SessionList />
+      {:else if currentView === 'monitor'}
+        <MonitorView />
+      {/if}
     </aside>
 
     <section class="main-panel">
@@ -326,7 +351,41 @@
   aside {
     width: 250px;
     border-right: 1px solid var(--border);
-    overflow-y: auto;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .sidebar-nav {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    background-color: var(--bg-primary);
+    flex-shrink: 0;
+  }
+
+  .nav-tab {
+    flex: 1;
+    padding: 0.5rem 0.25rem;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+    border-bottom: 2px solid transparent;
+    letter-spacing: 0.01em;
+  }
+
+  .nav-tab:hover {
+    color: var(--text-primary);
+    background: var(--bg-surface);
+  }
+
+  .nav-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    background: transparent;
   }
 
   .main-panel {
@@ -334,5 +393,12 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  /* Ensure sidebar view components fill the remaining aside space */
+  aside :global(.session-list),
+  aside :global(.monitor-view) {
+    flex: 1;
+    min-height: 0;
   }
 </style>
