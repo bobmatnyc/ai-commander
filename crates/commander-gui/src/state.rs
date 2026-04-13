@@ -1,7 +1,6 @@
 use anyhow::Result;
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tauri::async_runtime::JoinHandle;
 
@@ -11,10 +10,6 @@ pub struct GuiState {
     pub tmux: Option<Arc<TmuxOrchestrator>>,
     pub current_session: Arc<RwLock<Option<String>>>,
     pub bot_status: Arc<RwLock<DaemonStatus>>,
-    /// Maps GUI session name → mpm serve UUID for sessions created via the serve API.
-    /// When a session is in this map, `send_message_streaming` uses the UUID for REST calls
-    /// instead of falling through to tmux.
-    pub serve_session_ids: Arc<RwLock<HashMap<String, String>>>,
     /// Handle to the running API server task (abort on shutdown).
     pub api_server_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     /// Handle to the running daemon service task (abort on shutdown).
@@ -42,7 +37,6 @@ impl GuiState {
                 running: false,
                 pid: None,
             })),
-            serve_session_ids: Arc::new(RwLock::new(HashMap::new())),
             api_server_handle: Arc::new(RwLock::new(None)),
             daemon_handle: Arc::new(RwLock::new(None)),
         })

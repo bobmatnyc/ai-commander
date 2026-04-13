@@ -36,6 +36,61 @@ fn hash_str(s: &str) -> u64 {
     hasher.finish()
 }
 
+/// Strip ANSI escape sequences from tmux output for cleaner display.
+fn strip_ansi(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Skip ESC sequence: ESC [ ... <terminator-letter>
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            // Other ESC sequences (e.g. ESC M, ESC =) are consumed with the ESC char.
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Box-drawing Unicode ranges used by Claude Code's TUI chrome.
+const BOX_DRAWING_START: char = '\u{2500}';
+const BOX_DRAWING_END: char = '\u{257F}';
+const BOX_ELEMENT_START: char = '\u{2580}';
+const BOX_ELEMENT_END: char = '\u{259F}';
+
+/// Return true if the line is pure UI chrome that should be suppressed.
+fn is_ui_noise(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Lines composed entirely of box-drawing / block-element characters and whitespace.
+    trimmed.chars().all(|c| {
+        c.is_whitespace()
+            || (c >= BOX_DRAWING_START && c <= BOX_DRAWING_END)
+            || (c >= BOX_ELEMENT_START && c <= BOX_ELEMENT_END)
+    })
+}
+
+/// Strip ANSI codes from `input` and remove pure UI-chrome lines.
+fn clean_output(input: &str) -> String {
+    let stripped = strip_ansi(input);
+    stripped
+        .lines()
+        .filter(|line| !is_ui_noise(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub async fn start_session_polling(app: AppHandle, state: GuiState) {
     let session_states: Arc<Mutex<HashMap<String, SessionState>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -44,8 +99,12 @@ pub async fn start_session_polling(app: AppHandle, state: GuiState) {
     loop {
         if let Some(session_name) = state.current_session.read().unwrap().clone() {
             if let Some(tmux) = &state.tmux {
-                if let Ok(output) = tmux.capture_output(&session_name, None, Some(CAPTURE_LINES)) {
-                    if !output.is_empty() {
+                if let Ok(raw_output) = tmux.capture_output(&session_name, None, Some(CAPTURE_LINES)) {
+                    if !raw_output.is_empty() {
+                        // Strip ANSI codes and UI-chrome before change detection so that
+                        // spurious escape-sequence churn doesn't trigger false positives,
+                        // and the frontend always receives clean text.
+                        let output = clean_output(&raw_output);
                         let lines: Vec<&str> = output.lines().collect();
                         let current_line_count = lines.len();
                         let current_hash = hash_str(&output);
