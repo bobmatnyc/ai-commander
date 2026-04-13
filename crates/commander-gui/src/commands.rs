@@ -149,15 +149,26 @@ pub async fn send_message_streaming(
         .clone()
         .ok_or("Not connected")?;
 
+    // Resolve the session name to a mpm serve UUID if this session was created via the API.
+    // Falls back to the session name itself (e.g. for tmux-backed sessions where the name
+    // happens to match, or for legacy callers).
+    let serve_id = state
+        .serve_session_ids
+        .read()
+        .unwrap()
+        .get(&session)
+        .cloned()
+        .unwrap_or_else(|| session.clone());
+
     let client = reqwest::Client::new();
     let url = format!(
         "http://localhost:7777/api/v1/sessions/{}/messages",
-        session
+        serve_id
     );
 
     eprintln!(
-        "[GUI] send_message_streaming: POST {} (session='{}')",
-        url, session
+        "[GUI] send_message_streaming: POST {} (session='{}', serve_id='{}')",
+        url, session, serve_id
     );
 
     let response = client
@@ -627,14 +638,69 @@ pub async fn create_session(
     adapter: String,
     state: State<'_, GuiState>,
 ) -> Result<(), String> {
+    eprintln!("[GUI] Creating session '{}' with adapter '{}' in '{}'", name, adapter, directory);
+
+    // When the adapter is claude-mpm, try creating the session via the mpm serve REST API
+    // (port 7777) so that structured SSE streaming works correctly.
+    if adapter == "claude-mpm" {
+        let client = reqwest::Client::new();
+        let url = "http://localhost:7777/api/v1/sessions";
+
+        let response = client
+            .post(url)
+            .json(&serde_json::json!({
+                "cwd": directory,
+                "project_root": directory,
+            }))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                let session: serde_json::Value =
+                    resp.json().await.unwrap_or_default();
+                let serve_id = session
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&name)
+                    .to_string();
+                eprintln!(
+                    "[GUI] Created mpm serve session '{}' → serve id '{}' in '{}'",
+                    name, serve_id, directory
+                );
+                state
+                    .serve_session_ids
+                    .write()
+                    .unwrap()
+                    .insert(name, serve_id);
+                return Ok(());
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!(
+                    "[GUI] mpm serve returned {}: {}, falling back to tmux",
+                    status, body
+                );
+                // Fall through to tmux creation
+            }
+            Err(e) => {
+                eprintln!(
+                    "[GUI] mpm serve unreachable: {}, falling back to tmux",
+                    e
+                );
+                // Fall through to tmux creation
+            }
+        }
+    }
+
+    // Default: create a tmux session and launch the adapter CLI inside it.
     let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
 
     // Check if session already exists
     if tmux.session_exists(&name) {
         return Err(format!("Session '{}' already exists", name));
     }
-
-    eprintln!("[GUI] Creating session '{}' with adapter '{}' in '{}'", name, adapter, directory);
 
     // Create session in specified directory
     tmux.create_session_in_dir(&name, Some(&directory))
