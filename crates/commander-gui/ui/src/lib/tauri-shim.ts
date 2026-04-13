@@ -13,6 +13,21 @@ const TRANSFORMS: Record<string, (data: any) => any> = {
     }
     return data;
   },
+  interpret_session: (data: any) => {
+    // REST returns {session, output} — Tauri returns just the string
+    if (typeof data === 'object' && data?.output) return data.output;
+    return data;
+  },
+  get_session_summary: (data: any) => {
+    // Normalize if wrapped
+    if (typeof data === 'object' && data?.summary) return data.summary;
+    return data;
+  },
+  capture_session_output: (data: any) => {
+    // REST may wrap in {output: "..."}
+    if (typeof data === 'object' && data?.output) return data.output;
+    return data;
+  },
 };
 
 const API_MAP: Record<string, { method: string; path: string | ((args: any) => string) }> = {
