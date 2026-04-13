@@ -439,16 +439,15 @@ pub async fn summarize_incremental(content: &str, line_count: usize) -> Result<S
 }
 
 /// System prompt for screen context interpretation.
-const SCREEN_INTERPRET_PROMPT: &str = r#"You are analyzing a Claude Code session screen.
-The session is currently idle/waiting for user input.
-Analyze the screen and tell me in ONE sentence what Claude is asking or waiting for.
+const SCREEN_INTERPRET_PROMPT: &str = r#"You are analyzing an AI coding assistant terminal session.
+Analyze the screen content and tell me in ONE sentence what is happening.
 
 Rules:
-- If Claude asked a question, quote it briefly (truncate if over 50 chars)
-- If Claude completed a task, summarize what was done in past tense
-- If Claude is showing an error, mention the error briefly
-- Be concise - respond with ONLY the interpretation, no preamble
-- Start with an appropriate prefix like "Claude is asking:", "Ready after:", "Waiting for:", "Error:"
+- If the assistant asked a question, state the question directly
+- If the assistant completed a task, summarize what was done in past tense
+- If there is an error, state the error briefly
+- Be concise - respond with ONLY the content, no preamble or prefix
+- Do NOT add prefixes like "Claude is asking:" or "Ready after:" — just state what happened
 - Never mention "the screen shows" or similar meta-language"#;
 
 /// Interpret screen context from a Claude Code session.

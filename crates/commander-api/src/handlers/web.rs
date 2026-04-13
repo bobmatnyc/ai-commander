@@ -108,6 +108,9 @@ pub struct SessionOutputResponse {
     pub session: String,
     /// Captured or interpreted output.
     pub output: String,
+    /// Adapter nickname (e.g. "claude", "mpm").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
 }
 
 // ==================== Process types ====================
@@ -250,6 +253,19 @@ pub async fn create_session(
         }
     }
 
+    // Store adapter nickname for SSE events
+    {
+        let adapter_nick = adapter_id
+            .as_deref()
+            .map(normalize_adapter_nickname)
+            .unwrap_or_else(|| "claude".to_string());
+        state
+            .session_adapters
+            .write()
+            .await
+            .insert(req.name.clone(), adapter_nick);
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
@@ -282,6 +298,7 @@ pub async fn connect_session(
     Ok(Json(SessionOutputResponse {
         session: name,
         output,
+        adapter: None,
     }))
 }
 
@@ -376,9 +393,19 @@ pub async fn interpret_session(
         }
     });
 
+    // Look up adapter nickname for this session
+    let adapter = state
+        .session_adapters
+        .read()
+        .await
+        .get(&name)
+        .cloned()
+        .unwrap_or_else(|| "claude".to_string());
+
     Ok(Json(SessionOutputResponse {
         session: name,
         output,
+        adapter: Some(adapter),
     }))
 }
 
@@ -404,6 +431,7 @@ pub async fn get_session_summary(
     Ok(Json(SessionOutputResponse {
         session: name,
         output,
+        adapter: None,
     }))
 }
 
@@ -749,6 +777,20 @@ pub async fn save_config(Json(body): Json<serde_json::Value>) -> Result<Json<Suc
     }))
 }
 
+// ==================== Helpers ====================
+
+/// Normalize an adapter ID to a short chat-friendly nickname.
+fn normalize_adapter_nickname(id: &str) -> String {
+    match id {
+        "claude-code" | "claude" => "claude".to_string(),
+        "claude-mpm" | "mpm" => "mpm".to_string(),
+        "auggie" => "auggie".to_string(),
+        "codex" => "codex".to_string(),
+        "shell" => "shell".to_string(),
+        other => other.to_string(),
+    }
+}
+
 // ==================== SSE streaming ====================
 
 /// GET /api/sessions/:name/events — SSE stream of interpreted session output.
@@ -776,9 +818,18 @@ pub async fn session_event_stream(
 
 /// Spawns a background poller that captures tmux pane output, interprets
 /// changes via `interpret_screen_context`, and broadcasts `SessionEvent`s.
-pub fn spawn_session_poller(event_tx: broadcast::Sender<SessionEvent>) {
+///
+/// Deduplicates at two levels:
+/// 1. Raw snapshot comparison — skip LLM call if screen hasn't changed enough.
+/// 2. Interpretation comparison — skip broadcast if LLM produces the same text.
+pub fn spawn_session_poller(
+    event_tx: broadcast::Sender<SessionEvent>,
+    session_adapters: std::sync::Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+) {
     tokio::spawn(async move {
         let mut snapshots: HashMap<String, String> = HashMap::new();
+        let last_interps: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -794,6 +845,9 @@ pub fn spawn_session_poller(event_tx: broadcast::Sender<SessionEvent>) {
                 }
                 _ => continue,
             };
+
+            // Read adapter map once per cycle
+            let adapter_map = session_adapters.read().await.clone();
 
             for line in sessions.lines() {
                 let session_name = line.trim();
@@ -821,6 +875,11 @@ pub fn spawn_session_poller(event_tx: broadcast::Sender<SessionEvent>) {
                     let session = session_name.to_string();
                     let tx = event_tx.clone();
                     let content = trimmed.clone();
+                    let interps = last_interps.clone();
+                    let adapter = adapter_map
+                        .get(session_name)
+                        .cloned()
+                        .unwrap_or_else(|| "claude".to_string());
 
                     tokio::task::spawn_blocking(move || {
                         let cleaned = commander_core::clean_response(&content);
@@ -829,15 +888,29 @@ pub fn spawn_session_poller(event_tx: broadcast::Sender<SessionEvent>) {
                         if let Some(interpretation) =
                             commander_core::interpret_screen_context(&cleaned, is_idle)
                         {
-                            let _ = tx.send(SessionEvent {
-                                session_name: session,
-                                event_type: "interpretation".to_string(),
-                                content: interpretation,
-                                timestamp: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs(),
-                            });
+                            // Dedup: only broadcast if interpretation actually changed
+                            let prev_interp = interps
+                                .lock()
+                                .unwrap()
+                                .get(&session)
+                                .cloned()
+                                .unwrap_or_default();
+                            if interpretation != prev_interp {
+                                let _ = tx.send(SessionEvent {
+                                    session_name: session.clone(),
+                                    event_type: "interpretation".to_string(),
+                                    content: interpretation.clone(),
+                                    timestamp: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs(),
+                                    adapter,
+                                });
+                                interps
+                                    .lock()
+                                    .unwrap()
+                                    .insert(session, interpretation);
+                            }
                         }
                     });
 

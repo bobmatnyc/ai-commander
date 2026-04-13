@@ -105,7 +105,7 @@ pub async fn serve(config: ApiConfig, state: AppState) -> Result<(), std::io::Er
     let addr = config.bind_address();
 
     // Start the SSE session poller that broadcasts interpreted output.
-    handlers::web::spawn_session_poller(state.event_tx.clone());
+    handlers::web::spawn_session_poller(state.event_tx.clone(), state.session_adapters.clone());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("API server listening on {}", addr);

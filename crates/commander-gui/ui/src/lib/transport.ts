@@ -121,6 +121,7 @@ export interface SessionEventData {
   event_type: string;
   content: string;
   timestamp: number;
+  adapter?: string;
 }
 
 /**

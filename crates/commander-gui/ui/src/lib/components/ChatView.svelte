@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages } from '../stores/app';
+  import { get } from 'svelte/store';
+  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages } from '../stores/app';
   import { onMount, onDestroy } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
@@ -23,6 +24,26 @@
   let isActive = false;
   let activityTimer: number;
   let sseCleanup: (() => void) | null = null;
+
+  /** Normalize adapter ID to short chat nickname. */
+  function adapterNick(id?: string): string {
+    if (!id) return 'ai';
+    switch (id) {
+      case 'claude-code': case 'claude': return 'claude';
+      case 'claude-mpm': case 'mpm': return 'mpm';
+      case 'auggie': return 'auggie';
+      case 'codex': return 'codex';
+      case 'shell': return 'shell';
+      default: return id;
+    }
+  }
+
+  /** Check if the last system message in a session has the same content (dedup). */
+  function isDuplicateSystemMessage(sessionName: string, content: string): boolean {
+    const msgs = get(sessionMessages).get(sessionName) || [];
+    const last = msgs[msgs.length - 1];
+    return !!(last && last.direction === 'system' && last.content === content);
+  }
 
   function scrollToBottom() {
     if (terminalEl) {
@@ -269,13 +290,19 @@
       if (shouldSummarize && viewMode === 'interpreted') {
         lastSummaryAt = lineCount;
         invoke('interpret_session', { name: sessionName })
-          .then((summary: unknown) => {
-            if (summary && (summary as string).trim()) {
-              addMessageToSession(sessionName, {
-                direction: 'system',
-                content: summary as string,
-                timestamp: new Date(),
-              });
+          .then((result: unknown) => {
+            const r = result as { output?: string; adapter?: string } | string;
+            const text = typeof r === 'string' ? r : r?.output || '';
+            const adapter = typeof r === 'string' ? undefined : r?.adapter;
+            if (text.trim()) {
+              const display = `${adapterNick(adapter)}: ${text.trim()}`;
+              if (!isDuplicateSystemMessage(sessionName, display)) {
+                addMessageToSession(sessionName, {
+                  direction: 'system',
+                  content: display,
+                  timestamp: new Date(),
+                });
+              }
             }
           })
           .catch(() => {});
@@ -366,11 +393,15 @@
     }
 
     invoke('interpret_session', { name: $currentSession.name })
-      .then((interpretation: unknown) => {
+      .then((result: unknown) => {
         if ($currentSession) {
+          const r = result as { output?: string; adapter?: string } | string;
+          const text = typeof r === 'string' ? r : r?.output || '';
+          const adapter = typeof r === 'string' ? undefined : r?.adapter;
+          const display = `${adapterNick(adapter)}: ${text.trim()}`;
           addMessageToSession($currentSession.name, {
             direction: 'system',
-            content: interpretation as string,
+            content: display,
             timestamp: new Date(),
           });
         }
@@ -390,12 +421,15 @@
           clearTimeout(activityTimer);
           activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
 
-          addMessageToSession(sessionName, {
-            direction: 'system',
-            content: event.content,
-            timestamp: new Date(event.timestamp * 1000),
-          });
-          if (autoScroll) setTimeout(scrollToBottom, 10);
+          const display = `${adapterNick(event.adapter)}: ${event.content}`;
+          if (!isDuplicateSystemMessage(sessionName, display)) {
+            addMessageToSession(sessionName, {
+              direction: 'system',
+              content: display,
+              timestamp: new Date(event.timestamp * 1000),
+            });
+            if (autoScroll) setTimeout(scrollToBottom, 10);
+          }
         },
       );
     }
@@ -496,7 +530,7 @@
       {#each $messages as message}
         {#if message.direction === 'sent'}
           <div class="terminal-line sent">
-            <span class="line-prefix">&gt; </span><span class="line-content sent-text">{message.content}</span>
+            <span class="line-prefix">you: </span><span class="line-content sent-text">{message.content}</span>
           </div>
         {:else if message.direction === 'system'}
           <div class="terminal-line system">

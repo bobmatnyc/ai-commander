@@ -28,6 +28,8 @@ pub struct SessionEvent {
     pub content: String,
     /// Unix epoch seconds.
     pub timestamp: u64,
+    /// Adapter nickname: "claude", "mpm", "auggie", "codex", "shell".
+    pub adapter: String,
 }
 
 /// Application state shared across all handlers.
@@ -51,6 +53,8 @@ pub struct AppState {
     pub tmux: Option<Arc<TmuxOrchestrator>>,
     /// Broadcast channel for SSE session events.
     pub event_tx: broadcast::Sender<SessionEvent>,
+    /// Maps session name → adapter nickname (e.g. "claude", "mpm").
+    pub session_adapters: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -89,6 +93,7 @@ impl AppState {
             web_clients: WebClientStore::new(&storage_dir),
             tmux,
             event_tx,
+            session_adapters: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
