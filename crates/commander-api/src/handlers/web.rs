@@ -324,9 +324,22 @@ pub async fn interpret_session(
         return Err(ApiError::NotFound(format!("session not found: {}", name)));
     }
 
-    let output = tmux
-        .capture_output(&name, req.pane.as_deref(), req.lines)
+    let raw = tmux
+        .capture_output(&name, req.pane.as_deref(), Some(req.lines.unwrap_or(100)))
         .map_err(|e| ApiError::Internal(format!("failed to capture output: {}", e)))?;
+
+    // Same interpretation pipeline as Telegram bot
+    let cleaned = commander_core::clean_response(&raw);
+    let is_idle = commander_core::is_claude_ready(&cleaned);
+    let fallback = commander_core::clean_screen_preview(&raw, 10);
+
+    let fallback_clone = fallback.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        commander_core::interpret_screen_context(&cleaned, is_idle)
+            .unwrap_or(fallback_clone)
+    })
+    .await
+    .unwrap_or(fallback);
 
     Ok(Json(SessionOutputResponse {
         session: name,
