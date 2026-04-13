@@ -26,68 +26,26 @@ When interacting with Claude Desktop, the following MCP tools are available:
 
 ## Project Context
 
-AI Commander (AIC) — a multi-client session manager for AI coding assistants.
-Rust workspace with Tauri desktop app (Svelte frontend).
+AI Commander (AIC) — multi-client session manager for AI coding assistants.
+Rust workspace + Tauri desktop app (Svelte) + Web UI + Telegram bot.
 
 ### Architecture
-- `crates/ai-commander/` — CLI binary (REPL + TUI)
-- `crates/commander-core/` — shared logic (summarizer, output filter, Ollama client, client adapter)
+- `crates/commander-core/` — shared logic (summarizer, output filter, Ollama, client adapter)
 - `crates/commander-gui/` — Tauri desktop app (Svelte + Rust)
+- `crates/commander-api/` — REST API (Axum, port 9876) + web UI static serving
 - `crates/commander-telegram/` — Telegram bot
-- `crates/commander-api/` — REST API (Axum, port 8765)
 - `crates/commander-daemon/` — daemon services (idle monitor, health, message polling)
 - `crates/commander-adapters/` — runtime adapters (ClaudeCode, MPM, Auggie, Codex, Shell)
 - `crates/commander-models/` — data models (Project, AdapterType)
 - `crates/commander-tmux/` — tmux orchestration
 - `crates/mpm-sdk/` — headless MPM client
+- `crates/ai-commander/` — CLI binary (REPL + TUI)
 
-### Build Commands
+### Build & Deploy
 
-**IMPORTANT: All paths must be absolute or run from the workspace root `/Users/masa/Projects/ai-commander`.**
+**See [BUILD.md](./BUILD.md) for all build commands, deploy steps, and common mistakes.**
 
-#### Full GUI rebuild (most common):
-```bash
-cd /Users/masa/Projects/ai-commander
-
-# 1. Build Svelte frontend (MUST run from ui/ directory)
-cd crates/commander-gui/ui && rm -rf dist && npm run build
-
-# 2. Build Tauri app (MUST run from commander-gui/ directory)
-cd /Users/masa/Projects/ai-commander/crates/commander-gui && cargo tauri build --bundles app
-
-# 3. Launch
-open "/Users/masa/Projects/ai-commander/target/release/bundle/macos/AIC - AI Commander.app"
-```
-
-#### One-liner rebuild + launch:
-```bash
-cd /Users/masa/Projects/ai-commander && \
-  (cd crates/commander-gui/ui && rm -rf dist && npm run build) && \
-  (cd crates/commander-gui && cargo tauri build --bundles app) && \
-  open "target/release/bundle/macos/AIC - AI Commander.app"
-```
-
-#### Workspace checks:
-```bash
-cargo check --workspace          # Check all crates compile
-cargo test --workspace           # Run all tests
-cargo check -p commander-gui     # Check just the GUI crate
-cargo test -p commander-core     # Test just core
-```
-
-#### Common mistakes:
-- Running `npm run build` from wrong directory → dist/ not updated → stale frontend
-- Running `cargo tauri build` from workspace root → "not a Tauri project" error
-- Forgetting to rebuild frontend before Tauri build → old JS bundled
-
-### Key Defaults
-- **Ollama model**: `qwen2.5-coder:7b-instruct` (local inference)
-- **OpenRouter fallback key**: hardcoded in `summarizer.rs`
-- **Claude Code flag**: `--dangerously-skip-permissions` (auto-accept trust)
-- **API port**: 8765 (configurable via `AIC_BIND_ADDRESS`)
-- **Tmux session names**: project name directly (no prefix)
-
-### Tickets
+### Open Tickets
 - #47 — Remote web client with P2P mesh
 - #48 — Process monitoring + settings page
 - #49 — Interpreted chat view with OutputAdapter
