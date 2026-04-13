@@ -150,6 +150,19 @@ pub async fn stop_session(name: String, state: State<'_, GuiState>) -> Result<()
         return Err(format!("Session '{}' not found", name));
     }
 
+    // For claude-mpm sessions, send /mpm-session-pause before terminating
+    // to save session state for potential resume later.
+    if let Ok(output) = tmux.capture_output(&name, None, Some(50)) {
+        let is_mpm = commander_core::is_mpm_ready(&output)
+            || output.contains("claude-mpm")
+            || output.contains("Claude MPM");
+        if is_mpm {
+            eprintln!("[GUI] Sending /mpm-session-pause to '{}' before stopping", name);
+            let _ = tmux.send_line(&name, None, "/mpm-session-pause");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
     tmux.destroy_session(&name)
         .map_err(|e| format!("Failed to stop session: {}", e))?;
 
