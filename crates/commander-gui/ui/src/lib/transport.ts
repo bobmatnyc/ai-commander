@@ -110,6 +110,48 @@ export function isDesktop(): boolean {
   return isTauri;
 }
 
+/** Session event received from SSE */
+export interface SessionEventData {
+  session_name: string;
+  event_type: string;
+  content: string;
+  timestamp: number;
+}
+
+/**
+ * Subscribe to SSE session events (web mode only).
+ * In Tauri mode this is a no-op since Tauri events handle live updates.
+ * Returns a cleanup function to close the connection.
+ */
+export function subscribeSessionEvents(
+  sessionName: string,
+  onEvent: (event: SessionEventData) => void,
+  onError?: (error: globalThis.Event) => void,
+): () => void {
+  // SSE is not needed in Tauri mode — native events handle updates
+  if (isTauri) {
+    return () => {};
+  }
+
+  const url = `/api/sessions/${encodeURIComponent(sessionName)}/events`;
+  const eventSource = new EventSource(url);
+
+  eventSource.onmessage = (e) => {
+    try {
+      const data: SessionEventData = JSON.parse(e.data);
+      onEvent(data);
+    } catch {
+      // Ignore malformed events
+    }
+  };
+
+  eventSource.onerror = (e) => {
+    if (onError) onError(e);
+  };
+
+  return () => eventSource.close();
+}
+
 /**
  * Drop-in replacement for Tauri's invoke().
  * Components can import { invoke } from '../transport' instead of '@tauri-apps/api/core'

@@ -62,6 +62,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/sessions/{name}/interpret", post(handlers::web::interpret_session))
         .route("/api/sessions/{name}/summary", post(handlers::web::get_session_summary))
         .route("/api/sessions/{name}/capture", post(handlers::web::capture_session_output))
+        .route("/api/sessions/{name}/events", get(handlers::web::session_event_stream))
         // Web UI — Process monitoring
         .route("/api/processes", get(handlers::web::list_processes))
         .route("/api/processes/clean", post(handlers::web::kill_stale_processes))
@@ -99,9 +100,13 @@ pub fn create_router(state: AppState) -> Router {
     }
 }
 
-/// Starts the API server.
+/// Starts the API server and the background session poller.
 pub async fn serve(config: ApiConfig, state: AppState) -> Result<(), std::io::Error> {
     let addr = config.bind_address();
+
+    // Start the SSE session poller that broadcasts interpreted output.
+    handlers::web::spawn_session_poller(state.event_tx.clone());
+
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("API server listening on {}", addr);
     axum::serve(listener, create_router(state)).await

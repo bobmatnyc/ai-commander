@@ -1,8 +1,10 @@
 <script lang="ts">
   import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages } from '../stores/app';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
+  import { isDesktop, subscribeSessionEvents } from '../transport';
+  import type { SessionEventData } from '../transport';
   import { ArrowDown, Terminal } from 'lucide-svelte';
 
   let terminalEl: HTMLDivElement;
@@ -20,6 +22,7 @@
   const SUMMARY_THRESHOLD = 50;
   let isActive = false;
   let activityTimer: number;
+  let sseCleanup: (() => void) | null = null;
 
   function scrollToBottom() {
     if (terminalEl) {
@@ -341,6 +344,10 @@
       unlistenChatEvent.then(f => f());
       clearTimeout(connectingTimer);
       clearTimeout(waitingTimer);
+      if (sseCleanup) {
+        sseCleanup();
+        sseCleanup = null;
+      }
     };
   });
 
@@ -351,6 +358,13 @@
     lineCount = 0;
     lastSummaryAt = 0;
     isActive = false;
+
+    // Clean up previous SSE subscription
+    if (sseCleanup) {
+      sseCleanup();
+      sseCleanup = null;
+    }
+
     invoke('interpret_session', { name: $currentSession.name })
       .then((interpretation: unknown) => {
         if ($currentSession) {
@@ -363,9 +377,35 @@
         connecting = false;
       })
       .catch(() => { connecting = false; });
+
+    // In web mode, subscribe to SSE for live interpreted updates
+    if (!isDesktop()) {
+      const sessionName = $currentSession.name;
+      sseCleanup = subscribeSessionEvents(
+        sessionName,
+        (event: SessionEventData) => {
+          markActivity();
+          lineCount += 1;
+          isActive = true;
+          clearTimeout(activityTimer);
+          activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
+
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: event.content,
+            timestamp: new Date(event.timestamp * 1000),
+          });
+          if (autoScroll) setTimeout(scrollToBottom, 10);
+        },
+      );
+    }
   } else {
     connecting = false;
     waitingForResponse = false;
+    if (sseCleanup) {
+      sseCleanup();
+      sseCleanup = null;
+    }
   }
 
   $: if ($messages.length && autoScroll) {

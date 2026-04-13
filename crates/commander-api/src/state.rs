@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 
 use commander_adapters::AdapterRegistry;
 use commander_core::config;
@@ -16,6 +16,19 @@ use commander_work::WorkQueue;
 
 use crate::config::ApiConfig;
 use crate::web_clients::WebClientStore;
+
+/// An event broadcast to SSE clients about session activity.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SessionEvent {
+    /// Name of the tmux session.
+    pub session_name: String,
+    /// Event type: "interpretation", "status_change", or "error".
+    pub event_type: String,
+    /// The event content (interpreted output, status message, etc.).
+    pub content: String,
+    /// Unix epoch seconds.
+    pub timestamp: u64,
+}
 
 /// Application state shared across all handlers.
 #[derive(Clone)]
@@ -36,6 +49,8 @@ pub struct AppState {
     pub web_clients: WebClientStore,
     /// Tmux orchestrator (optional - unavailable when tmux is not installed).
     pub tmux: Option<Arc<TmuxOrchestrator>>,
+    /// Broadcast channel for SSE session events.
+    pub event_tx: broadcast::Sender<SessionEvent>,
 }
 
 impl AppState {
@@ -62,6 +77,7 @@ impl AppState {
         storage_dir: PathBuf,
     ) -> Self {
         let tmux = TmuxOrchestrator::new().ok().map(Arc::new);
+        let (event_tx, _rx) = broadcast::channel(64);
 
         Self {
             config: Arc::new(config),
@@ -72,6 +88,7 @@ impl AppState {
             projects: Arc::new(RwLock::new(HashMap::new())),
             web_clients: WebClientStore::new(&storage_dir),
             tmux,
+            event_tx,
         }
     }
 

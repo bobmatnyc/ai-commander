@@ -33,6 +33,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 teloxide = { version = "0.17", features = ["webhooks-axum", "macros"] }
 futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
 url = "2.5"
 which = "7"
 signal-hook = "0.3"

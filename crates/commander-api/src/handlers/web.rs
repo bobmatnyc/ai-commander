@@ -3,15 +3,24 @@
 //! These handlers mirror the Tauri commands in commander-gui, exposing the same
 //! functionality over HTTP so the web UI can communicate with the daemon.
 
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::time::Duration;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     Json,
 };
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 
 use crate::error::{ApiError, Result};
-use crate::state::AppState;
+use crate::state::{AppState, SessionEvent};
 use crate::types::{AdapterListResponse, AdapterSummary, SuccessResponse};
 
 // ==================== Session types ====================
@@ -679,6 +688,105 @@ pub async fn save_config(Json(body): Json<serde_json::Value>) -> Result<Json<Suc
     Ok(Json(SuccessResponse {
         message: "config saved".to_string(),
     }))
+}
+
+// ==================== SSE streaming ====================
+
+/// GET /api/sessions/:name/events — SSE stream of interpreted session output.
+pub async fn session_event_stream(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
+    let rx = state.event_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        match result {
+            Ok(event) if event.session_name == name => {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Some(Ok(Event::default().data(data)))
+            }
+            _ => None,
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+/// Spawns a background poller that captures tmux pane output, interprets
+/// changes via `interpret_screen_context`, and broadcasts `SessionEvent`s.
+pub fn spawn_session_poller(event_tx: broadcast::Sender<SessionEvent>) {
+    tokio::spawn(async move {
+        let mut snapshots: HashMap<String, String> = HashMap::new();
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            // List tmux sessions
+            let sessions = match tokio::process::Command::new("tmux")
+                .args(["list-sessions", "-F", "#{session_name}"])
+                .output()
+                .await
+            {
+                Ok(output) if output.status.success() => {
+                    String::from_utf8_lossy(&output.stdout).to_string()
+                }
+                _ => continue,
+            };
+
+            for line in sessions.lines() {
+                let session_name = line.trim();
+                if session_name.is_empty() {
+                    continue;
+                }
+
+                // Capture current pane content (last 50 lines)
+                let output = match tokio::process::Command::new("tmux")
+                    .args(["capture-pane", "-t", session_name, "-p", "-S", "-50"])
+                    .output()
+                    .await
+                {
+                    Ok(o) if o.status.success() => {
+                        String::from_utf8_lossy(&o.stdout).to_string()
+                    }
+                    _ => continue,
+                };
+
+                let trimmed = output.trim().to_string();
+                let prev = snapshots.get(session_name).cloned().unwrap_or_default();
+
+                // Only interpret if content changed significantly (>100 chars diff)
+                if trimmed != prev && trimmed.len().abs_diff(prev.len()) > 100 {
+                    let session = session_name.to_string();
+                    let tx = event_tx.clone();
+                    let content = trimmed.clone();
+
+                    tokio::task::spawn_blocking(move || {
+                        let cleaned = commander_core::clean_response(&content);
+                        let is_idle = commander_core::is_claude_ready(&cleaned);
+
+                        if let Some(interpretation) =
+                            commander_core::interpret_screen_context(&cleaned, is_idle)
+                        {
+                            let _ = tx.send(SessionEvent {
+                                session_name: session,
+                                event_type: "interpretation".to_string(),
+                                content: interpretation,
+                                timestamp: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            });
+                        }
+                    });
+
+                    snapshots.insert(session_name.to_string(), trimmed);
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
