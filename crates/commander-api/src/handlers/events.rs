@@ -134,12 +134,13 @@ mod tests {
         let event_store = EventStore::new(&path);
         let work_store = WorkStore::new(&path);
 
-        AppState::new(
+        AppState::new_with_storage(
             ApiConfig::default(),
             None,
             EventManager::new(event_store),
             WorkQueue::new(work_store),
             AdapterRegistry::new(),
+            path,
         )
     }
 

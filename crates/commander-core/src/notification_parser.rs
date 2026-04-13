@@ -368,6 +368,43 @@ pub fn parse_session_preview(session_name: &str, preview: &str) -> ParsedSession
     }
 }
 
+/// Parse a notification string and extract ALL session status entries.
+///
+/// Unlike [`parse_notification`] which returns only the first session,
+/// this returns every `@session` line found. Useful for multi-session
+/// timer notifications.
+///
+/// # Example
+/// ```
+/// use commander_core::notification_parser::parse_notifications_all;
+///
+/// let notification = "[timer] 2 new session(s) waiting for input:\n   @session-a - user@host:/path/a (main*?)\n   @session-b - user@host:/path/b (feat)";
+/// let sessions = parse_notifications_all(notification);
+/// assert_eq!(sessions.len(), 2);
+/// assert_eq!(sessions[0].name, "session-a");
+/// assert_eq!(sessions[1].name, "session-b");
+/// ```
+pub fn parse_notifications_all(raw: &str) -> Vec<ParsedSessionStatus> {
+    let clean = strip_ansi(raw);
+    let mut results = Vec::new();
+
+    for line in clean.lines() {
+        let line = line.trim();
+        if let Some(cap) = SESSION_REGEX.captures(line) {
+            if let Some(name_match) = cap.get(1) {
+                let name = name_match.as_str().to_string();
+                let match_end = cap.get(0).unwrap().end();
+                // Everything after the @name portion, with leading " - " stripped
+                let preview = line[match_end..].trim_start_matches(|c| c == ' ' || c == '-').trim();
+                let status = parse_session_preview(&name, preview);
+                results.push(status);
+            }
+        }
+    }
+
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +687,41 @@ mod tests {
         assert_eq!(simplify_model_name("claude-3-haiku"), "Claude Haiku");
         assert_eq!(simplify_model_name("gpt-4-turbo"), "GPT-4");
         assert_eq!(simplify_model_name("unknown-model"), "");
+    }
+
+    #[test]
+    fn test_parse_notifications_all_single() {
+        let notification = "[timer] 1 new session(s) waiting for input:\n   @session-a - user@host:/path/a (main*?)";
+        let sessions = parse_notifications_all(notification);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "session-a");
+    }
+
+    #[test]
+    fn test_parse_notifications_all_multiple() {
+        let notification = "[timer] 2 new session(s) waiting for input:\n   @session-a - user@host:/path/a (main*?) [model|Claude MPM|70%]\n   @session-b - user@host:/path/b (feat)";
+        let sessions = parse_notifications_all(notification);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].name, "session-a");
+        assert_eq!(sessions[1].name, "session-b");
+        assert_eq!(sessions[0].context_usage, Some(70));
+    }
+
+    #[test]
+    fn test_parse_notifications_all_empty() {
+        let notification = "No sessions waiting";
+        let sessions = parse_notifications_all(notification);
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_notifications_all_preserves_order() {
+        let notification = "@alpha\n@beta\n@gamma";
+        let sessions = parse_notifications_all(notification);
+        assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions[0].name, "alpha");
+        assert_eq!(sessions[1].name, "beta");
+        assert_eq!(sessions[2].name, "gamma");
     }
 
     #[test]
