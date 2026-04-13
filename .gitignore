@@ -43,3 +43,13 @@ __pycache__/
 # AI development tooling (local only, not for repo)
 .claude-mpm/
 .ai-trackdown/
+
+# KuzuMemory (local tooling)
+.kuzu-memory/
+.kuzu-memory-backups/
+KUZU.md
+
+# Build artifacts
+build.log
+**/dist-web/
+web-dist/
