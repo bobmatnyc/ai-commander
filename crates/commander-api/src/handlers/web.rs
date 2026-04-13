@@ -218,12 +218,21 @@ pub async fn create_session(
         .as_ref()
         .ok_or_else(|| ApiError::ServiceUnavailable("tmux not available".to_string()))?;
 
-    // Validate adapter if provided
-    if let Some(ref adapter_id) = req.adapter {
-        if state.adapter_registry.get(adapter_id).is_none() {
+    // Normalize and validate adapter if provided.
+    // The web UI may send alias names (e.g. "claude-mpm") that differ from the
+    // canonical registry key (e.g. "mpm"). Resolve aliases before lookup.
+    let adapter_id = req.adapter.as_ref().map(|id| {
+        state
+            .adapter_registry
+            .resolve(id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| id.clone())
+    });
+    if let Some(ref id) = adapter_id {
+        if state.adapter_registry.get(id).is_none() {
             return Err(ApiError::BadRequest(format!(
                 "unknown adapter: {}",
-                adapter_id
+                req.adapter.as_deref().unwrap_or(id)
             )));
         }
     }
@@ -233,8 +242,8 @@ pub async fn create_session(
         .map_err(|e| ApiError::Internal(format!("failed to create session: {}", e)))?;
 
     // If an adapter is specified, launch it in the session
-    if let Some(ref adapter_id) = req.adapter {
-        if let Some(adapter) = state.adapter_registry.get(adapter_id) {
+    if let Some(ref id) = adapter_id {
+        if let Some(adapter) = state.adapter_registry.get(id) {
             let info = adapter.info();
             tmux.send_line(&req.name, None, &info.command)
                 .map_err(|e| ApiError::Internal(format!("failed to start adapter: {}", e)))?;

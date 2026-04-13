@@ -143,7 +143,7 @@ impl AdapterRegistry {
     pub fn resolve(&self, alias: &str) -> Option<&'static str> {
         match alias {
             "cc" | "claude-code" => Some("claude-code"),
-            "mpm" => Some("mpm"),
+            "claude-mpm" | "mpm" => Some("mpm"),
             "mpm-sdk" => Some("mpm-sdk"),
             "shell" | "sh" | "bash" | "zsh" => Some("shell"),
             "auggie" | "augment" => Some("auggie"),
@@ -242,6 +242,7 @@ mod tests {
         assert_eq!(registry.resolve("cc"), Some("claude-code"));
         assert_eq!(registry.resolve("claude-code"), Some("claude-code"));
         assert_eq!(registry.resolve("mpm"), Some("mpm"));
+        assert_eq!(registry.resolve("claude-mpm"), Some("mpm"));
         assert_eq!(registry.resolve("mpm-sdk"), Some("mpm-sdk"));
 
         // Test shell aliases

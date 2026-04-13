@@ -20,7 +20,7 @@
 
   const ADAPTERS: AdapterOption[] = [
     { id: 'claude-code', label: 'Claude Code' },
-    { id: 'claude-mpm', label: 'Claude MPM' },
+    { id: 'mpm', label: 'Claude MPM' },
     { id: 'auggie', label: 'Auggie' },
     { id: 'codex', label: 'Codex' },
     { id: 'shell', label: 'Shell' },
@@ -29,7 +29,7 @@
   let directories: ProjectDirectory[] = [];
   let selectedDirectory: ProjectDirectory | null = null;
   let sessionName = '';
-  let selectedAdapter = 'claude-mpm';
+  let selectedAdapter = 'mpm';
   let loading = false;
   let error = '';
   let filterText = '';
@@ -81,7 +81,7 @@
   function close() {
     show = false;
     sessionName = '';
-    selectedAdapter = 'claude-mpm';
+    selectedAdapter = 'mpm';
     selectedDirectory = null;
     error = '';
     filterText = '';
