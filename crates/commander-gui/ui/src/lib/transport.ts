@@ -63,15 +63,51 @@ async function fetchApi(command: string, args?: Record<string, unknown>): Promis
   return response.text();
 }
 
+// Response transformers — normalize REST API responses to match Tauri command format
+const RESPONSE_TRANSFORMS: Record<string, (data: any) => any> = {
+  list_sessions: (data) => {
+    // REST returns {sessions: [{name, pane_count, ...}]}
+    // Tauri returns [{name, created_at, is_connected}]
+    if (data?.sessions) {
+      return data.sessions.map((s: any) => ({
+        name: s.name,
+        created_at: s.created_at || new Date().toISOString(),
+        is_connected: false,
+      }));
+    }
+    return data;
+  },
+  list_project_directories: (data) => {
+    // REST may wrap in {directories: [...]}
+    if (data?.directories) return data.directories;
+    return data;
+  },
+};
+
 /** Call a backend command — auto-detects Tauri vs web */
 export async function api(command: string, args?: Record<string, unknown>): Promise<unknown> {
   if (isTauri) {
     return tauriInvoke(command, args);
   }
-  return fetchApi(command, args);
+  let result = await fetchApi(command, args);
+  // Apply response transformer if one exists
+  const transform = RESPONSE_TRANSFORMS[command];
+  if (transform) {
+    result = transform(result);
+  }
+  return result;
 }
 
 /** Check if running in Tauri desktop app */
 export function isDesktop(): boolean {
   return isTauri;
+}
+
+/**
+ * Drop-in replacement for Tauri's invoke().
+ * Components can import { invoke } from '../transport' instead of '@tauri-apps/api/core'
+ * and it will work in both Tauri and web contexts.
+ */
+export async function invoke(command: string, args?: Record<string, unknown>): Promise<any> {
+  return api(command, args);
 }
