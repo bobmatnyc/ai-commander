@@ -242,16 +242,20 @@
       clearTimeout(activityTimer);
       activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
 
-      // Auto-summarize every SUMMARY_THRESHOLD lines
-      if (lineCount - lastSummaryAt >= SUMMARY_THRESHOLD) {
+      // Auto-summarize: first output immediately, then every SUMMARY_THRESHOLD lines
+      const shouldSummarize = (lastSummaryAt === 0 && lineCount >= 5)
+        || (lineCount - lastSummaryAt >= SUMMARY_THRESHOLD);
+      if (shouldSummarize && viewMode === 'interpreted') {
         lastSummaryAt = lineCount;
         invoke('interpret_session', { name: sessionName })
           .then((summary: unknown) => {
-            addMessageToSession(sessionName, {
-              direction: 'system',
-              content: `Summary (${lineCount} lines):\n${summary as string}`,
-              timestamp: new Date(),
-            });
+            if (summary && (summary as string).trim()) {
+              addMessageToSession(sessionName, {
+                direction: 'system',
+                content: summary as string,
+                timestamp: new Date(),
+              });
+            }
           })
           .catch(() => {});
       }
@@ -268,19 +272,10 @@
           });
         }
       } else {
-        // Interpreted mode: filter noise and show only meaningful changes
-        const segments = parseTerminalOutput(raw);
-        const meaningful = segments.filter(s =>
-          s.type === 'output' && s.content.trim().length > 0
-        );
-        if (meaningful.length > 0) {
-          const combined = meaningful.map(s => s.content).join('\n');
-          addMessageToSession(sessionName, {
-            direction: 'received',
-            content: combined,
-            timestamp: new Date(),
-          });
-        }
+        // Interpreted mode: suppress raw output entirely.
+        // Activity tracking + auto-summarize above handles display.
+        // Only the periodic interpret_session summaries are shown.
+        // (Same approach as the Telegram bot — never show raw terminal text)
       }
 
       if (autoScroll) {

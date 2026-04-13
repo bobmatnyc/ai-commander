@@ -67,18 +67,52 @@ const BOX_DRAWING_END: char = '\u{257F}';
 const BOX_ELEMENT_START: char = '\u{2580}';
 const BOX_ELEMENT_END: char = '\u{259F}';
 
-/// Return true if the line is pure UI chrome that should be suppressed.
+/// Return true if the line is UI chrome that should be suppressed.
 fn is_ui_noise(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return false;
     }
+
     // Lines composed entirely of box-drawing / block-element characters and whitespace.
-    trimmed.chars().all(|c| {
+    let all_box = trimmed.chars().all(|c| {
         c.is_whitespace()
             || (c >= BOX_DRAWING_START && c <= BOX_DRAWING_END)
             || (c >= BOX_ELEMENT_START && c <= BOX_ELEMENT_END)
-    })
+    });
+    if all_box {
+        return true;
+    }
+
+    // Lines that start/end with │ (columnar TUI layout — the welcome banner)
+    if trimmed.starts_with('│') || trimmed.starts_with('|') {
+        return true;
+    }
+
+    // Claude-mpm startup chrome
+    if trimmed.contains("Welcome back")
+        || trimmed.contains("What's new")
+        || trimmed.contains("No changelog")
+        || trimmed.contains("/mpm-help")
+        || trimmed.contains("/mpm-agents")
+        || trimmed.contains("/mpm-doctor")
+        || trimmed.contains("MPM Commands")
+        || trimmed.contains("Type / for autocomplete")
+        || trimmed.contains("Loading claude-mpm")
+        || trimmed.contains("Syncing hooks")
+        || trimmed.contains("Verified")
+        || trimmed.contains("bypass permissions")
+        || trimmed.contains("shift+tab to cycle")
+    {
+        return true;
+    }
+
+    // Progress bars and spinners
+    if trimmed.contains("[█") || trimmed.contains("[■") || trimmed.contains("░") {
+        return true;
+    }
+
+    false
 }
 
 /// Strip ANSI codes from `input` and remove pure UI-chrome lines.
