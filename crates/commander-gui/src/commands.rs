@@ -3,6 +3,76 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{Emitter, State};
 
+/// Interpreted summary of a session's current screen state.
+#[derive(Serialize)]
+pub struct SessionSummary {
+    pub adapter: String,
+    pub is_idle: bool,
+    pub preview: String,
+}
+
+/// Interpret what Claude is doing in a session using LLM analysis.
+///
+/// Captures the last 100 lines of tmux output, cleans them, then asks
+/// OpenRouter/Ollama to produce a human-readable one-sentence interpretation.
+/// Falls back to `clean_screen_preview` if the LLM is unavailable or returns
+/// an empty/unchanged result.
+#[tauri::command]
+pub async fn interpret_session(
+    name: String,
+    state: State<'_, GuiState>,
+) -> Result<String, String> {
+    let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
+    let output = tmux
+        .capture_output(&name, None, Some(100))
+        .map_err(|e| e.to_string())?;
+
+    let cleaned = commander_core::clean_response(&output);
+    let is_idle = commander_core::is_claude_ready(&cleaned);
+
+    // interpret_screen_context uses reqwest::blocking internally — run it on a
+    // dedicated blocking thread so we do not stall the async executor.
+    let cleaned_clone = cleaned.clone();
+    let interpretation = tokio::task::spawn_blocking(move || {
+        commander_core::interpret_screen_context(&cleaned_clone, is_idle)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match interpretation {
+        Some(text) if !text.is_empty() => Ok(text),
+        _ => Ok(commander_core::clean_screen_preview(&cleaned, 10)),
+    }
+}
+
+/// Return structured metadata about a session's current screen state.
+///
+/// Captures the last 200 lines of tmux output, cleans them, and returns:
+/// - `adapter`  — detected adapter type ("Claude", "Shell", "Unknown")
+/// - `is_idle`  — whether Claude is waiting for user input
+/// - `preview`  — last 10 meaningful lines of cleaned output
+#[tauri::command]
+pub async fn get_session_summary(
+    name: String,
+    state: State<'_, GuiState>,
+) -> Result<SessionSummary, String> {
+    let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
+    let output = tmux
+        .capture_output(&name, None, Some(200))
+        .map_err(|e| e.to_string())?;
+
+    let cleaned = commander_core::clean_response(&output);
+    let adapter = commander_core::detect_adapter(&cleaned);
+    let is_idle = commander_core::is_claude_ready(&cleaned);
+    let preview = commander_core::clean_screen_preview(&cleaned, 10);
+
+    Ok(SessionSummary {
+        adapter: format!("{:?}", adapter),
+        is_idle,
+        preview,
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SessionInfo {
     pub name: String,

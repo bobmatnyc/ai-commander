@@ -13,6 +13,7 @@
   let waitingForResponse = false;
   let waitingTimer: number;
   let streamingMessageId: string | null = null;
+  let viewMode: 'interpreted' | 'raw' = 'interpreted';
 
   function scrollToBottom() {
     if (terminalEl) {
@@ -137,19 +138,16 @@
     isActionLoading = true;
 
     try {
-      // Capture current tmux output as status snapshot
-      const output: string = await invoke('capture_session_output', { name: sessionName });
-      const lines = output.trim().split('\n');
-      const lastLines = lines.slice(-10).join('\n');
+      const interpretation: string = await invoke('interpret_session', { name: sessionName });
       addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Session: ${sessionName}\nStatus: Connected\n\nRecent output:\n${lastLines}`,
+        content: interpretation,
         timestamp: new Date(),
       });
     } catch (err) {
       addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Status: Connected to "${sessionName}"`,
+        content: `Connected to "${sessionName}"`,
         timestamp: new Date(),
       });
     } finally {
@@ -232,15 +230,19 @@
       const raw = content && content.length > 0 ? content : full_content;
       if (!raw) return;
 
-      const segments = parseTerminalOutput(raw);
-      for (const seg of segments) {
-        addMessageToSession(sessionName, {
-          direction: 'received',
-          content: seg.content,
-          timestamp: new Date(),
-          segmentType: seg.type,
-        });
+      if (viewMode === 'raw') {
+        const segments = parseTerminalOutput(raw);
+        for (const seg of segments) {
+          addMessageToSession(sessionName, {
+            direction: 'received',
+            content: seg.content,
+            timestamp: new Date(),
+            segmentType: seg.type,
+          });
+        }
       }
+      // In interpreted mode, session-output events are suppressed;
+      // meaningful content arrives via chat-event (text/tool_use/complete).
 
       if (autoScroll) {
         setTimeout(scrollToBottom, 10);
@@ -293,11 +295,22 @@
     };
   });
 
-  // Reset connecting state when session changes
+  // Reset connecting state when session changes and show interpreted status
   $: if ($currentSession) {
     connecting = true;
     waitingForResponse = false;
-    window.setTimeout(() => { connecting = false; }, 2000);
+    invoke('interpret_session', { name: $currentSession.name })
+      .then((interpretation: unknown) => {
+        if ($currentSession) {
+          addMessageToSession($currentSession.name, {
+            direction: 'system',
+            content: interpretation as string,
+            timestamp: new Date(),
+          });
+        }
+        connecting = false;
+      })
+      .catch(() => { connecting = false; });
   } else {
     connecting = false;
     waitingForResponse = false;
@@ -319,7 +332,7 @@
         class="tab"
         on:click={handleStatus}
         disabled={isActionLoading}
-        title="Send /status command"
+        title="Show interpreted session status"
       >
         Status
       </button>
@@ -339,6 +352,26 @@
       >
         Disconnect
       </button>
+
+      <div class="view-mode-group">
+        <button
+          class="tab"
+          class:active={viewMode === 'interpreted'}
+          on:click={() => viewMode = 'interpreted'}
+          title="Show interpreted output"
+        >
+          Interpreted
+        </button>
+        <button
+          class="tab"
+          class:active={viewMode === 'raw'}
+          on:click={() => viewMode = 'raw'}
+          title="Show raw terminal output"
+        >
+          Raw
+        </button>
+      </div>
+
       {#if connecting}
         <span class="status-badge connecting">
           <span class="spinner"></span>
@@ -544,7 +577,28 @@
 
   .system-text {
     color: var(--color-system);
-    font-style: italic;
+    font-style: normal;
+    line-height: 1.6;
+  }
+
+  .view-mode-group {
+    display: flex;
+    gap: 0.25rem;
+    margin-left: 0.5rem;
+    padding-left: 0.5rem;
+    border-left: 1px solid var(--border);
+  }
+
+  .tab.active {
+    background-color: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .tab.active:hover:not(:disabled) {
+    background-color: var(--accent);
+    border-color: var(--accent);
+    opacity: 0.9;
   }
 
   .terminal-empty {
