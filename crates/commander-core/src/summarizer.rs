@@ -1,12 +1,25 @@
-//! Response summarization using OpenRouter API.
+//! Response summarization using Ollama (primary) and OpenRouter (fallback).
 //!
 //! Provides functionality to summarize long Claude Code responses into
 //! concise, conversational summaries suitable for mobile/compact displays.
+//!
+//! # Provider strategy
+//!
+//! 1. **Ollama** (local, free, fast) — tried first whenever the server is reachable.
+//! 2. **OpenRouter** — used as fallback when Ollama is unavailable or fails.
+//!    The API key is read from `OPENROUTER_API_KEY`; if that variable is unset a
+//!    hardcoded fallback key is used so the feature works out of the box.
 
 use thiserror::Error;
 use tracing::{info, warn};
 
+use crate::ollama::OllamaClient;
 use crate::output_filter::clean_response;
+
+/// Hardcoded OpenRouter fallback key used when `OPENROUTER_API_KEY` is not set.
+/// Reading from the env var takes precedence.
+const OPENROUTER_FALLBACK_KEY: &str =
+    "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";
 
 /// Default limits for fallback truncation when summarization is unavailable.
 const FALLBACK_MAX_LINES: usize = 10;
@@ -100,14 +113,25 @@ pub enum SummarizerError {
     ParseError(String),
 }
 
-/// Check if summarization is available (API key set).
+/// Check if summarization is available.
+///
+/// Returns `true` when an OpenRouter API key is configured (either via
+/// `OPENROUTER_API_KEY` or the built-in fallback key). Ollama availability
+/// cannot be checked synchronously; use [`OllamaClient::is_available`] for that.
 pub fn is_available() -> bool {
-    std::env::var("OPENROUTER_API_KEY").is_ok()
+    // The hardcoded fallback key means OpenRouter is always available as a last
+    // resort, so this is effectively always true — kept for API compatibility.
+    true
 }
 
-/// Get the configured OpenRouter API key.
+/// Get the OpenRouter API key to use.
+///
+/// Reads `OPENROUTER_API_KEY` from the environment; if unset, returns the
+/// hardcoded fallback key. Never returns `None`.
 pub fn get_api_key() -> Option<String> {
-    std::env::var("OPENROUTER_API_KEY").ok()
+    let key = std::env::var("OPENROUTER_API_KEY")
+        .unwrap_or_else(|_| OPENROUTER_FALLBACK_KEY.to_string());
+    Some(key)
 }
 
 /// Get the configured model, or default.
@@ -215,13 +239,14 @@ pub fn summarize_blocking(
         .ok_or_else(|| SummarizerError::ParseError("No content in response".to_string()))
 }
 
-/// Tiered summarization: tries structured extraction first, falls back to LLM.
-/// Returns (summary_text, tier_used) where tier is 1, 2, or 3.
+/// Tiered summarization: tries structured extraction first, then Ollama, then OpenRouter.
+/// Returns (summary_text, tier_used) where tier is 1, 2, 3, or 4.
 ///
 /// Pipeline:
 /// - Tier 1: Structured extraction (free, instant) — confidence >= threshold
-/// - Tier 2: Cheap model (Haiku) with pre-digested context — confidence >= 0.4
-/// - Tier 3: Full model (Sonnet) with full input — current behavior
+/// - Tier 2: Ollama local inference (free, private) — when server is reachable
+/// - Tier 3: Cheap OpenRouter model (Haiku) with pre-digested context — confidence >= 0.4
+/// - Tier 4: Full OpenRouter model (Sonnet) with full input — last resort
 pub async fn summarize_tiered(query: &str, raw_response: &str) -> (String, u8) {
     use crate::structured_summarizer;
 
@@ -239,7 +264,25 @@ pub async fn summarize_tiered(query: &str, raw_response: &str) -> (String, u8) {
         }
     }
 
-    // Tier 2: Cheap model with pre-digested context
+    // Tier 2: Ollama local inference (primary LLM provider — free, private, fast)
+    let ollama = OllamaClient::new();
+    if ollama.is_available().await {
+        info!(tier = 2, model = "gemma3:4b", "Summarizing via Ollama local inference");
+        let user_prompt = format!(
+            "User asked: {}\n\nRaw response:\n{}\n\nProvide a conversational summary:",
+            query, raw_response
+        );
+        match ollama.summarize(&user_prompt, 5).await {
+            Ok(summary) => return (summary, 2),
+            Err(e) => {
+                warn!(error = %e, "Ollama summarization failed, falling back to OpenRouter");
+            }
+        }
+    } else {
+        info!("Ollama not available, skipping to OpenRouter fallback");
+    }
+
+    // Tier 3: Cheap OpenRouter model with pre-digested context
     if confidence >= 0.4 {
         let context = extracted.to_context();
         let key_lines_text = extracted.key_lines.join("\n");
@@ -248,42 +291,29 @@ pub async fn summarize_tiered(query: &str, raw_response: &str) -> (String, u8) {
             context, key_lines_text
         );
 
-        let api_key = match get_api_key() {
-            Some(key) => key,
-            None => {
-                info!(tier = 1, "No API key, falling back to structured summary");
-                return (extracted.to_summary(), 1);
-            }
-        };
-
+        // get_api_key() always returns Some (fallback key), so unwrap is safe.
+        let api_key = get_api_key().expect("get_api_key always returns Some");
         let tier2_model = get_tier2_model();
-        info!(confidence = %confidence, tier = 2, model = %tier2_model, "Summarizing via tier 2 model");
+        info!(confidence = %confidence, tier = 3, model = %tier2_model, "Summarizing via OpenRouter tier-2 model");
 
         match summarize_async(query, &enhanced_input, &api_key, &tier2_model).await {
-            Ok(summary) => return (summary, 2),
+            Ok(summary) => return (summary, 3),
             Err(e) => {
-                warn!(error = %e, "Tier 2 summarization failed, trying tier 3");
-                // Fall through to tier 3
+                warn!(error = %e, "OpenRouter tier-2 summarization failed, trying full model");
             }
         }
     }
 
-    // Tier 3: Full model with full input (current behavior)
-    let api_key = match get_api_key() {
-        Some(key) => key,
-        None => {
-            return (fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS), 3);
-        }
-    };
-
+    // Tier 4: Full OpenRouter model with full input (last resort)
+    let api_key = get_api_key().expect("get_api_key always returns Some");
     let model = get_model();
-    info!(confidence = %confidence, tier = 3, model = %model, "Summarizing via tier 3 full model");
+    info!(confidence = %confidence, tier = 4, model = %model, "Summarizing via OpenRouter full model");
 
     match summarize_async(query, raw_response, &api_key, &model).await {
-        Ok(summary) => (summary, 3),
+        Ok(summary) => (summary, 4),
         Err(e) => {
-            warn!(error = %e, "Tier 3 summarization failed, using fallback");
-            (fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS), 3)
+            warn!(error = %e, "OpenRouter full-model summarization failed, using fallback truncation");
+            (fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS), 4)
         }
     }
 }
@@ -326,12 +356,12 @@ pub async fn summarize_with_fallback(query: &str, raw_response: &str) -> String 
 
 /// Summarize a response synchronously with automatic fallback.
 ///
-/// Blocking version of `summarize_with_fallback`.
+/// Blocking version of `summarize_with_fallback`. Uses OpenRouter directly
+/// (Ollama requires async; use `summarize_with_fallback` for the full provider
+/// chain including local Ollama inference).
 pub fn summarize_blocking_with_fallback(query: &str, raw_response: &str) -> String {
-    let Some(api_key) = get_api_key() else {
-        return fallback_truncate(raw_response, FALLBACK_MAX_LINES, FALLBACK_MAX_CHARS);
-    };
-
+    // get_api_key() always returns Some (hardcoded fallback key), so unwrap is safe.
+    let api_key = get_api_key().expect("get_api_key always returns Some");
     let model = get_model();
 
     match summarize_blocking(query, raw_response, &api_key, &model) {
@@ -345,27 +375,36 @@ pub fn summarize_blocking_with_fallback(query: &str, raw_response: &str) -> Stri
 /// This is briefer than a full summary and focuses on progress/findings.
 /// Used for sending periodic updates during long-running operations.
 ///
+/// Provider order: Ollama (local) → OpenRouter (fallback).
+///
 /// # Arguments
-/// * `content` - The content collected so far
-/// * `line_count` - Number of lines collected (for the summary header)
+/// * `content`    - The content collected so far.
+/// * `line_count` - Number of lines collected (for the summary header).
 ///
 /// # Returns
-/// A brief summary prefixed with "📊 Incremental Summary (N lines):"
+/// A brief summary prefixed with "📊 Incremental Summary (N lines):".
 pub async fn summarize_incremental(content: &str, line_count: usize) -> Result<String, SummarizerError> {
-    let Some(api_key) = get_api_key() else {
-        // Fallback when no API key available
-        return Ok(format!(
-            "📊 Incremental Summary ({} lines):\nCollecting output... {} lines captured so far.",
-            line_count, line_count
-        ));
-    };
-
-    let model = get_model();
-
     let user_prompt = format!(
         "Output collected so far ({} lines):\n{}\n\nProvide a brief summary of progress and key findings:",
         line_count, content
     );
+
+    // Try Ollama first (local, free)
+    let ollama = OllamaClient::new();
+    if ollama.is_available().await {
+        match ollama.chat(INCREMENTAL_SYSTEM_PROMPT, &user_prompt).await {
+            Ok(summary) => {
+                return Ok(format!("📊 Incremental Summary ({} lines):\n{}", line_count, summary));
+            }
+            Err(e) => {
+                warn!(error = %e, "Ollama incremental summary failed, falling back to OpenRouter");
+            }
+        }
+    }
+
+    // Fall back to OpenRouter
+    let api_key = get_api_key().expect("get_api_key always returns Some");
+    let model = get_model();
 
     let request_body = serde_json::json!({
         "model": model,
@@ -488,17 +527,18 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_without_api_key() {
+    fn test_get_api_key_uses_fallback_when_env_unset() {
         std::env::remove_var("OPENROUTER_API_KEY");
-        // Short content should pass through unchanged
-        let result = summarize_blocking_with_fallback("test query", "raw response content");
-        assert_eq!(result, "raw response content");
+        // get_api_key should always return Some now (hardcoded fallback key).
+        let key = get_api_key();
+        assert!(key.is_some(), "expected Some with hardcoded fallback key");
+        assert!(!key.unwrap().is_empty());
+    }
 
-        // Long content should be truncated
-        let long_content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12";
-        let result = summarize_blocking_with_fallback("test query", long_content);
-        assert!(result.contains("line1"));
-        assert!(result.contains("more lines)_"));
+    #[test]
+    fn test_is_available_always_true() {
+        // With the hardcoded fallback key, summarization is always available.
+        assert!(is_available());
     }
 
     #[test]
@@ -524,10 +564,11 @@ mod tests {
     }
 
     #[test]
-    fn test_interpret_screen_context_no_api_key() {
-        // Without API key, should return None
+    fn test_interpret_screen_context_does_not_panic() {
+        // interpret_screen_context now always has an API key (hardcoded fallback).
+        // It may succeed or fail (network dependent), but must not panic.
         std::env::remove_var("OPENROUTER_API_KEY");
-        let result = interpret_screen_context("some screen content", true);
-        assert!(result.is_none());
+        let _result = interpret_screen_context("some screen content", true);
+        // Result may be Some or None depending on network — both are acceptable.
     }
 }

@@ -16,12 +16,16 @@ pub mod change_detector;
 pub mod config;
 pub mod migration;
 pub mod notification_parser;
+pub mod ollama;
 pub mod onboarding;
 pub mod options;
 pub mod output_filter;
 pub mod structured_summarizer;
 pub mod summarizer;
 pub mod usage;
+
+// Re-export Ollama client
+pub use ollama::{OllamaClient, OllamaError};
 
 // Re-export commonly used items for convenience
 pub use config::{

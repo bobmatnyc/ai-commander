@@ -13,6 +13,8 @@ pub enum Provider {
     Anthropic,
     /// OpenAI API (GPT models).
     OpenAI,
+    /// Ollama local inference (runs models locally via http://localhost:11434).
+    Ollama,
 }
 
 impl std::fmt::Display for Provider {
@@ -21,6 +23,7 @@ impl std::fmt::Display for Provider {
             Self::OpenRouter => write!(f, "openrouter"),
             Self::Anthropic => write!(f, "anthropic"),
             Self::OpenAI => write!(f, "openai"),
+            Self::Ollama => write!(f, "ollama"),
         }
     }
 }
@@ -141,6 +144,7 @@ mod tests {
         assert_eq!(Provider::OpenRouter.to_string(), "openrouter");
         assert_eq!(Provider::Anthropic.to_string(), "anthropic");
         assert_eq!(Provider::OpenAI.to_string(), "openai");
+        assert_eq!(Provider::Ollama.to_string(), "ollama");
     }
 
     #[test]
