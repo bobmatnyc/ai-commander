@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
-const DEFAULT_MODEL: &str = "gemma3:4b";
+const DEFAULT_MODEL: &str = "qwen2.5-coder:7b-instruct";
 
 /// Preferred models to try in order when selecting the best available model.
 const PREFERRED_MODELS: &[&str] = &[
-    "gemma3:4b",
     "qwen2.5-coder:7b-instruct",
+    "gemma3:4b",
     "mistral:latest",
     "mistral-small3.2:latest",
 ];
@@ -78,7 +78,7 @@ pub struct OllamaClient {
 }
 
 impl OllamaClient {
-    /// Create a new client using the default model (`gemma3:4b`) and base URL.
+    /// Create a new client using the default model (`qwen2.5-coder:7b-instruct`) and base URL.
     pub fn new() -> Self {
         Self {
             base_url: OLLAMA_BASE_URL.to_string(),
@@ -232,7 +232,7 @@ mod tests {
     fn test_client_default_values() {
         let client = OllamaClient::new();
         assert_eq!(client.base_url, "http://localhost:11434");
-        assert_eq!(client.model, "gemma3:4b");
+        assert_eq!(client.model, "qwen2.5-coder:7b-instruct");
     }
 
     #[test]
