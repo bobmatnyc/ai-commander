@@ -799,6 +799,28 @@ impl TelegramState {
             .values()
             .find(|p| p.name == base_name || p.id.as_str() == base_name)
         {
+            // Auto-update stored path from tmux if the stored path is stale.
+            // The actual tmux working directory is the source of truth.
+            let mut project = project.clone();
+            if let Some(actual_cwd) = get_tmux_cwd(&project.name).await {
+                if actual_cwd != project.path && Path::new(&actual_cwd).is_dir() {
+                    info!(
+                        project = %project.name,
+                        old_path = %project.path,
+                        new_path = %actual_cwd,
+                        "Auto-updated stale project path from tmux cwd"
+                    );
+                    project.path = actual_cwd;
+                    if let Err(e) = self.store.save_project(&project) {
+                        warn!(
+                            project = %project.name,
+                            error = %e,
+                            "Failed to persist updated project path"
+                        );
+                    }
+                }
+            }
+
             // Validate project path still exists and is accessible
             validate_project_path(&project.path)
                 .map_err(TelegramError::SessionError)?;
@@ -1033,6 +1055,27 @@ impl TelegramState {
             .values()
             .find(|p| p.name == base_name || p.id.as_str() == base_name)
         {
+            // Auto-update stored path from tmux if the stored path is stale.
+            let mut project = project.clone();
+            if let Some(actual_cwd) = get_tmux_cwd(&project.name).await {
+                if actual_cwd != project.path && Path::new(&actual_cwd).is_dir() {
+                    info!(
+                        project = %project.name,
+                        old_path = %project.path,
+                        new_path = %actual_cwd,
+                        "Auto-updated stale project path from tmux cwd"
+                    );
+                    project.path = actual_cwd;
+                    if let Err(e) = self.store.save_project(&project) {
+                        warn!(
+                            project = %project.name,
+                            error = %e,
+                            "Failed to persist updated project path"
+                        );
+                    }
+                }
+            }
+
             // Validate project path still exists and is accessible
             validate_project_path(&project.path)
                 .map_err(TelegramError::SessionError)?;
