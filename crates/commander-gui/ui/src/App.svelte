@@ -68,7 +68,7 @@
 <main class="app">
   <header>
     <div class="header-left">
-      <img src="/aic-logo.svg" alt="AIC" class="header-logo" />
+      <img src="/ai-commander.png" alt="AI Commander" class="header-logo" />
       <h1>AI Commander</h1>
     </div>
 
