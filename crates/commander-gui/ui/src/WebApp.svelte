@@ -1,71 +1,19 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import SessionList from './lib/components/SessionList.svelte';
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
   import { Sun, Moon } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
 
-  let authenticated = false;
-  let pairCode = '';
-  let pairing = false;
+  // No auth needed — Tailscale handles network security
 
   function toggleTheme() {
     setTheme($resolvedTheme === 'dark' ? 'light' : 'dark');
   }
 
-  async function checkAuth() {
-    try {
-      const status = await fetch('/api/auth/status', {
-        headers: { Authorization: `Bearer ${localStorage.getItem('aic-auth-token') || ''}` }
-      });
-      if (status.ok) {
-        const data = await status.json();
-        authenticated = data.authenticated;
-      }
-    } catch {
-      // No auth required if endpoint doesn't exist (Tailscale-only mode)
-      authenticated = true;
-    }
-  }
-
-  async function pair() {
-    pairing = true;
-    try {
-      const resp = await fetch('/api/auth/pair', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: pairCode }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        localStorage.setItem('aic-auth-token', data.token);
-        authenticated = true;
-      }
-    } catch (e) {
-      console.error('Pairing failed:', e);
-    } finally {
-      pairing = false;
-    }
-  }
-
-  onMount(() => {
-    checkAuth();
-  });
 </script>
 
-{#if !authenticated}
-  <main class="auth-screen">
-    <img src="/ai-commander.png" alt="AI Commander" class="auth-logo" />
-    <h1>AI Commander</h1>
-    <p>Enter pairing code from the server</p>
-    <input bind:value={pairCode} placeholder="ABC123" maxlength="6" class="pair-input" />
-    <button on:click={pair} disabled={pairing || pairCode.length < 6} class="pair-btn">
-      {pairing ? 'Pairing...' : 'Connect'}
-    </button>
-  </main>
-{:else}
-  <main class="app">
+<main class="app">
     <header>
       <div class="header-left">
         <img src="/ai-commander.png" alt="AI Commander" class="header-logo" />
@@ -97,80 +45,9 @@
       </section>
     </div>
   </main>
-{/if}
 
 <style>
-  /* ── Auth screen ── */
-  .auth-screen {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100vh;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    gap: 1rem;
-  }
-
-  .auth-logo {
-    width: 64px;
-    height: 64px;
-    border-radius: 12px;
-  }
-
-  .auth-screen h1 {
-    font-size: 1.75rem;
-    font-weight: 700;
-    margin: 0;
-  }
-
-  .auth-screen p {
-    color: var(--text-secondary);
-    margin: 0;
-  }
-
-  .pair-input {
-    padding: 0.625rem 0.875rem;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
-    color: var(--text-primary);
-    font-size: 1.25rem;
-    font-weight: 600;
-    letter-spacing: 0.2em;
-    text-align: center;
-    text-transform: uppercase;
-    width: 10rem;
-    outline: none;
-    transition: border-color 0.2s;
-  }
-
-  .pair-input:focus {
-    border-color: var(--accent);
-  }
-
-  .pair-btn {
-    padding: 0.625rem 1.5rem;
-    background: var(--accent);
-    color: #ffffff;
-    border: none;
-    border-radius: 0.5rem;
-    font-size: 0.9rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: opacity 0.2s;
-  }
-
-  .pair-btn:hover:not(:disabled) {
-    opacity: 0.85;
-  }
-
-  .pair-btn:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  /* ── App shell (mirrors App.svelte) ── */
+  /* ── App shell ── */
   .app {
     display: flex;
     flex-direction: column;
