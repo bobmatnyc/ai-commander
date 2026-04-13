@@ -19,7 +19,30 @@ fn main() {
                 events::start_session_polling(app_handle, state_clone).await;
             });
 
-            // Start commander-api REST server on port 8765
+            // Set web-dist path for static file serving if not already set
+            if std::env::var("AIC_WEB_DIR").is_err() {
+                // Look for web-dist relative to the binary or workspace
+                let exe_dir = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                if let Some(dir) = &exe_dir {
+                    // Check bundle Resources/web-dist first
+                    let bundle_web = dir.join("../Resources/web-dist");
+                    let workspace_web = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .parent().and_then(|p| p.parent())
+                        .map(|p| p.join("web-dist"));
+
+                    if bundle_web.is_dir() {
+                        std::env::set_var("AIC_WEB_DIR", bundle_web);
+                    } else if let Some(ws) = workspace_web {
+                        if ws.is_dir() {
+                            std::env::set_var("AIC_WEB_DIR", ws);
+                        }
+                    }
+                }
+            }
+
+            // Start commander-api REST server
             let api_handle = tauri::async_runtime::spawn(async move {
                 use commander_api::{ApiConfig, AppState};
                 use commander_adapters::AdapterRegistry;
