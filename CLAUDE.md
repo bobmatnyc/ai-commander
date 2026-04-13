@@ -43,7 +43,7 @@ Rust workspace + Tauri desktop app (Svelte) + Web UI + Telegram bot.
 
 ### Build & Deploy
 
-**See [BUILD.md](./BUILD.md) for all build commands, deploy steps, and common mistakes.**
+**See [BUILD.md](./docs/BUILD.md) for all build commands, deploy steps, and common mistakes.**
 
 ### Open Tickets
 - #47 — Remote web client with P2P mesh
