@@ -231,6 +231,7 @@
       if (!raw) return;
 
       if (viewMode === 'raw') {
+        // Raw mode: show parsed terminal segments
         const segments = parseTerminalOutput(raw);
         for (const seg of segments) {
           addMessageToSession(sessionName, {
@@ -240,9 +241,21 @@
             segmentType: seg.type,
           });
         }
+      } else {
+        // Interpreted mode: filter noise and show only meaningful changes
+        const segments = parseTerminalOutput(raw);
+        const meaningful = segments.filter(s =>
+          s.type === 'output' && s.content.trim().length > 0
+        );
+        if (meaningful.length > 0) {
+          const combined = meaningful.map(s => s.content).join('\n');
+          addMessageToSession(sessionName, {
+            direction: 'received',
+            content: combined,
+            timestamp: new Date(),
+          });
+        }
       }
-      // In interpreted mode, session-output events are suppressed;
-      // meaningful content arrives via chat-event (text/tool_use/complete).
 
       if (autoScroll) {
         setTimeout(scrollToBottom, 10);
