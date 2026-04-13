@@ -5,6 +5,7 @@ use axum::{
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tracing::info;
 
 use crate::config::ApiConfig;
@@ -19,7 +20,7 @@ pub fn create_router(state: AppState) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    Router::new()
+    let router = Router::new()
         // Health
         .route("/api/health", get(handlers::health))
         // Auth
@@ -29,6 +30,7 @@ pub fn create_router(state: AppState) -> Router {
         // Projects
         .route("/api/projects", get(handlers::list_projects))
         .route("/api/projects", post(handlers::create_project))
+        .route("/api/projects/directories", get(handlers::web::list_project_directories))
         .route("/api/projects/{id}", get(handlers::get_project))
         .route("/api/projects/{id}", delete(handlers::delete_project))
         .route("/api/projects/{id}/start", post(handlers::start_project))
@@ -49,9 +51,50 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/work/{id}/complete", post(handlers::complete_work))
         // Adapters
         .route("/api/adapters", get(handlers::list_adapters))
+        // Web UI — Session management
+        .route("/api/sessions", get(handlers::web::list_sessions))
+        .route("/api/sessions", post(handlers::web::create_session))
+        .route("/api/sessions/disconnect", post(handlers::web::disconnect_session))
+        .route("/api/sessions/message", post(handlers::web::send_message))
+        .route("/api/sessions/rename", post(handlers::web::rename_session))
+        .route("/api/sessions/{name}/connect", post(handlers::web::connect_session))
+        .route("/api/sessions/{name}", delete(handlers::web::stop_session))
+        .route("/api/sessions/{name}/interpret", post(handlers::web::interpret_session))
+        .route("/api/sessions/{name}/summary", post(handlers::web::get_session_summary))
+        .route("/api/sessions/{name}/capture", post(handlers::web::capture_session_output))
+        // Web UI — Process monitoring
+        .route("/api/processes", get(handlers::web::list_processes))
+        .route("/api/processes/clean", post(handlers::web::kill_stale_processes))
+        // Web UI — Bot status
+        .route("/api/bot/status", get(handlers::web::get_bot_status))
         // Apply middleware
         .layer(cors)
-        .with_state(state)
+        .with_state(state);
+
+    // Attach static file serving when the web-dist directory is present.
+    // The directory is configurable via the AIC_WEB_DIR environment variable.
+    let web_dir = std::env::var("AIC_WEB_DIR").unwrap_or_else(|_| {
+        // Default: look for web-dist next to the running binary.
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+        if let Some(dir) = exe_dir {
+            let candidate = dir.join("web-dist");
+            if candidate.is_dir() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+        "web-dist".to_string()
+    });
+
+    if std::path::Path::new(&web_dir).is_dir() {
+        info!("serving web UI from {}", web_dir);
+        router.fallback_service(
+            ServeDir::new(&web_dir).append_index_html_on_directories(true),
+        )
+    } else {
+        router
+    }
 }
 
 /// Starts the API server.

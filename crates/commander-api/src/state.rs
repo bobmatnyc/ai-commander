@@ -11,6 +11,7 @@ use commander_core::config;
 use commander_events::EventManager;
 use commander_models::Project;
 use commander_runtime::Runtime;
+use commander_tmux::TmuxOrchestrator;
 use commander_work::WorkQueue;
 
 use crate::config::ApiConfig;
@@ -33,6 +34,8 @@ pub struct AppState {
     pub projects: Arc<RwLock<HashMap<String, Project>>>,
     /// Web client token store for browser-based auth.
     pub web_clients: WebClientStore,
+    /// Tmux orchestrator (optional - unavailable when tmux is not installed).
+    pub tmux: Option<Arc<TmuxOrchestrator>>,
 }
 
 impl AppState {
@@ -58,6 +61,8 @@ impl AppState {
         adapter_registry: AdapterRegistry,
         storage_dir: PathBuf,
     ) -> Self {
+        let tmux = TmuxOrchestrator::new().ok().map(Arc::new);
+
         Self {
             config: Arc::new(config),
             runtime: runtime.map(|r| Arc::new(RwLock::new(r))),
@@ -66,6 +71,7 @@ impl AppState {
             adapter_registry: Arc::new(adapter_registry),
             projects: Arc::new(RwLock::new(HashMap::new())),
             web_clients: WebClientStore::new(&storage_dir),
+            tmux,
         }
     }
 

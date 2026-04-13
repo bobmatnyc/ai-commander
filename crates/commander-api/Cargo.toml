@@ -14,6 +14,7 @@ commander-work = { path = "../commander-work" }
 commander-runtime = { path = "../commander-runtime" }
 commander-core = { path = "../commander-core" }
 commander-daemon = { path = "../commander-daemon" }
+commander-tmux = { path = "../commander-tmux" }
 
 axum.workspace = true
 tower.workspace = true

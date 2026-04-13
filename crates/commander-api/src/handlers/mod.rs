@@ -5,6 +5,7 @@ pub mod auth;
 pub mod events;
 pub mod health;
 pub mod projects;
+pub mod web;
 pub mod work;
 
 pub use adapters::*;
