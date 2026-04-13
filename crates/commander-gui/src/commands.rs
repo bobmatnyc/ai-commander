@@ -708,6 +708,131 @@ pub async fn open_in_terminal_app(session_name: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub name: String,
+    pub cpu: f32,
+    pub memory_mb: f64,
+    pub session: Option<String>,
+    pub age_seconds: u64,
+    pub stale: bool,
+}
+
+#[tauri::command]
+pub async fn list_processes() -> Result<Vec<ProcessInfo>, String> {
+    let output = std::process::Command::new("ps")
+        .args(["aux"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut processes = Vec::new();
+
+    for line in stdout.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 11 {
+            continue;
+        }
+
+        let command = fields[10..].join(" ");
+
+        let is_tracked = command.contains("python")
+            || command.contains("node")
+            || command.contains("cargo");
+
+        if !is_tracked {
+            continue;
+        }
+
+        // Skip our own processes (the GUI, the daemon)
+        if command.contains("commander-gui") || command.contains("commander-daemon") {
+            continue;
+        }
+
+        let pid: u32 = fields[1].parse().unwrap_or(0);
+        let cpu: f32 = fields[2].parse().unwrap_or(0.0);
+
+        // Use the RSS column (field index 5) for memory in KB
+        let rss_kb: f64 = fields[5].parse().unwrap_or(0.0);
+        let memory_mb = rss_kb / 1024.0;
+
+        // age_seconds: parse elapsed time from the TIME field (field 9) — "MM:SS" or "HH:MM:SS"
+        let age_seconds = parse_ps_time(fields[9]);
+
+        // session: not derived here — would require tracing parent PIDs through tmux
+        let session: Option<String> = None;
+
+        // Stale: no tmux session association and CPU is essentially idle
+        let stale = session.is_none() && cpu < 0.1;
+
+        let name = if command.len() > 80 {
+            format!("{}...", &command[..77])
+        } else {
+            command.to_string()
+        };
+
+        processes.push(ProcessInfo {
+            pid,
+            name,
+            cpu,
+            memory_mb,
+            session,
+            age_seconds,
+            stale,
+        });
+    }
+
+    // Sort: stale first, then by memory descending
+    processes.sort_by(|a, b| {
+        b.stale
+            .cmp(&a.stale)
+            .then(b.memory_mb.partial_cmp(&a.memory_mb).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    Ok(processes)
+}
+
+/// Parse the CPU time field from `ps aux` (column 9, zero-indexed).
+/// Accepts "MM:SS" or "HH:MM:SS" formats and returns total seconds.
+fn parse_ps_time(time_str: &str) -> u64 {
+    let parts: Vec<&str> = time_str.split(':').collect();
+    match parts.as_slice() {
+        [mm, ss] => {
+            let minutes: u64 = mm.parse().unwrap_or(0);
+            let seconds: u64 = ss.parse().unwrap_or(0);
+            minutes * 60 + seconds
+        }
+        [hh, mm, ss] => {
+            let hours: u64 = hh.parse().unwrap_or(0);
+            let minutes: u64 = mm.parse().unwrap_or(0);
+            let seconds: u64 = ss.parse().unwrap_or(0);
+            hours * 3600 + minutes * 60 + seconds
+        }
+        _ => 0,
+    }
+}
+
+#[tauri::command]
+pub async fn kill_stale_processes() -> Result<u32, String> {
+    let processes = list_processes().await?;
+    let stale: Vec<_> = processes.iter().filter(|p| p.stale).collect();
+    let mut killed = 0u32;
+
+    for proc in &stale {
+        let result = std::process::Command::new("kill")
+            .args(["-TERM", &proc.pid.to_string()])
+            .output();
+
+        if result.is_ok() {
+            killed += 1;
+            eprintln!("[GUI] Killed stale process {} (PID {})", proc.name, proc.pid);
+        }
+    }
+
+    Ok(killed)
+}
+
 #[tauri::command]
 pub async fn open_in_iterm(
     session_name: String,

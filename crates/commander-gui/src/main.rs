@@ -92,6 +92,8 @@ fn main() {
             commands::capture_session_output,
             commands::rename_session,
             commands::open_in_terminal_app,
+            commands::list_processes,
+            commands::kill_stale_processes,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
