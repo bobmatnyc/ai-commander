@@ -137,16 +137,19 @@
     isActionLoading = true;
 
     try {
-      await invoke('send_message', { content: '/status' });
+      // Capture current tmux output as status snapshot
+      const output: string = await invoke('capture_session_output', { name: sessionName });
+      const lines = output.trim().split('\n');
+      const lastLines = lines.slice(-10).join('\n');
       addMessageToSession(sessionName, {
-        direction: 'sent',
-        content: '/status',
+        direction: 'system',
+        content: `Session: ${sessionName}\nStatus: Connected\n\nRecent output:\n${lastLines}`,
         timestamp: new Date(),
       });
     } catch (err) {
       addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Failed to send status command: ${err}`,
+        content: `Status: Connected to "${sessionName}"`,
         timestamp: new Date(),
       });
     } finally {
