@@ -51,8 +51,8 @@ impl ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_string(),
-            port: 8765,
+            host: "0.0.0.0".to_string(),
+            port: 9876,
             cors_origins: vec!["*".to_string()],
             start_time: Instant::now(),
         }
