@@ -68,12 +68,13 @@ fn main() {
             }
 
             // Start claude-mpm serve daemon (port 7777) for structured chat SSE
+            // claude-mpm is often a shell function, so invoke through sh -l -c
             tauri::async_runtime::spawn(async move {
                 eprintln!("[GUI] Starting claude-mpm serve...");
-                let result = tokio::process::Command::new("claude-mpm")
-                    .args(["serve", "start"])
+                let result = tokio::process::Command::new("sh")
+                    .args(["-l", "-c", "claude-mpm serve start"])
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
                     .spawn();
 
                 match result {
