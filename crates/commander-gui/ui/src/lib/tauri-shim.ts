@@ -23,6 +23,18 @@ const TRANSFORMS: Record<string, (data: any) => any> = {
     if (typeof data === 'object' && data?.summary) return data.summary;
     return data;
   },
+  list_project_directories: (data: any) => {
+    // REST returns {directories: [{path, name, is_git}]}
+    // Tauri returns [{name, path, project_type}]
+    if (data?.directories) {
+      return data.directories.map((d: any) => ({
+        name: d.name,
+        path: d.path,
+        project_type: d.is_git ? 'git' : 'directory',
+      }));
+    }
+    return data;
+  },
   capture_session_output: (data: any) => {
     // REST may wrap in {output: "..."}
     if (typeof data === 'object' && data?.output) return data.output;
