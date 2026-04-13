@@ -144,16 +144,34 @@
     isActionLoading = true;
 
     try {
-      const interpretation: string = await invoke('interpret_session', { name: sessionName });
+      // Get both structured summary and LLM interpretation
+      const [summary, interpretation] = await Promise.allSettled([
+        invoke('get_session_summary', { name: sessionName }),
+        invoke('interpret_session', { name: sessionName }),
+      ]);
+
+      let status = `📊 Session: ${sessionName}\n`;
+
+      if (summary.status === 'fulfilled') {
+        const s = summary.value as any;
+        status += `Adapter: ${s.adapter}\n`;
+        status += `State: ${s.is_idle ? '⏸ Idle' : '🔄 Active'}\n`;
+        status += `Lines tracked: ${lineCount}\n`;
+      }
+
+      if (interpretation.status === 'fulfilled' && interpretation.value) {
+        status += `\n${interpretation.value}`;
+      }
+
       addMessageToSession(sessionName, {
         direction: 'system',
-        content: interpretation,
+        content: status,
         timestamp: new Date(),
       });
     } catch (err) {
       addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Connected to "${sessionName}"`,
+        content: `Connected to "${sessionName}" · ${lineCount} lines`,
         timestamp: new Date(),
       });
     } finally {
