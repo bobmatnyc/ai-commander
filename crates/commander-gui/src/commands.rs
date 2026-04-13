@@ -433,10 +433,12 @@ pub async fn rebuild_from_source(app: tauri::AppHandle) -> Result<String, String
         workspace_root.display()
     );
 
-    // Build frontend first, then cargo tauri build — fire and forget
+    // Build frontend, rebuild Tauri app, then reopen automatically
+    let app_path = workspace_root
+        .join("target/release/bundle/macos/AIC - AI Commander.app");
     let script = format!(
-        "cd {:?}/ui && npm run build && cd {:?} && cargo tauri build --bundles app",
-        gui_dir, gui_dir
+        "cd {:?}/ui && npm run build && cd {:?} && cargo tauri build --bundles app && open {:?}",
+        gui_dir, gui_dir, app_path
     );
 
     std::process::Command::new("sh")
