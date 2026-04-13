@@ -89,6 +89,11 @@ const RESPONSE_TRANSFORMS: Record<string, (data: any) => any> = {
     if (data?.processes) return data.processes;
     return data;
   },
+  interpret_session: (data: Record<string, unknown>) => {
+    // REST returns {session, output}; frontend expects the output string
+    if (typeof data === 'object' && data?.output) return data.output;
+    return data;
+  },
 };
 
 /** Call a backend command — auto-detects Tauri vs web */

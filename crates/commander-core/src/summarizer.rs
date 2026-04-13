@@ -463,9 +463,6 @@ Rules:
 /// # Returns
 /// An interpretation string, or None if LLM is unavailable or fails.
 pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<String> {
-    let api_key = get_api_key()?;
-    let model = get_model();
-
     let state_hint = if is_ready {
         "The session IS ready for input (showing prompt)."
     } else {
@@ -479,6 +476,24 @@ pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<
         screen_content.chars().take(3000).collect::<String>()
     );
 
+    // Try Ollama first (local, free, fast) via blocking HTTP
+    match interpret_via_ollama(&user_prompt) {
+        Some(result) => return Some(result),
+        None => {
+            info!("Ollama unavailable for interpret_screen_context, falling back to OpenRouter");
+        }
+    }
+
+    // Fall back to OpenRouter
+    let api_key = match get_api_key() {
+        Some(key) => key,
+        None => {
+            warn!("No OpenRouter API key available for interpret_screen_context");
+            return None;
+        }
+    };
+    let model = get_model();
+
     let request_body = serde_json::json!({
         "model": model,
         "messages": [
@@ -488,22 +503,95 @@ pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<
         "max_tokens": 100
     });
 
-    let client = reqwest::blocking::Client::builder()
+    let client = match reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .ok()?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to build HTTP client for screen interpretation: {}", e);
+            return None;
+        }
+    };
 
-    let response = client
+    let response = match client
         .post(OPENROUTER_API_URL)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&request_body)
         .send()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("OpenRouter request failed for screen interpretation: {}", e);
+            return None;
+        }
+    };
+
+    let json: serde_json::Value = match response.json() {
+        Ok(j) => j,
+        Err(e) => {
+            warn!("Failed to parse OpenRouter response for screen interpretation: {}", e);
+            return None;
+        }
+    };
+
+    let result = json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if result.is_none() {
+        warn!("OpenRouter returned empty content for screen interpretation");
+    }
+
+    result
+}
+
+/// Try to interpret screen context via local Ollama (blocking HTTP call).
+fn interpret_via_ollama(user_prompt: &str) -> Option<String> {
+    let ollama_url = "http://localhost:11434";
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
         .ok()?;
 
-    let json: serde_json::Value = response.json().ok()?;
+    // Quick availability check
+    if client
+        .get(&format!("{}/api/tags", ollama_url))
+        .send()
+        .ok()
+        .map(|r| r.status().is_success())
+        != Some(true)
+    {
+        return None;
+    }
 
-    json["choices"][0]["message"]["content"]
+    // Use a small model for fast interpretation
+    let body = serde_json::json!({
+        "model": "qwen2.5-coder:7b-instruct",
+        "messages": [
+            {"role": "system", "content": SCREEN_INTERPRET_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "stream": false
+    });
+
+    let response = client
+        .post(&format!("{}/api/chat", ollama_url))
+        .timeout(std::time::Duration::from_secs(15))
+        .json(&body)
+        .send()
+        .ok()?;
+
+    if !response.status().is_success() {
+        warn!("Ollama chat request failed with status {}", response.status());
+        return None;
+    }
+
+    let json: serde_json::Value = response.json().ok()?;
+    json["message"]["content"]
         .as_str()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())

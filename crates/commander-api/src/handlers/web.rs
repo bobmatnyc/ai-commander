@@ -361,15 +361,20 @@ pub async fn interpret_session(
     // Same interpretation pipeline as Telegram bot
     let cleaned = commander_core::clean_response(&raw);
     let is_idle = commander_core::is_claude_ready(&cleaned);
-    let fallback = commander_core::clean_screen_preview(&raw, 10);
 
-    let fallback_clone = fallback.clone();
     let output = tokio::task::spawn_blocking(move || {
         commander_core::interpret_screen_context(&cleaned, is_idle)
-            .unwrap_or(fallback_clone)
     })
     .await
-    .unwrap_or(fallback);
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| {
+        if is_idle {
+            "Session is idle, waiting for input. (Interpretation unavailable \u{2014} check Ollama status)".to_string()
+        } else {
+            "Session is actively processing. (Interpretation unavailable \u{2014} check Ollama status)".to_string()
+        }
+    });
 
     Ok(Json(SessionOutputResponse {
         session: name,
