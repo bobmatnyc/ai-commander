@@ -290,9 +290,9 @@ pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String>
     let home = std::env::var("HOME").map_err(|e| e.to_string())?;
 
     // Phase 1: Scan common project roots for directories containing .claude or .claude-mpm
+    // Use canonicalize to deduplicate case-insensitive paths (macOS APFS)
     let scan_roots = [
         PathBuf::from(&home).join("Projects"),
-        PathBuf::from(&home).join("projects"),
         PathBuf::from(&home).join("src"),
         PathBuf::from(&home).join("work"),
         PathBuf::from(&home).join("dev"),
@@ -315,7 +315,9 @@ pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String>
                 continue;
             }
 
-            let path_str = path.to_string_lossy().to_string();
+            // Canonicalize to resolve symlinks and case-insensitive duplicates
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let path_str = canonical.to_string_lossy().to_string();
             if !seen_paths.insert(path_str.clone()) {
                 continue;
             }
@@ -347,7 +349,9 @@ pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String>
     let store = commander_persistence::StateStore::new(state_dir);
     if let Ok(projects) = store.load_all_projects() {
         for (_id, project) in projects {
-            let path_str = project.path.clone();
+            let p = PathBuf::from(&project.path);
+            let canonical = p.canonicalize().unwrap_or(p);
+            let path_str = canonical.to_string_lossy().to_string();
             if seen_paths.insert(path_str.clone()) {
                 let adapter = project
                     .adapter_type
@@ -381,17 +385,19 @@ pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String>
             if !decoded_path.is_dir() {
                 continue;
             }
-            if !seen_paths.insert(decoded.clone()) {
+            let canonical = decoded_path.canonicalize().unwrap_or_else(|_| decoded_path.clone());
+            let canonical_str = canonical.to_string_lossy().to_string();
+            if !seen_paths.insert(canonical_str.clone()) {
                 continue;
             }
-            let proj_name = decoded_path
+            let proj_name = canonical
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
             dirs.push(ProjectDirectory {
                 name: proj_name,
-                path: decoded,
+                path: canonical_str,
                 project_type: "claude-code".to_string(),
             });
         }

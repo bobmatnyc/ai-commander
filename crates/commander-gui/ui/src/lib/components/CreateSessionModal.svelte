@@ -37,9 +37,7 @@
   $: filteredDirectories = directories.filter(dir => {
     if (!filterText) return true;
     const search = filterText.toLowerCase();
-    return dir.name.toLowerCase().includes(search)
-      || dir.path.toLowerCase().includes(search)
-      || dir.project_type.toLowerCase().includes(search);
+    return dir.path.toLowerCase().includes(search);
   });
 
   async function loadDirectories() {
