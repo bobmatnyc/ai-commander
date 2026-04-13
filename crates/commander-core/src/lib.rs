@@ -13,6 +13,7 @@
 //! - **summarizer**: Summarize long responses using OpenRouter API
 
 pub mod change_detector;
+pub mod client_adapter;
 pub mod config;
 pub mod migration;
 pub mod notification_parser;
@@ -53,6 +54,12 @@ pub use notification_parser::{parse_notification, parse_notifications_all, parse
 
 // Re-export option detection
 pub use options::{DetectedOptions, OptionDetector, OptionFormat, ParsedOption};
+
+// Re-export client adapter types and pipeline functions
+pub use client_adapter::{
+    interpret_output, interpret_output_with_summary, ClientCapabilities, ClientFragment,
+    ClientRenderer, InterpretedOutput, SessionStatus,
+};
 
 // Re-export structured summarizer
 pub use structured_summarizer::{extract as extract_structured, StructuredSummary, TestResult};
