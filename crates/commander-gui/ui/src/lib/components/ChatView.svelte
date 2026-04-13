@@ -15,6 +15,12 @@
   let streamingMessageId: string | null = null;
   let viewMode: 'interpreted' | 'raw' = 'interpreted';
 
+  let lineCount = 0;
+  let lastSummaryAt = 0;
+  const SUMMARY_THRESHOLD = 50;
+  let isActive = false;
+  let activityTimer: number;
+
   function scrollToBottom() {
     if (terminalEl) {
       terminalEl.scrollTop = terminalEl.scrollHeight;
@@ -230,6 +236,26 @@
       const raw = content && content.length > 0 ? content : full_content;
       if (!raw) return;
 
+      // Track activity
+      lineCount += raw.split('\n').length;
+      isActive = true;
+      clearTimeout(activityTimer);
+      activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
+
+      // Auto-summarize every SUMMARY_THRESHOLD lines
+      if (lineCount - lastSummaryAt >= SUMMARY_THRESHOLD) {
+        lastSummaryAt = lineCount;
+        invoke('interpret_session', { name: sessionName })
+          .then((summary: unknown) => {
+            addMessageToSession(sessionName, {
+              direction: 'system',
+              content: `Summary (${lineCount} lines):\n${summary as string}`,
+              timestamp: new Date(),
+            });
+          })
+          .catch(() => {});
+      }
+
       if (viewMode === 'raw') {
         // Raw mode: show parsed terminal segments
         const segments = parseTerminalOutput(raw);
@@ -312,6 +338,9 @@
   $: if ($currentSession) {
     connecting = true;
     waitingForResponse = false;
+    lineCount = 0;
+    lastSummaryAt = 0;
+    isActive = false;
     invoke('interpret_session', { name: $currentSession.name })
       .then((interpretation: unknown) => {
         if ($currentSession) {
@@ -384,6 +413,17 @@
           Raw
         </button>
       </div>
+
+      {#if isActive}
+        <span class="status-badge active">
+          <span class="activity-dot"></span>
+          Active · {lineCount} lines
+        </span>
+      {:else if lineCount > 0}
+        <span class="status-badge idle-count">
+          {lineCount} lines
+        </span>
+      {/if}
 
       {#if connecting}
         <span class="status-badge connecting">
@@ -707,5 +747,29 @@
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
     font-size: 12px;
     color: var(--text-primary);
+  }
+
+  .activity-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #10b981;
+    animation: pulse 1.5s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .status-badge.active {
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.1);
+  }
+
+  .status-badge.idle-count {
+    color: var(--text-secondary);
+    background: var(--bg-surface);
   }
 </style>
