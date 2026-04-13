@@ -761,12 +761,12 @@ pub async fn create_session(
 
     // Determine the adapter launch command
     let launch_cmd = match adapter.as_str() {
-        "claude-code" => "claude",
-        "claude-mpm" => "claude-mpm",
+        "claude-code" => "claude --dangerously-skip-permissions",
+        "claude-mpm" => "claude-mpm",  // MPM inherits --dangerously-skip-permissions via its own config
         "auggie" => "auggie",
         "codex" => "codex",
         "shell" => "", // No command needed for bare shell
-        _ => "claude", // Default to claude
+        _ => "claude --dangerously-skip-permissions",
     };
 
     // Launch the adapter inside the tmux session
