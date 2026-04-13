@@ -462,7 +462,8 @@ pub async fn list_project_directories() -> Json<ProjectDirectoryListResponse> {
     let mut directories = Vec::new();
 
     let home = dirs_home();
-    let search_roots: Vec<std::path::PathBuf> = ["src", "projects", "code", "work", "dev"]
+    let scan_dirs = load_scan_directories(&home);
+    let search_roots: Vec<std::path::PathBuf> = scan_dirs
         .iter()
         .filter_map(|subdir| {
             home.as_ref().map(|h| h.join(subdir))
@@ -478,13 +479,15 @@ pub async fn list_project_directories() -> Json<ProjectDirectoryListResponse> {
                     continue;
                 }
 
-                let is_project = ["Cargo.toml", "package.json", "pyproject.toml", "go.mod"]
+                let is_project = PROJECT_MARKERS
                     .iter()
                     .any(|marker| path.join(marker).exists());
 
                 let is_git = path.join(".git").is_dir();
+                let has_claude = path.join(".claude").is_dir();
+                let has_mpm = path.join(".claude-mpm").is_dir();
 
-                if is_project || is_git {
+                if is_project || is_git || has_claude || has_mpm {
                     let name = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -511,6 +514,48 @@ pub async fn list_project_directories() -> Json<ProjectDirectoryListResponse> {
 /// Returns the home directory path.
 fn dirs_home() -> Option<std::path::PathBuf> {
     std::env::var("HOME").ok().map(std::path::PathBuf::from)
+}
+
+/// Default directories to scan for projects (relative to home dir).
+const DEFAULT_SCAN_DIRECTORIES: &[&str] = &[
+    "Projects",
+    "src",
+    "projects",
+    "code",
+    "work",
+    "dev",
+    "Duetto/repos",
+];
+
+/// Project file markers that indicate a directory is a project.
+const PROJECT_MARKERS: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+];
+
+/// Read scan_directories from ~/.ai-commander/config.json, falling back to defaults.
+fn load_scan_directories(home: &Option<std::path::PathBuf>) -> Vec<String> {
+    if let Some(h) = home {
+        let config_path = h.join(".ai-commander").join("config.json");
+        if config_path.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&config_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) {
+                    if let Some(arr) = val.get("scan_directories").and_then(|v| v.as_array()) {
+                        let dirs: Vec<String> = arr
+                            .iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                        if !dirs.is_empty() {
+                            return dirs;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    DEFAULT_SCAN_DIRECTORIES.iter().map(|s| s.to_string()).collect()
 }
 
 // ==================== Process handlers ====================

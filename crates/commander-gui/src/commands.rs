@@ -566,18 +566,59 @@ pub fn list_adapters() -> Vec<AdapterInfo> {
 pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String> {
     use std::collections::HashSet;
 
+    /// Default directories to scan for projects (relative to home dir).
+    const DEFAULT_SCAN_DIRECTORIES: &[&str] = &[
+        "Projects",
+        "src",
+        "projects",
+        "code",
+        "work",
+        "dev",
+        "Duetto/repos",
+    ];
+
+    /// Project file markers that indicate a directory is a project.
+    const PROJECT_MARKERS: &[&str] = &[
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+    ];
+
     let mut dirs: Vec<ProjectDirectory> = Vec::new();
     let mut seen_paths: HashSet<String> = HashSet::new();
     let home = std::env::var("HOME").map_err(|e| e.to_string())?;
 
-    // Phase 1: Scan common project roots for directories containing .claude or .claude-mpm
+    // Read scan_directories from config, fall back to defaults.
+    let scan_dirs: Vec<String> = {
+        let config_path = PathBuf::from(&home).join(".ai-commander").join("config.json");
+        if config_path.exists() {
+            std::fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+                .and_then(|val| {
+                    val.get("scan_directories")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect::<Vec<String>>()
+                        })
+                })
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_SCAN_DIRECTORIES.iter().map(|s| s.to_string()).collect())
+        } else {
+            DEFAULT_SCAN_DIRECTORIES.iter().map(|s| s.to_string()).collect()
+        }
+    };
+
+    // Phase 1: Scan project roots for directories that look like projects.
     // Use canonicalize to deduplicate case-insensitive paths (macOS APFS)
-    let scan_roots = [
-        PathBuf::from(&home).join("Projects"),
-        PathBuf::from(&home).join("src"),
-        PathBuf::from(&home).join("work"),
-        PathBuf::from(&home).join("dev"),
-    ];
+    let scan_roots: Vec<PathBuf> = scan_dirs
+        .iter()
+        .map(|subdir| PathBuf::from(&home).join(subdir))
+        .filter(|p| p.is_dir())
+        .collect();
 
     for root in &scan_roots {
         let Ok(entries) = std::fs::read_dir(root) else {
@@ -591,8 +632,12 @@ pub async fn list_project_directories() -> Result<Vec<ProjectDirectory>, String>
 
             let has_claude = path.join(".claude").is_dir();
             let has_mpm = path.join(".claude-mpm").is_dir();
+            let is_project = PROJECT_MARKERS
+                .iter()
+                .any(|marker| path.join(marker).exists());
+            let is_git = path.join(".git").is_dir();
 
-            if !has_claude && !has_mpm {
+            if !has_claude && !has_mpm && !is_project && !is_git {
                 continue;
             }
 
