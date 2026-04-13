@@ -261,7 +261,7 @@
       activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
 
       // Auto-summarize: first output immediately, then every SUMMARY_THRESHOLD lines
-      const shouldSummarize = (lastSummaryAt === 0 && lineCount >= 5)
+      const shouldSummarize = (lastSummaryAt === 0 && lineCount >= 2)
         || (lineCount - lastSummaryAt >= SUMMARY_THRESHOLD);
       if (shouldSummarize && viewMode === 'interpreted') {
         lastSummaryAt = lineCount;
@@ -279,7 +279,7 @@
       }
 
       if (viewMode === 'raw') {
-        // Raw mode: show parsed terminal segments
+        // Raw mode: show parsed terminal segments (filtered)
         const segments = parseTerminalOutput(raw);
         for (const seg of segments) {
           addMessageToSession(sessionName, {
@@ -289,12 +289,9 @@
             segmentType: seg.type,
           });
         }
-      } else {
-        // Interpreted mode: suppress raw output entirely.
-        // Activity tracking + auto-summarize above handles display.
-        // Only the periodic interpret_session summaries are shown.
-        // (Same approach as the Telegram bot — never show raw terminal text)
       }
+      // Interpreted mode: no raw output shown. Only LLM summaries
+      // from the auto-summarize block above are displayed.
 
       if (autoScroll) {
         setTimeout(scrollToBottom, 10);
