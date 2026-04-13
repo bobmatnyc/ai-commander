@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke } from '../transport';
   import { X } from 'lucide-svelte';
 
   export let show = false;
@@ -207,7 +207,8 @@
   }
 
   .modal-content {
-    background: white;
+    background: var(--bg-primary, white);
+    color: var(--text-primary, #1f2937);
     border-radius: 8px;
     width: 90%;
     max-width: 600px;
@@ -221,7 +222,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 1.5rem;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--border, #e5e7eb);
   }
 
   .modal-header h2 {
@@ -237,11 +238,11 @@
     padding: 0.25rem;
     display: flex;
     align-items: center;
-    color: #6b7280;
+    color: var(--text-secondary, #6b7280);
   }
 
   .close-btn:hover {
-    color: #1f2937;
+    color: var(--text-primary, #1f2937);
   }
 
   .modal-body {
@@ -258,16 +259,18 @@
     margin-bottom: 0.5rem;
     font-weight: 500;
     font-size: 0.875rem;
-    color: #374151;
+    color: var(--text-primary, #374151);
   }
 
   .input {
     width: 100%;
     padding: 0.5rem 0.75rem;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border, #d1d5db);
     border-radius: 6px;
     font-size: 0.875rem;
     box-sizing: border-box;
+    background: var(--bg-secondary, white);
+    color: var(--text-primary, inherit);
   }
 
   .input:focus {
@@ -305,23 +308,23 @@
     padding-top: 0.375rem;
     padding-bottom: 0.375rem;
     font-size: 0.8125rem;
-    border-color: #e5e7eb;
-    background: #f9fafb;
+    border-color: var(--border, #e5e7eb);
+    background: var(--bg-surface, #f9fafb);
   }
 
   .filter-input:focus {
-    background: white;
+    background: var(--bg-primary, white);
     border-color: #3b82f6;
   }
 
   .filter-count {
     margin: 0 0 0.375rem;
     font-size: 0.75rem;
-    color: #9ca3af;
+    color: var(--text-secondary, #9ca3af);
   }
 
   .directory-list {
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border, #d1d5db);
     border-radius: 6px;
     max-height: 220px;
     overflow-y: auto;
@@ -331,19 +334,19 @@
     width: 100%;
     padding: 0.75rem;
     border: none;
-    border-bottom: 1px solid #e5e7eb;
-    background: white;
+    border-bottom: 1px solid var(--border, #e5e7eb);
+    background: var(--bg-primary, white);
     cursor: pointer;
     text-align: left;
     transition: background 0.2s;
   }
 
   .directory-item:hover {
-    background: #f9fafb;
+    background: var(--bg-surface, #f9fafb);
   }
 
   .directory-item.selected {
-    background: #dbeafe;
+    background: var(--bg-surface, #dbeafe);
     border-left: 3px solid #3b82f6;
   }
 
@@ -361,26 +364,26 @@
   .dir-name {
     font-weight: 500;
     font-size: 0.875rem;
-    color: #1f2937;
+    color: var(--text-primary, #1f2937);
   }
 
   .dir-type {
     font-size: 0.75rem;
     padding: 0.125rem 0.5rem;
-    background: #f3f4f6;
+    background: var(--bg-surface, #f3f4f6);
     border-radius: 9999px;
-    color: #6b7280;
+    color: var(--text-secondary, #6b7280);
   }
 
   .dir-path {
     font-size: 0.75rem;
-    color: #6b7280;
+    color: var(--text-secondary, #6b7280);
   }
 
   .no-dirs {
     padding: 2rem;
     text-align: center;
-    color: #6b7280;
+    color: var(--text-secondary, #6b7280);
     font-size: 0.875rem;
   }
 
@@ -398,7 +401,7 @@
     justify-content: flex-end;
     gap: 0.75rem;
     padding: 1.5rem;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--border, #e5e7eb);
   }
 
   .btn {
@@ -417,12 +420,12 @@
   }
 
   .btn-secondary {
-    background: #f3f4f6;
-    color: #374151;
+    background: var(--bg-surface, #f3f4f6);
+    color: var(--text-primary, #374151);
   }
 
   .btn-secondary:hover:not(:disabled) {
-    background: #e5e7eb;
+    background: var(--bg-secondary, #e5e7eb);
   }
 
   .btn-primary {

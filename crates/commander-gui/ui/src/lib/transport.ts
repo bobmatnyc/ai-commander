@@ -24,6 +24,8 @@ const API_MAP: Record<string, { method: string; path: string | ((args: Record<st
   list_processes: { method: 'GET', path: '/api/processes' },
   kill_stale_processes: { method: 'POST', path: '/api/processes/clean' },
   rename_session: { method: 'POST', path: '/api/sessions/rename' },
+  get_config: { method: 'GET', path: '/api/config' },
+  save_config: { method: 'POST', path: '/api/config' },
 };
 
 async function fetchApi(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -80,6 +82,11 @@ const RESPONSE_TRANSFORMS: Record<string, (data: any) => any> = {
   list_project_directories: (data) => {
     // REST may wrap in {directories: [...]}
     if (data?.directories) return data.directories;
+    return data;
+  },
+  list_processes: (data) => {
+    // REST returns {processes: [...], total}; frontend expects flat array
+    if (data?.processes) return data.processes;
     return data;
   },
 };

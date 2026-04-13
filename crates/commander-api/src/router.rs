@@ -67,6 +67,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/processes/clean", post(handlers::web::kill_stale_processes))
         // Web UI — Bot status
         .route("/api/bot/status", get(handlers::web::get_bot_status))
+        // Web UI — Config
+        .route("/api/config", get(handlers::web::get_config).post(handlers::web::save_config))
         // Apply middleware
         .layer(cors)
         .with_state(state);

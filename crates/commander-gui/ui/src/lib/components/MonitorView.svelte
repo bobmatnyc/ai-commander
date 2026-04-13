@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke } from '../transport';
   import { Trash2, RefreshCw, Activity } from 'lucide-svelte';
 
   interface ProcessInfo {
@@ -24,7 +24,7 @@
     loading = true;
     error = null;
     try {
-      processes = await invoke<ProcessInfo[]>('list_processes');
+      processes = await invoke('list_processes') as ProcessInfo[];
       lastRefresh = new Date();
     } catch (err) {
       console.error('Failed to list processes:', err);

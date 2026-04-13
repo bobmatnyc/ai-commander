@@ -112,6 +112,16 @@ pub struct ProcessSummary {
     pub name: String,
     /// Command line.
     pub command: String,
+    /// CPU usage percentage.
+    pub cpu: f32,
+    /// Memory usage in MB.
+    pub memory_mb: f32,
+    /// Associated tmux session name, if any.
+    pub session: Option<String>,
+    /// Process age in seconds.
+    pub age_seconds: u64,
+    /// Whether this process is considered stale.
+    pub stale: bool,
 }
 
 /// Response for listing processes.
@@ -134,6 +144,8 @@ pub struct ProjectDirectory {
     pub name: String,
     /// Whether it contains a git repository.
     pub is_git: bool,
+    /// Project type label for the UI (e.g. "git", "directory").
+    pub project_type: String,
 }
 
 /// Response for listing project directories.
@@ -473,6 +485,7 @@ pub async fn list_project_directories() -> Json<ProjectDirectoryListResponse> {
                         path: path.to_string_lossy().to_string(),
                         name,
                         is_git,
+                        project_type: if is_git { "git".to_string() } else { "directory".to_string() },
                     });
                 }
             }
@@ -493,30 +506,91 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 
 // ==================== Process handlers ====================
 
+/// Parse an elapsed-time string (etime format: [[DD-]HH:]MM:SS) into seconds.
+fn parse_etime(s: &str) -> u64 {
+    let s = s.trim();
+    // Split days from the rest (e.g. "2-03:45:12")
+    let (days, rest) = if let Some(pos) = s.find('-') {
+        (s[..pos].parse::<u64>().unwrap_or(0), &s[pos + 1..])
+    } else {
+        (0u64, s)
+    };
+    let parts: Vec<u64> = rest.split(':').filter_map(|p| p.parse().ok()).collect();
+    let (h, m, sec) = match parts.len() {
+        3 => (parts[0], parts[1], parts[2]),
+        2 => (0, parts[0], parts[1]),
+        1 => (0, 0, parts[0]),
+        _ => (0, 0, 0),
+    };
+    days * 86400 + h * 3600 + m * 60 + sec
+}
+
 /// GET /api/processes — List commander-related running processes.
 pub async fn list_processes() -> Json<ProcessListResponse> {
-    // List processes whose command contains "claude" or "commander" or "mpm"
     let mut processes = Vec::new();
 
+    // Collect tmux session names for correlation
+    let tmux_sessions: Vec<String> = std::process::Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // ps axo pid,comm,%cpu,rss,etime,command
     let output = std::process::Command::new("ps")
-        .args(["axo", "pid,comm,command"])
+        .args(["axo", "pid,comm,%cpu,rss,etime,command"])
         .output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines().skip(1) {
             let lower = line.to_lowercase();
-            if lower.contains("claude") || lower.contains("commander") || lower.contains("mpm") {
-                let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                if parts.len() >= 2 {
-                    let pid: u32 = parts[0].trim().parse().unwrap_or(0);
-                    let name = parts[1].trim().to_string();
-                    let command = parts.get(2).unwrap_or(&"").trim().to_string();
-                    if pid > 0 {
-                        processes.push(ProcessSummary { pid, name, command });
-                    }
-                }
+            if !lower.contains("claude") && !lower.contains("commander") && !lower.contains("mpm") {
+                continue;
             }
+
+            // Fields: PID COMM %CPU RSS ETIME COMMAND...
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 6 {
+                continue;
+            }
+
+            let pid: u32 = match parts[0].parse() {
+                Ok(p) if p > 0 => p,
+                _ => continue,
+            };
+            let name = parts[1].to_string();
+            let cpu: f32 = parts[2].parse().unwrap_or(0.0);
+            let rss_kb: f32 = parts[3].parse().unwrap_or(0.0);
+            let memory_mb = rss_kb / 1024.0;
+            let age_seconds = parse_etime(parts[4]);
+            let command = parts[5..].join(" ");
+
+            // Try to correlate with a tmux session
+            let session = tmux_sessions
+                .iter()
+                .find(|s| command.contains(s.as_str()))
+                .cloned();
+
+            let stale = age_seconds > 3600 && session.is_none();
+
+            processes.push(ProcessSummary {
+                pid,
+                name,
+                command,
+                cpu,
+                memory_mb,
+                session,
+                age_seconds,
+                stale,
+            });
         }
     }
 
@@ -559,6 +633,52 @@ pub async fn get_bot_status() -> Json<BotStatusResponse> {
             "bot is not running".to_string()
         },
     })
+}
+
+// ==================== Config handlers ====================
+
+/// GET /api/config — Read user configuration.
+pub async fn get_config() -> Json<serde_json::Value> {
+    let config_path = dirs_home()
+        .map(|h| h.join(".ai-commander").join("config.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/.ai-commander/config.json"));
+
+    let default_config = serde_json::json!({
+        "openrouter_api_key": "",
+        "theme": "dark",
+        "polling_interval_ms": 5000
+    });
+
+    if config_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&config_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) {
+                return Json(val);
+            }
+        }
+    }
+
+    Json(default_config)
+}
+
+/// POST /api/config — Save user configuration.
+pub async fn save_config(Json(body): Json<serde_json::Value>) -> Result<Json<SuccessResponse>> {
+    let config_dir = dirs_home()
+        .map(|h| h.join(".ai-commander"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/.ai-commander"));
+
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| ApiError::Internal(format!("failed to create config dir: {}", e)))?;
+
+    let config_path = config_dir.join("config.json");
+    let contents = serde_json::to_string_pretty(&body)
+        .map_err(|e| ApiError::Internal(format!("failed to serialize config: {}", e)))?;
+
+    std::fs::write(&config_path, contents)
+        .map_err(|e| ApiError::Internal(format!("failed to write config: {}", e)))?;
+
+    Ok(Json(SuccessResponse {
+        message: "config saved".to_string(),
+    }))
 }
 
 #[cfg(test)]

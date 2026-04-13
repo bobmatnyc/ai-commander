@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke } from '../transport';
   import { X, Key, ExternalLink } from 'lucide-svelte';
 
   const dispatch = createEventDispatcher();
@@ -99,8 +99,8 @@
   }
 
   .modal {
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--bg-primary, #1e1e2e);
+    border: 1px solid var(--border, #45475a);
     border-radius: 12px;
     width: 480px;
     max-width: 90vw;
@@ -135,7 +135,7 @@
     align-items: center;
   }
 
-  .close-btn:hover { color: var(--text-primary); background: var(--surface-hover); }
+  .close-btn:hover { color: var(--text-primary); background: var(--bg-surface, #313244); }
 
   .modal-body { padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
 
@@ -172,7 +172,7 @@
 
   .key-input {
     flex: 1;
-    background: var(--bg);
+    background: var(--bg-secondary, #181825);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.5rem 0.75rem;
@@ -196,17 +196,17 @@
     white-space: nowrap;
   }
 
-  .save-btn:hover { background: var(--accent-hover); }
+  .save-btn:hover { background: #4f46e5; }
   .save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .save-status { font-size: 0.75rem; color: var(--green); margin: 0; }
-  .save-status.error { color: var(--red); }
+  .save-status { font-size: 0.75rem; color: #a6e3a1; margin: 0; }
+  .save-status.error { color: #f38ba8; }
 
   code {
     font-family: var(--font-mono);
     font-size: 0.75rem;
     color: var(--text-secondary);
-    background: var(--bg);
+    background: var(--bg-secondary, #181825);
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
   }

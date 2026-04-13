@@ -2,10 +2,15 @@
   import SessionList from './lib/components/SessionList.svelte';
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
-  import { Sun, Moon } from 'lucide-svelte';
+  import MonitorView from './lib/components/MonitorView.svelte';
+  import SettingsModal from './lib/components/SettingsModal.svelte';
+  import { Sun, Moon, Settings, Activity, MessageSquare } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
 
   // No auth needed — Tailscale handles network security
+
+  let currentView: 'chat' | 'monitor' = 'chat';
+  let showSettings = false;
 
   function toggleTheme() {
     setTheme($resolvedTheme === 'dark' ? 'light' : 'dark');
@@ -19,7 +24,33 @@
         <img src="/ai-commander.png" alt="AI Commander" class="header-logo" />
         <h1>AI Commander</h1>
       </div>
+      <div class="header-center">
+        <button
+          class="tab-btn"
+          class:active={currentView === 'chat'}
+          on:click={() => currentView = 'chat'}
+        >
+          <MessageSquare size={13} />
+          Chat
+        </button>
+        <button
+          class="tab-btn"
+          class:active={currentView === 'monitor'}
+          on:click={() => currentView = 'monitor'}
+        >
+          <Activity size={13} />
+          Monitor
+        </button>
+      </div>
       <div class="header-right">
+        <button
+          class="theme-btn"
+          on:click={() => showSettings = true}
+          title="Settings"
+          aria-label="Open settings"
+        >
+          <Settings size={14} />
+        </button>
         <button
           class="theme-btn"
           on:click={toggleTheme}
@@ -40,11 +71,19 @@
         <SessionList />
       </aside>
       <section class="main-panel">
-        <ChatView />
-        <InputArea />
+        {#if currentView === 'chat'}
+          <ChatView />
+          <InputArea />
+        {:else if currentView === 'monitor'}
+          <MonitorView />
+        {/if}
       </section>
     </div>
   </main>
+
+  {#if showSettings}
+    <SettingsModal on:close={() => showSettings = false} />
+  {/if}
 
 <style>
   /* ── Theme CSS variables (must be global for child components) ── */
@@ -125,6 +164,38 @@
     width: 28px;
     height: 28px;
     border-radius: 6px;
+  }
+
+  .header-center {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .tab-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.625rem;
+    border: 1px solid transparent;
+    border-radius: 0.375rem;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 500;
+    transition: all 0.15s;
+  }
+
+  .tab-btn:hover {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+  }
+
+  .tab-btn.active {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border-color: var(--border);
   }
 
   .header-right {
