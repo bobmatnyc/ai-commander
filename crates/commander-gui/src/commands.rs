@@ -159,7 +159,42 @@ pub async fn stop_session(name: String, state: State<'_, GuiState>) -> Result<()
         if is_mpm {
             eprintln!("[GUI] Sending /mpm-session-pause to '{}' before stopping", name);
             let _ = tmux.send_line(&name, None, "/mpm-session-pause");
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            // Wait for pause confirmation — poll tmux output for success indicators
+            // Timeout after 30s to avoid hanging indefinitely
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                if tokio::time::Instant::now() > deadline {
+                    eprintln!("[GUI] Pause confirmation timeout for '{}', proceeding with stop", name);
+                    break;
+                }
+
+                if !tmux.session_exists(&name) {
+                    eprintln!("[GUI] Session '{}' already gone", name);
+                    // Session disappeared — nothing to destroy
+                    let current = state.current_session.read().unwrap();
+                    if current.as_ref() == Some(&name) {
+                        drop(current);
+                        *state.current_session.write().unwrap() = None;
+                    }
+                    return Ok(());
+                }
+
+                if let Ok(screen) = tmux.capture_output(&name, None, Some(20)) {
+                    // Look for pause confirmation markers
+                    if screen.contains("Session paused")
+                        || screen.contains("session-pause")
+                        || screen.contains("✅")
+                        || screen.contains("Paused")
+                        || screen.contains("LATEST-SESSION")
+                    {
+                        eprintln!("[GUI] Pause confirmed for '{}'", name);
+                        break;
+                    }
+                }
+            }
         }
     }
 
