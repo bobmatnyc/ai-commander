@@ -7,6 +7,7 @@ export interface Session {
 }
 
 export interface Message {
+  id?: string;
   direction: 'sent' | 'received' | 'system';
   content: string;
   timestamp: Date;
@@ -43,6 +44,17 @@ export function addMessageToSession(sessionName: string, message: Message) {
     map.set(sessionName, updated.length > MAX_MESSAGES_PER_SESSION
       ? updated.slice(updated.length - MAX_MESSAGES_PER_SESSION)
       : updated);
+    return new Map(map);
+  });
+}
+
+// Helper to update the content of a specific message by id
+export function updateMessageContent(sessionName: string, messageId: string, content: string) {
+  sessionMessages.update(map => {
+    const msgs = map.get(sessionName);
+    if (!msgs) return map;
+    const updated = msgs.map(m => m.id === messageId ? { ...m, content } : m);
+    map.set(sessionName, updated);
     return new Map(map);
   });
 }

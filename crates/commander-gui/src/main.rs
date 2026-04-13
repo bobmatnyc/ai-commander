@@ -77,6 +77,7 @@ fn main() {
             commands::disconnect_session,
             commands::stop_session,
             commands::send_message,
+            commands::send_message_streaming,
             commands::start_bot,
             commands::stop_bot,
             commands::get_bot_status,

@@ -1,7 +1,7 @@
 use crate::state::GuiState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -123,6 +123,169 @@ pub async fn send_message(content: String, state: State<'_, GuiState>) -> Result
 
     eprintln!("[GUI] Message sent successfully to '{}'", session_name);
     Ok(())
+}
+
+/// Send a message using the mpm serve SSE streaming API (port 7777).
+///
+/// Events emitted to the frontend via `chat-event`:
+/// - `{"type": "text", "content": "...", "accumulated": "..."}` — incremental assistant text
+/// - `{"type": "tool_use", "name": "...", "input": {...}}` — tool invocation
+/// - `{"type": "complete", "content": "...", "cost_usd": 0.0}` — end of response
+/// - `{"type": "error", "content": "..."}` — error from the session
+///
+/// Falls back to `tmux.send_line` when mpm serve is not reachable.
+#[tauri::command]
+pub async fn send_message_streaming(
+    content: String,
+    app: tauri::AppHandle,
+    state: State<'_, GuiState>,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+
+    let session = state
+        .current_session
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or("Not connected")?;
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "http://localhost:7777/api/v1/sessions/{}/messages",
+        session
+    );
+
+    eprintln!(
+        "[GUI] send_message_streaming: POST {} (session='{}')",
+        url, session
+    );
+
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "content": content,
+            "stream": true
+        }))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) if resp.status().is_success() => {
+            eprintln!("[GUI] send_message_streaming: SSE stream opened");
+            let mut stream = resp.bytes_stream();
+            let mut accumulated_text = String::new();
+            let mut buffer = String::new();
+
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process all complete newline-terminated lines in the buffer.
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    let Some(data) = line.strip_prefix("data: ") else {
+                        continue;
+                    };
+
+                    let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+                        continue;
+                    };
+
+                    let event_type = event
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("unknown");
+
+                    match event_type {
+                        "text" | "assistant" => {
+                            if let Some(text) =
+                                event.get("content").and_then(|c| c.as_str())
+                            {
+                                accumulated_text.push_str(text);
+                                let _ = app.emit(
+                                    "chat-event",
+                                    serde_json::json!({
+                                        "type": "text",
+                                        "content": text,
+                                        "accumulated": accumulated_text,
+                                    }),
+                                );
+                            }
+                        }
+                        "tool_use" => {
+                            let name = event
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown");
+                            let _ = app.emit(
+                                "chat-event",
+                                serde_json::json!({
+                                    "type": "tool_use",
+                                    "name": name,
+                                    "input": event.get("input"),
+                                }),
+                            );
+                        }
+                        "message_stop" | "result" => {
+                            let cost = event.get("cost_usd").and_then(|c| c.as_f64());
+                            let _ = app.emit(
+                                "chat-event",
+                                serde_json::json!({
+                                    "type": "complete",
+                                    "content": accumulated_text,
+                                    "cost_usd": cost,
+                                }),
+                            );
+                        }
+                        "error" => {
+                            let msg = event
+                                .get("message")
+                                .or_else(|| event.get("content"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown error");
+                            let _ = app.emit(
+                                "chat-event",
+                                serde_json::json!({
+                                    "type": "error",
+                                    "content": msg,
+                                }),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            eprintln!("[GUI] send_message_streaming: SSE stream complete");
+            Ok(())
+        }
+        err => {
+            // Log why the SSE path was skipped so it's easy to diagnose.
+            match &err {
+                Ok(resp) => eprintln!(
+                    "[GUI] send_message_streaming: mpm serve returned {}, falling back to tmux",
+                    resp.status()
+                ),
+                Err(e) => eprintln!(
+                    "[GUI] send_message_streaming: mpm serve unreachable ({}), falling back to tmux",
+                    e
+                ),
+            }
+
+            let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
+
+            if !tmux.session_exists(&session) {
+                return Err(format!("Session '{}' not found", session));
+            }
+
+            tmux.send_line(&session, None, &content)
+                .map_err(|e| e.to_string())?;
+
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command]

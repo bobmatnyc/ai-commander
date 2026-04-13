@@ -5,7 +5,7 @@
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
   import BotStatus from './lib/components/BotStatus.svelte';
-  import { RotateCw, Sun, Moon, Terminal } from 'lucide-svelte';
+  import { RotateCw, Sun, Moon } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
   import { currentSession } from './lib/stores/app';
 
@@ -77,17 +77,6 @@
     </div>
 
     <div class="header-right">
-      {#if $currentSession}
-        <button
-          class="iterm-global-btn"
-          on:click={() => invoke('open_in_iterm', { sessionName: $currentSession!.name })}
-          title="Open current session in iTerm2: {$currentSession!.name}"
-          aria-label="Open in iTerm2"
-        >
-          <Terminal size={14} />
-          <span class="iterm-label">iTerm2</span>
-        </button>
-      {/if}
       <button
         class="theme-btn"
         on:click={toggleTheme}

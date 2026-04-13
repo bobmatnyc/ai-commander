@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { messages, currentSession, addMessageToSession, clearSessionMessages } from '../stores/app';
+  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages } from '../stores/app';
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
@@ -12,6 +12,7 @@
   let connecting = false;
   let waitingForResponse = false;
   let waitingTimer: number;
+  let streamingMessageId: string | null = null;
 
   function scrollToBottom() {
     if (terminalEl) {
@@ -32,6 +33,41 @@
   function markActivity() {
     waitingForResponse = false;
     clearTimeout(waitingTimer);
+  }
+
+  function updateStreamingMessage(sessionName: string, text: string) {
+    if (!streamingMessageId) {
+      streamingMessageId = crypto.randomUUID();
+      addMessageToSession(sessionName, {
+        id: streamingMessageId,
+        direction: 'received',
+        content: text,
+        timestamp: new Date(),
+      });
+    } else {
+      updateMessageContent(sessionName, streamingMessageId, text);
+    }
+    if (autoScroll) setTimeout(scrollToBottom, 10);
+  }
+
+  function finalizeStreamingMessage(sessionName: string, text: string, cost?: number) {
+    if (streamingMessageId) {
+      updateMessageContent(sessionName, streamingMessageId, text);
+      streamingMessageId = null;
+    }
+    if (cost) {
+      addMessageToSession(sessionName, {
+        direction: 'system',
+        content: `Cost: $${cost.toFixed(4)}`,
+        timestamp: new Date(),
+      });
+    }
+    if (autoScroll) setTimeout(scrollToBottom, 10);
+  }
+
+  function renderContent(content: string): string {
+    return content.replace(/```(\w*)\n([\s\S]*?)```/g,
+      '<pre class="code-block"><code>$2</code></pre>');
   }
 
   // Called by InputArea (via exported function) when a message is sent
@@ -131,7 +167,7 @@
   onMount(() => {
     connecting = true;
 
-    const unlistenPromise = listen('session-output', (event: any) => {
+    const unlistenSessionOutput = listen('session-output', (event: any) => {
       connecting = false;
       markActivity();
 
@@ -159,6 +195,38 @@
       }
     });
 
+    const unlistenChatEvent = listen('chat-event', (event: any) => {
+      connecting = false;
+      markActivity();
+
+      const { type, content, accumulated, name, cost_usd, input } = event.payload;
+      const sessionName = $currentSession?.name;
+      if (!sessionName) return;
+
+      switch (type) {
+        case 'text':
+          updateStreamingMessage(sessionName, accumulated);
+          break;
+        case 'tool_use':
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: `Using tool: ${name}`,
+            timestamp: new Date(),
+          });
+          break;
+        case 'complete':
+          finalizeStreamingMessage(sessionName, content, cost_usd);
+          break;
+        case 'error':
+          addMessageToSession(sessionName, {
+            direction: 'system',
+            content: `Error: ${content}`,
+            timestamp: new Date(),
+          });
+          break;
+      }
+    });
+
     // Stop the "connecting" spinner after a short grace period even if
     // no output arrives immediately (avoids showing it on session switch).
     const connectingTimer = window.setTimeout(() => {
@@ -166,7 +234,8 @@
     }, 2000);
 
     return () => {
-      unlistenPromise.then(f => f());
+      unlistenSessionOutput.then(f => f());
+      unlistenChatEvent.then(f => f());
       clearTimeout(connectingTimer);
       clearTimeout(waitingTimer);
     };
@@ -218,15 +287,6 @@
       >
         Disconnect
       </button>
-      <button
-        class="tab iterm-tab"
-        on:click={handleOpenIterm}
-        title="Open in iTerm2 (tmux attach)"
-      >
-        <Terminal size={12} />
-        iTerm2
-      </button>
-
       {#if connecting}
         <span class="status-badge connecting">
           <span class="spinner"></span>
@@ -256,7 +316,7 @@
           </div>
         {:else}
           <div class="terminal-line received">
-            <span class="line-content">{message.content}</span>
+            <span class="line-content">{@html renderContent(message.content)}</span>
           </div>
         {/if}
       {:else}
@@ -463,5 +523,21 @@
   .scroll-button:hover {
     background-color: var(--color-scroll-btn-hover);
     box-shadow: 0 6px 8px rgba(0, 0, 0, 0.4);
+  }
+
+  :global(.code-block) {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    padding: 0.5rem 0.75rem;
+    margin: 0.375rem 0;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  :global(.code-block code) {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
+    font-size: 12px;
+    color: var(--text-primary);
   }
 </style>
