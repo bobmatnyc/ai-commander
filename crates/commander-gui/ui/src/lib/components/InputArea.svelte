@@ -141,11 +141,7 @@
           await handleSlashCommand(content);
         }
       } else {
-        try {
-          await invoke('send_message_streaming', { content });
-        } catch {
-          await invoke('send_message', { content });
-        }
+        await invoke('send_message', { content });
         addMessageToSession(sessionName, {
           direction: 'sent',
           content,

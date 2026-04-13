@@ -70,6 +70,57 @@
       '<pre class="code-block"><code>$2</code></pre>');
   }
 
+  type Segment = { type: 'prompt' | 'output' | 'tool'; content: string };
+
+  function isUiChrome(line: string): boolean {
+    // Box drawing characters, status bars, empty decorations
+    return /^[─│╭╮╰╯┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬]+$/.test(line)
+      || /^\s*$/.test(line)
+      || line.includes('bypass permissions')
+      || line.includes('[r@')  // status bar fragment
+      || /^\s*⏵/.test(line);  // mode indicator
+  }
+
+  function parseTerminalOutput(raw: string): Segment[] {
+    const lines = raw.split('\n');
+    const segments: Segment[] = [];
+    let currentBlock: string[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // Skip empty lines and UI chrome
+      if (!trimmed) continue;
+      if (isUiChrome(trimmed)) continue;
+
+      // Detect Claude Code prompt markers
+      if (trimmed.startsWith('❯') || trimmed.startsWith('>') || trimmed.match(/^\$\s/)) {
+        if (currentBlock.length) {
+          segments.push({ type: 'output', content: currentBlock.join('\n') });
+          currentBlock = [];
+        }
+        segments.push({ type: 'prompt', content: trimmed });
+      }
+      // Detect tool use markers
+      else if (trimmed.startsWith('⏺') || trimmed.includes('Tool:') || trimmed.match(/^\s*(Read|Write|Edit|Bash|Glob|Grep)\(/)) {
+        if (currentBlock.length) {
+          segments.push({ type: 'output', content: currentBlock.join('\n') });
+          currentBlock = [];
+        }
+        segments.push({ type: 'tool', content: trimmed });
+      }
+      else {
+        currentBlock.push(trimmed);
+      }
+    }
+
+    if (currentBlock.length) {
+      segments.push({ type: 'output', content: currentBlock.join('\n') });
+    }
+
+    return segments;
+  }
+
   // Called by InputArea (via exported function) when a message is sent
   export function notifyMessageSent() {
     waitingForResponse = true;
@@ -175,18 +226,16 @@
       if (!$currentSession) return;
 
       const sessionName = $currentSession.name;
+      const raw = content && content.length > 0 ? content : full_content;
+      if (!raw) return;
 
-      if (content && content.length > 0) {
+      const segments = parseTerminalOutput(raw);
+      for (const seg of segments) {
         addMessageToSession(sessionName, {
           direction: 'received',
-          content,
+          content: seg.content,
           timestamp: new Date(),
-        });
-      } else if (full_content) {
-        addMessageToSession(sessionName, {
-          direction: 'received',
-          content: full_content,
-          timestamp: new Date(),
+          segmentType: seg.type,
         });
       }
 
@@ -313,6 +362,16 @@
         {:else if message.direction === 'system'}
           <div class="terminal-line system">
             <span class="line-prefix">[ </span><span class="line-content system-text">{message.content}</span><span class="line-prefix"> ]</span>
+          </div>
+        {:else if message.segmentType === 'prompt'}
+          <div class="terminal-line seg-prompt">
+            <span class="seg-prompt-prefix">❯</span>
+            <span class="line-content seg-prompt-text">{message.content.replace(/^[❯>]\s*/, '')}</span>
+          </div>
+        {:else if message.segmentType === 'tool'}
+          <div class="terminal-line seg-tool">
+            <span class="seg-tool-prefix">⏺</span>
+            <span class="line-content seg-tool-text">{message.content.replace(/^⏺\s*/, '')}</span>
           </div>
         {:else}
           <div class="terminal-line received">
@@ -489,6 +548,45 @@
     color: var(--text-secondary);
     font-style: italic;
     padding: 0.5rem 0;
+  }
+
+  /* Segment: prompt line (cyan, ❯ prefix) */
+  .seg-prompt {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+  }
+
+  .seg-prompt-prefix {
+    color: var(--color-prompt, #89dceb);
+    user-select: none;
+    flex-shrink: 0;
+  }
+
+  .seg-prompt-text {
+    color: var(--color-prompt, #89dceb);
+    font-weight: 500;
+  }
+
+  /* Segment: tool use line (indigo/accent, ⏺ prefix) */
+  .seg-tool {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    margin-top: 0.25rem;
+    opacity: 0.85;
+  }
+
+  .seg-tool-prefix {
+    color: var(--accent, #6366f1);
+    user-select: none;
+    flex-shrink: 0;
+  }
+
+  .seg-tool-text {
+    color: var(--accent, #6366f1);
+    font-size: 0.8rem;
   }
 
   .empty-state {

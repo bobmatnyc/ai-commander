@@ -11,6 +11,7 @@ export interface Message {
   direction: 'sent' | 'received' | 'system';
   content: string;
   timestamp: Date;
+  segmentType?: 'prompt' | 'output' | 'tool';
 }
 
 export interface BotStatus {
