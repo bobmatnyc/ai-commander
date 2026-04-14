@@ -1,6 +1,17 @@
 // Shim for @tauri-apps/api/core in web mode
 // Redirects invoke() calls through the REST transport layer
 
+import { get } from 'svelte/store';
+import { currentSession } from './stores/app';
+
+// Request transformers — remap frontend args to REST API format
+const REQUEST_TRANSFORMS: Record<string, (args: Record<string, any>) => Record<string, any>> = {
+  send_message: (args) => ({
+    session: get(currentSession)?.name || '',
+    message: args.content || '',
+  }),
+};
+
 // Response transformers — normalize REST responses to Tauri format
 const TRANSFORMS: Record<string, (data: any) => any> = {
   list_sessions: (data: any) => {
@@ -64,13 +75,17 @@ export async function invoke(command: string, args?: Record<string, any>): Promi
   const mapping = API_MAP[command];
   if (!mapping) throw new Error(`Unknown command: ${command}`);
 
-  const path = typeof mapping.path === 'function' ? mapping.path(args || {}) : mapping.path;
+  // Apply request transform before building the fetch request
+  const reqTransform = REQUEST_TRANSFORMS[command];
+  const body = reqTransform ? reqTransform(args || {}) : args;
+
+  const path = typeof mapping.path === 'function' ? mapping.path(body || {}) : mapping.path;
   const opts: RequestInit = {
     method: mapping.method,
     headers: { 'Content-Type': 'application/json' },
   };
-  if (mapping.method !== 'GET' && args) {
-    opts.body = JSON.stringify(args);
+  if (mapping.method !== 'GET' && body) {
+    opts.body = JSON.stringify(body);
   }
 
   const resp = await fetch(path, opts);

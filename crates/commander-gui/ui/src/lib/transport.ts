@@ -1,5 +1,8 @@
 // Transport abstraction — works in both Tauri and browser contexts
 
+import { get } from 'svelte/store';
+import { currentSession } from './stores/app';
+
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
 async function tauriInvoke(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -28,13 +31,25 @@ const API_MAP: Record<string, { method: string; path: string | ((args: Record<st
   save_config: { method: 'POST', path: '/api/config' },
 };
 
+// Request transformers — remap frontend args to REST API format
+const REQUEST_TRANSFORMS: Record<string, (args: Record<string, unknown>) => Record<string, unknown>> = {
+  send_message: (args) => ({
+    session: get(currentSession)?.name || '',
+    message: args.content || '',
+  }),
+};
+
 async function fetchApi(command: string, args?: Record<string, unknown>): Promise<unknown> {
   const mapping = API_MAP[command];
   if (!mapping) {
     throw new Error(`Unknown API command: ${command}`);
   }
 
-  const path = typeof mapping.path === 'function' ? mapping.path(args || {}) : mapping.path;
+  // Apply request transform before building the fetch request
+  const reqTransform = REQUEST_TRANSFORMS[command];
+  const body = reqTransform ? reqTransform(args || {}) : args;
+
+  const path = typeof mapping.path === 'function' ? mapping.path(body || {}) : mapping.path;
   const url = path; // Relative URL — works when served from same origin
 
   const options: RequestInit = {
@@ -42,8 +57,8 @@ async function fetchApi(command: string, args?: Record<string, unknown>): Promis
     headers: { 'Content-Type': 'application/json' },
   };
 
-  if (mapping.method !== 'GET' && args) {
-    options.body = JSON.stringify(args);
+  if (mapping.method !== 'GET' && body) {
+    options.body = JSON.stringify(body);
   }
 
   // Add auth token if stored
