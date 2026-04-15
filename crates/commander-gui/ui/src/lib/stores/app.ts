@@ -62,14 +62,18 @@ export function addMessageToSession(sessionName: string, message: Message) {
   sessionMessages.update(map => {
     const msgs = map.get(sessionName) || [];
 
-    // Skip system interpretations that echo a recent user message
+    // Skip system interpretations that echo a recent user message.
+    // Search all sent messages in the last 30 entries (system messages can
+    // push the user's message out of a small window).
     if (message.direction === 'system') {
       const body = extractMessageBody(message.content).trim().toLowerCase();
-      const recentSent = msgs.slice(-5).filter(m => m.direction === 'sent');
-      for (const sent of recentSent) {
-        const sentText = sent.content.trim().toLowerCase();
-        if (sentText && (body.includes(sentText) || sentText.includes(body))) {
-          return map; // Skip — this is just echoing user input
+      if (body.length > 0) {
+        const recentSent = msgs.slice(-30).filter(m => m.direction === 'sent');
+        for (const sent of recentSent) {
+          const sentText = sent.content.trim().toLowerCase();
+          if (sentText.length > 3 && (body.includes(sentText) || sentText.includes(body))) {
+            return map; // Skip — this is just echoing user input
+          }
         }
       }
     }

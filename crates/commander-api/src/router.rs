@@ -70,8 +70,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/bot/status", get(handlers::web::get_bot_status))
         // Web UI — GitHub stats
         .route("/api/github-stats", get(handlers::web::get_github_stats))
-        // Web UI — Config
+        // Web UI — Config & User
         .route("/api/config", get(handlers::web::get_config).post(handlers::web::save_config))
+        .route("/api/git-user", get(handlers::web::get_git_user))
         // Apply middleware
         .layer(cors)
         .with_state(state);

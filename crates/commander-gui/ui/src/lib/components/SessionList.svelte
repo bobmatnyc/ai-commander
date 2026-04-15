@@ -17,6 +17,45 @@
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
   );
 
+  // Git user — fetch once on mount for the initial badge
+  let gitUser: string | null = null;
+  let gitUserInitial = '';
+
+  // Fetch git user.name for the user badge
+  async function fetchGitUser() {
+    try {
+      const resp = await fetch('/api/health');
+      // We don't have a git user endpoint yet, so use a static approach:
+      // Read from the health response or fallback
+      gitUser = null; // Will be populated if we add an endpoint
+    } catch {}
+  }
+
+  // Try getting git user from the API config
+  (async () => {
+    try {
+      const resp = await invoke('get_config');
+      const config = resp as Record<string, unknown>;
+      if (config?.git_user && typeof config.git_user === 'string') {
+        gitUser = config.git_user;
+      }
+    } catch {}
+    // Fallback: try fetch from /api/git-user if we add it later
+    if (!gitUser) {
+      try {
+        const resp = await fetch('/api/git-user');
+        if (resp.ok) {
+          const data = await resp.json();
+          gitUser = data.name || data.user || null;
+        }
+      } catch {}
+    }
+    if (gitUser) {
+      // Get unique initial — first letter of first name
+      gitUserInitial = gitUser.charAt(0).toUpperCase();
+    }
+  })();
+
   // Rename state
   let renamingSession: string | null = null;
   let renameValue = '';
@@ -233,15 +272,18 @@
             {#if $githubStats.has(session.name)}
               {@const stats = $githubStats.get(session.name)}
               {#if stats && stats.open_issues > 0}
-                <span class="badge badge-issues" title="{stats.open_issues} open issues">
+                <span class="badge badge-issues" title="{stats.repo}: {stats.open_issues} open issue{stats.open_issues > 1 ? 's' : ''}">
                   {stats.open_issues}
                 </span>
               {/if}
               {#if stats && stats.open_prs > 0}
-                <span class="badge badge-prs" title="{stats.open_prs} open PRs">
+                <span class="badge badge-prs" title="{stats.repo}: {stats.open_prs} open PR{stats.open_prs > 1 ? 's' : ''}">
                   {stats.open_prs}
                 </span>
               {/if}
+            {/if}
+            {#if gitUser}
+              <span class="user-initial" title={gitUser}>{gitUserInitial}</span>
             {/if}
             <span class="activity-icon" class:active={$activeSessions.has(session.name)} title={$activeSessions.has(session.name) ? 'Active' : 'Idle'}>
               <Activity size={14} />
@@ -587,5 +629,20 @@
   .badge-prs {
     background: rgba(59, 130, 246, 0.15);
     color: #3b82f6;
+  }
+
+  .user-initial {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(139, 92, 246, 0.15);
+    color: #8b5cf6;
+    font-size: 0.6rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    cursor: default;
   }
 </style>

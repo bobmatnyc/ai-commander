@@ -832,6 +832,30 @@ pub async fn get_config() -> Json<serde_json::Value> {
     Json(default_config)
 }
 
+/// GET /api/git-user — Return the git user name and email from global config.
+pub async fn get_git_user() -> Json<serde_json::Value> {
+    let name = tokio::process::Command::new("git")
+        .args(["config", "--global", "user.name"])
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let email = tokio::process::Command::new("git")
+        .args(["config", "--global", "user.email"])
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Json(serde_json::json!({
+        "name": name,
+        "email": email,
+    }))
+}
+
 /// POST /api/config — Save user configuration.
 pub async fn save_config(Json(body): Json<serde_json::Value>) -> Result<Json<SuccessResponse>> {
     let config_dir = dirs_home()
