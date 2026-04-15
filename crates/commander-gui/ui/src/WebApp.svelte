@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import SessionList from './lib/components/SessionList.svelte';
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
@@ -13,6 +14,34 @@
   let currentView: 'chat' | 'monitor' = 'chat';
   let showSettings = false;
   let sidebarOpen = false;
+
+  // Version check: detect server updates and prompt reload
+  let loadedVersion: string | null = null;
+  let newVersionAvailable = false;
+  let versionCheckInterval: ReturnType<typeof setInterval>;
+
+  async function checkVersion() {
+    try {
+      const resp = await fetch('/api/health');
+      const data = await resp.json();
+      if (loadedVersion === null) {
+        loadedVersion = data.version;
+      } else if (data.version !== loadedVersion) {
+        newVersionAvailable = true;
+      }
+    } catch {
+      // Silently ignore — server may be restarting
+    }
+  }
+
+  onMount(() => {
+    checkVersion();
+    versionCheckInterval = setInterval(checkVersion, 60000);
+  });
+
+  onDestroy(() => {
+    if (versionCheckInterval) clearInterval(versionCheckInterval);
+  });
 
   function toggleTheme() {
     setTheme($resolvedTheme === 'dark' ? 'light' : 'dark');
@@ -50,6 +79,11 @@
           Monitor
         </button>
       </div>
+      {#if newVersionAvailable}
+        <button class="update-banner" on:click={() => window.location.reload()}>
+          🔄 Update available — Reload
+        </button>
+      {/if}
       <div class="header-right">
         <button
           class="theme-btn"
@@ -207,6 +241,27 @@
     background: var(--bg-surface);
     color: var(--text-primary);
     border-color: var(--border);
+  }
+
+  .update-banner {
+    background: var(--accent, #6366f1);
+    color: white;
+    border: none;
+    padding: 0.25rem 0.75rem;
+    border-radius: 0.375rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    white-space: nowrap;
+    animation: pulse 2s infinite;
+  }
+
+  .update-banner:hover {
+    opacity: 0.9;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
   }
 
   .header-right {
