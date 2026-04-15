@@ -1,6 +1,6 @@
 <script lang="ts">
   import { get } from 'svelte/store';
-  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages } from '../stores/app';
+  import { messages, currentSession, addMessageToSession, updateMessageContent, updateLastSystemMessage, clearSessionMessages, sessionMessages, markSessionActive } from '../stores/app';
   import { onMount, onDestroy } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
@@ -286,6 +286,7 @@
       if (!$currentSession) return;
 
       const sessionName = $currentSession.name;
+      markSessionActive(sessionName);
       const raw = content && content.length > 0 ? content : full_content;
       if (!raw) return;
 
@@ -346,6 +347,8 @@
       const { type, content, accumulated, name, cost_usd, input } = event.payload;
       const sessionName = $currentSession?.name;
       if (!sessionName) return;
+
+      markSessionActive(sessionName);
 
       switch (type) {
         case 'text':
@@ -427,20 +430,24 @@
         sessionName,
         (event: SessionEventData) => {
           markActivity();
+          markSessionActive(sessionName);
           lineCount += 1;
           isActive = true;
           clearTimeout(activityTimer);
           activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
 
           const display = `${adapterNick(event.adapter)}: ${event.content}`;
-          if (!isDuplicateSystemMessage(sessionName, display)) {
+          if (event.is_update) {
+            // Update the last system message instead of appending a new one
+            updateLastSystemMessage(sessionName, display);
+          } else if (!isDuplicateSystemMessage(sessionName, display)) {
             addMessageToSession(sessionName, {
               direction: 'system',
               content: display,
               timestamp: new Date(event.timestamp * 1000),
             });
-            if (autoScroll) setTimeout(scrollToBottom, 10);
           }
+          if (autoScroll) setTimeout(scrollToBottom, 10);
         },
       );
     }

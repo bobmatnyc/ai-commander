@@ -141,6 +141,7 @@ export interface SessionEventData {
   content: string;
   timestamp: number;
   adapter?: string;
+  is_update?: boolean;
 }
 
 /**

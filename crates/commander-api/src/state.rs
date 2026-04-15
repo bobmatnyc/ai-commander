@@ -30,6 +30,10 @@ pub struct SessionEvent {
     pub timestamp: u64,
     /// Adapter nickname: "claude", "mpm", "auggie", "codex", "shell".
     pub adapter: String,
+    /// When true, the frontend should update the last interpretation rather than
+    /// appending a new message (prevents repeated "Processing..." bubbles).
+    #[serde(default)]
+    pub is_update: bool,
 }
 
 /// Application state shared across all handlers.

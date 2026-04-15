@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { sessions, currentSession, sessionMessages, addMessageToSession } from '../stores/app';
+  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions } from '../stores/app';
   import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
@@ -10,6 +10,12 @@
   let showCreateModal = false;
   let lastError: string | null = null;
   let errorTimeout: number | null = null;
+
+  // Detect iOS/iPadOS — hide iTerm/Terminal buttons on these platforms
+  const isIOS = typeof navigator !== 'undefined' && (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  );
 
   // Rename state
   let renamingSession: string | null = null;
@@ -223,6 +229,7 @@
         {:else}
           <!-- Normal session row -->
           <button class="session-main" on:click={() => connect(session.name)}>
+            <span class="status-dot" class:active={$activeSessions.has(session.name)}></span>
             <span class="session-name">{getDisplayName(session.name)}</span>
             <Activity
               size={16}
@@ -232,14 +239,16 @@
 
           <!-- Action buttons: always visible -->
           <div class="session-actions">
-            <!-- iTerm2 button - always visible -->
-            <button
-              class="action-btn iterm-btn"
-              on:click|stopPropagation={() => openInIterm(session.name)}
-              title="Open in iTerm2"
-            >
-              <Terminal size={14} />
-            </button>
+            <!-- iTerm2 button - hidden on iOS/iPadOS -->
+            {#if !isIOS}
+              <button
+                class="action-btn iterm-btn"
+                on:click|stopPropagation={() => openInIterm(session.name)}
+                title="Open in iTerm2"
+              >
+                <Terminal size={14} />
+              </button>
+            {/if}
 
             <!-- Rename button -->
             <button
@@ -267,14 +276,16 @@
                     <Pencil size={13} />
                     <span>Rename</span>
                   </button>
-                  <button class="dropdown-item" on:click={() => openInIterm(session.name)}>
-                    <Terminal size={13} />
-                    <span>Open in iTerm2</span>
-                  </button>
-                  <button class="dropdown-item" on:click={() => openInTerminal(session.name)}>
-                    <Monitor size={13} />
-                    <span>Open in Terminal.app</span>
-                  </button>
+                  {#if !isIOS}
+                    <button class="dropdown-item" on:click={() => openInIterm(session.name)}>
+                      <Terminal size={13} />
+                      <span>Open in iTerm2</span>
+                    </button>
+                    <button class="dropdown-item" on:click={() => openInTerminal(session.name)}>
+                      <Monitor size={13} />
+                      <span>Open in Terminal.app</span>
+                    </button>
+                  {/if}
                   <div class="dropdown-divider"></div>
                   <button class="dropdown-item danger" on:click={() => stopSession(session.name)}>
                     <Square size={13} />
@@ -384,6 +395,7 @@
     flex: 1;
     justify-content: space-between;
     align-items: center;
+    gap: 0.5rem;
     padding: 0.625rem 0.75rem;
     border: none;
     background: transparent;
@@ -531,5 +543,23 @@
     text-align: center;
     color: var(--text-secondary);
     font-size: 0.875rem;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-secondary, #999);
+    flex-shrink: 0;
+  }
+
+  .status-dot.active {
+    background: #22c55e;
+    animation: pulse-dot 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+    50% { opacity: 0.8; box-shadow: 0 0 0 4px rgba(34, 197, 94, 0); }
   }
 </style>

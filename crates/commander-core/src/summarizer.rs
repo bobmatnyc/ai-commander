@@ -448,7 +448,10 @@ Rules:
 - If there is an error, state the error briefly
 - Be concise - respond with ONLY the content, no preamble or prefix
 - Do NOT add prefixes like "Claude is asking:" or "Ready after:" — just state what happened
-- Never mention "the screen shows" or similar meta-language"#;
+- Never mention "the screen shows" or similar meta-language
+- If the session shows spinners, progress indicators, or "thinking/generating" text, respond with just "Processing..." — do NOT interpret busy output as a question
+- Tool execution markers (Read, Write, Edit, Bash) indicate the assistant is working, not asking
+- Distinguish between questions (requiring user input) and status messages (informational)"#;
 
 /// Interpret screen context from a Claude Code session.
 ///
@@ -462,6 +465,26 @@ Rules:
 /// # Returns
 /// An interpretation string, or None if LLM is unavailable or fails.
 pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<String> {
+    // Pre-filter: if session is NOT ready and content looks like busy/thinking output,
+    // return a canned response without calling the LLM
+    if !is_ready {
+        let content_lower = screen_content.to_lowercase();
+        let has_spinners = screen_content.chars().any(|c| {
+            // Braille spinners (most common Claude Code spinner)
+            ('\u{2800}'..='\u{28FF}').contains(&c) ||
+            // Other spinner chars
+            matches!(c, '◐' | '◑' | '◒' | '◓')
+        });
+        let has_thinking_text = content_lower.contains("thinking") ||
+            content_lower.contains("generating") ||
+            content_lower.contains("spelunking") ||
+            content_lower.contains("processing");
+
+        if has_spinners || has_thinking_text {
+            return Some("Processing...".to_string());
+        }
+    }
+
     let state_hint = if is_ready {
         "The session IS ready for input (showing prompt)."
     } else {

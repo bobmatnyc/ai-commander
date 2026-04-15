@@ -944,8 +944,14 @@ pub fn spawn_session_poller(
                 let trimmed = output.trim().to_string();
                 let prev = snapshots.get(session_name).cloned().unwrap_or_default();
 
-                // Only interpret if content changed significantly (>100 chars diff)
-                if trimmed != prev && trimmed.len().abs_diff(prev.len()) > 100 {
+                // Count lines that are genuinely new (not in previous capture)
+                let prev_lines: std::collections::HashSet<&str> = prev.lines().collect();
+                let new_lines: Vec<&str> = trimmed.lines()
+                    .filter(|line| !line.trim().is_empty() && !prev_lines.contains(line))
+                    .collect();
+
+                // Only interpret if there are meaningful new lines (>3 new lines)
+                if !new_lines.is_empty() && new_lines.len() > 3 {
                     let session = session_name.to_string();
                     let tx = event_tx.clone();
                     let content = trimmed.clone();
@@ -969,6 +975,7 @@ pub fn spawn_session_poller(
                                 .get(&session)
                                 .cloned()
                                 .unwrap_or_default();
+                            let has_prev = !prev_interp.is_empty();
                             if interpretation != prev_interp {
                                 let _ = tx.send(SessionEvent {
                                     session_name: session.clone(),
@@ -979,6 +986,7 @@ pub fn spawn_session_poller(
                                         .unwrap_or_default()
                                         .as_secs(),
                                     adapter,
+                                    is_update: has_prev,
                                 });
                                 interps
                                     .lock()

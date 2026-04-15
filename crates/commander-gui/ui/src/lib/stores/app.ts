@@ -60,6 +60,22 @@ export function updateMessageContent(sessionName: string, messageId: string, con
   });
 }
 
+// Helper to update the last system message's content (for SSE is_update events)
+export function updateLastSystemMessage(sessionName: string, content: string) {
+  sessionMessages.update(map => {
+    const msgs = map.get(sessionName) || [];
+    // Find last system message and update its content
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].direction === 'system') {
+        msgs[i] = { ...msgs[i], content };
+        break;
+      }
+    }
+    map.set(sessionName, [...msgs]);
+    return new Map(map);
+  });
+}
+
 // Helper to clear messages for specific session
 export function clearSessionMessages(sessionName: string) {
   sessionMessages.update(map => {
@@ -72,3 +88,31 @@ export const sessions = writable<Session[]>([]);
 export const botRunning = writable(false);
 export const botPid = writable<number | null>(null);
 export const serverRebuilding = writable<boolean>(false);
+
+// Track which sessions have recent activity (SSE or Tauri events)
+export const activeSessions = writable<Set<string>>(new Set());
+
+const activityTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+export function markSessionActive(sessionName: string) {
+  activeSessions.update(set => {
+    const next = new Set(set);
+    next.add(sessionName);
+    return next;
+  });
+
+  // Clear previous timer for this session
+  const prev = activityTimers.get(sessionName);
+  if (prev) clearTimeout(prev);
+
+  // Remove after 5 seconds of no activity
+  const timer = setTimeout(() => {
+    activeSessions.update(set => {
+      const next = new Set(set);
+      next.delete(sessionName);
+      return next;
+    });
+    activityTimers.delete(sessionName);
+  }, 5000);
+  activityTimers.set(sessionName, timer);
+}
