@@ -243,9 +243,9 @@
                 </span>
               {/if}
             {/if}
-            {#if $activeSessions.has(session.name)}
-              <span class="pulse-indicator" title="Active"></span>
-            {/if}
+            <span class="activity-icon" class:active={$activeSessions.has(session.name)} title={$activeSessions.has(session.name) ? 'Active' : 'Idle'}>
+              <Activity size={14} />
+            </span>
           </button>
 
           <!-- Action buttons: always visible -->
@@ -549,18 +549,25 @@
     font-size: 0.875rem;
   }
 
-  .pulse-indicator {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #22c55e;
+  .activity-icon {
     flex-shrink: 0;
-    animation: pulse-dot 1.5s ease-in-out infinite;
+    color: var(--text-secondary, #999);
+    opacity: 0.4;
+    display: flex;
+    align-items: center;
   }
 
-  @keyframes pulse-dot {
-    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
-    50% { opacity: 0.8; box-shadow: 0 0 0 4px rgba(34, 197, 94, 0); }
+  .activity-icon.active {
+    color: #22c55e;
+    opacity: 1;
+    animation: ekg-pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes ekg-pulse {
+    0%, 100% { transform: scaleY(1); opacity: 1; }
+    25% { transform: scaleY(1.3); opacity: 1; }
+    50% { transform: scaleY(0.8); opacity: 0.7; }
+    75% { transform: scaleY(1.2); opacity: 1; }
   }
 
   .badge {

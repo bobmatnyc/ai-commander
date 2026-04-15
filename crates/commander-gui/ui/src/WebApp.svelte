@@ -35,6 +35,7 @@
   async function checkHealth() {
     try {
       const resp = await fetch('/api/health');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
 
       // Server is back after downtime — check for new version
@@ -53,8 +54,8 @@
         newVersionAvailable = true;
       }
 
-      // Poll again in 60s when healthy
-      healthTimeout = setTimeout(checkHealth, 60000);
+      // Poll again in 15s when healthy (fast enough to catch rebuilds)
+      healthTimeout = setTimeout(checkHealth, 15000);
     } catch {
       healthFailures++;
       if (healthFailures >= 2) {
