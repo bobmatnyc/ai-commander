@@ -617,6 +617,8 @@ pub enum ReplCommand {
     Quit,
     /// Unknown command
     Unknown(String),
+    /// Usage error for a known command (prints usage hint, not "Unknown command")
+    UsageError(String),
     /// Plain text (not a command) - treated as Commander instruction
     Text(String),
 }
@@ -652,7 +654,9 @@ impl ReplCommand {
                 "disconnect" | "dc" => ReplCommand::Disconnect,
                 "send" => arg
                     .map(ReplCommand::Send)
-                    .unwrap_or(ReplCommand::Unknown("send requires a message".to_string())),
+                    .unwrap_or(ReplCommand::UsageError(
+                        "Usage: /send <message>  — sends a literal string to the active tmux session".to_string(),
+                    )),
                 "sessions" => ReplCommand::Sessions,
                 "stop" => ReplCommand::Stop(arg),
                 "register" => Self::parse_register(arg),
@@ -1406,6 +1410,11 @@ impl Repl {
                     "Unknown command: /{}. Type /help for available commands.",
                     cmd
                 );
+                Ok(false)
+            }
+
+            ReplCommand::UsageError(msg) => {
+                println!("{}", msg);
                 Ok(false)
             }
 
