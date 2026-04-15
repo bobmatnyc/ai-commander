@@ -84,6 +84,13 @@ export function clearSessionMessages(sessionName: string) {
   });
 }
 
+export interface GitHubStats {
+    open_issues: number;
+    open_prs: number;
+    repo: string;
+}
+export const githubStats = writable<Map<string, GitHubStats>>(new Map());
+
 export const sessions = writable<Session[]>([]);
 export const botRunning = writable(false);
 export const botPid = writable<number | null>(null);

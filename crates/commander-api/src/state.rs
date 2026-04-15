@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::Serialize;
 use tokio::sync::{broadcast, RwLock};
 
 use commander_adapters::AdapterRegistry;
@@ -16,6 +17,17 @@ use commander_work::WorkQueue;
 
 use crate::config::ApiConfig;
 use crate::web_clients::WebClientStore;
+
+/// Cached GitHub statistics for a project repository.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct GitHubStats {
+    /// Number of open issues (excludes pull requests).
+    pub open_issues: u32,
+    /// Number of open pull requests.
+    pub open_prs: u32,
+    /// Repository in "owner/repo" format.
+    pub repo: String,
+}
 
 /// An event broadcast to SSE clients about session activity.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -59,6 +71,8 @@ pub struct AppState {
     pub event_tx: broadcast::Sender<SessionEvent>,
     /// Maps session name → adapter nickname (e.g. "claude", "mpm").
     pub session_adapters: Arc<RwLock<HashMap<String, String>>>,
+    /// Cached GitHub stats per project directory name.
+    pub github_stats: Arc<RwLock<HashMap<String, GitHubStats>>>,
 }
 
 impl AppState {
@@ -98,6 +112,7 @@ impl AppState {
             tmux,
             event_tx,
             session_adapters: Arc::new(RwLock::new(HashMap::new())),
+            github_stats: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

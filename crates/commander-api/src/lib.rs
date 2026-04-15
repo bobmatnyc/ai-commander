@@ -34,4 +34,4 @@ pub mod web_clients;
 pub use config::ApiConfig;
 pub use error::{ApiError, Result};
 pub use router::{create_router, serve};
-pub use state::{AppState, SessionEvent};
+pub use state::{AppState, GitHubStats, SessionEvent};

@@ -451,7 +451,9 @@ Rules:
 - Never mention "the screen shows" or similar meta-language
 - If the session shows spinners, progress indicators, or "thinking/generating" text, respond with just "Processing..." — do NOT interpret busy output as a question
 - Tool execution markers (Read, Write, Edit, Bash) indicate the assistant is working, not asking
-- Distinguish between questions (requiring user input) and status messages (informational)"#;
+- Distinguish between questions (requiring user input) and status messages (informational)
+- Pre-commit hook output (Passed/Failed, "fix end of files", "trim trailing whitespace") is normal build output, NOT an error — summarize as "Running pre-commit hooks" or "Committing changes"
+- Git operations (commit, push, rebase) are normal workflow, summarize the action not the output details"#;
 
 /// Interpret screen context from a Claude Code session.
 ///

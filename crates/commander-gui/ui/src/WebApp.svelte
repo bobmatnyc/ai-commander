@@ -7,7 +7,8 @@
   import SettingsModal from './lib/components/SettingsModal.svelte';
   import { Sun, Moon, Settings, Activity, MessageSquare } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
-  import { currentSession, serverRebuilding } from './lib/stores/app';
+  import { currentSession, serverRebuilding, githubStats } from './lib/stores/app';
+  import { invoke } from './lib/transport';
 
   // No auth needed — Tailscale handles network security
 
@@ -20,6 +21,16 @@
   let newVersionAvailable = false;
   let healthFailures = 0;
   let healthTimeout: ReturnType<typeof setTimeout>;
+  let githubInterval: ReturnType<typeof setInterval>;
+
+  async function fetchGithubStats() {
+    try {
+      const result = await invoke('get_github_stats') as any;
+      if (result?.stats) {
+        $githubStats = new Map(Object.entries(result.stats));
+      }
+    } catch {}
+  }
 
   async function checkHealth() {
     try {
@@ -56,10 +67,13 @@
 
   onMount(() => {
     checkHealth();
+    fetchGithubStats();
+    githubInterval = setInterval(fetchGithubStats, 1800000);
   });
 
   onDestroy(() => {
     if (healthTimeout) clearTimeout(healthTimeout);
+    if (githubInterval) clearInterval(githubInterval);
   });
 
   function toggleTheme() {

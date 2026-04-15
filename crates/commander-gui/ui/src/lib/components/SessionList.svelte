@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions } from '../stores/app';
+  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats } from '../stores/app';
   import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
@@ -229,12 +229,23 @@
         {:else}
           <!-- Normal session row -->
           <button class="session-main" on:click={() => connect(session.name)}>
-            <span class="status-dot" class:active={$activeSessions.has(session.name)}></span>
             <span class="session-name">{getDisplayName(session.name)}</span>
-            <Activity
-              size={16}
-              class={session.is_connected ? 'text-green-500' : 'text-gray-400'}
-            />
+            {#if $githubStats.has(session.name)}
+              {@const stats = $githubStats.get(session.name)}
+              {#if stats && stats.open_issues > 0}
+                <span class="badge badge-issues" title="{stats.open_issues} open issues">
+                  {stats.open_issues}
+                </span>
+              {/if}
+              {#if stats && stats.open_prs > 0}
+                <span class="badge badge-prs" title="{stats.open_prs} open PRs">
+                  {stats.open_prs}
+                </span>
+              {/if}
+            {/if}
+            {#if $activeSessions.has(session.name)}
+              <span class="pulse-indicator" title="Active"></span>
+            {/if}
           </button>
 
           <!-- Action buttons: always visible -->
@@ -249,15 +260,6 @@
                 <Terminal size={14} />
               </button>
             {/if}
-
-            <!-- Rename button -->
-            <button
-              class="action-btn rename-btn"
-              on:click|stopPropagation={() => startRename(session.name)}
-              title="Rename session"
-            >
-              <Pencil size={13} />
-            </button>
 
             <!-- Gear dropdown button -->
             <div class="dropdown-wrapper">
@@ -405,12 +407,14 @@
   }
 
   .session-name {
+    flex: 1;
     font-size: 0.875rem;
     font-weight: 500;
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-align: left;
   }
 
   /* Action buttons row - always visible */
@@ -545,21 +549,36 @@
     font-size: 0.875rem;
   }
 
-  .status-dot {
+  .pulse-indicator {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--text-secondary, #999);
-    flex-shrink: 0;
-  }
-
-  .status-dot.active {
     background: #22c55e;
+    flex-shrink: 0;
     animation: pulse-dot 1.5s ease-in-out infinite;
   }
 
   @keyframes pulse-dot {
     0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
     50% { opacity: 0.8; box-shadow: 0 0 0 4px rgba(34, 197, 94, 0); }
+  }
+
+  .badge {
+    font-size: 0.65rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 9999px;
+    font-weight: 600;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .badge-issues {
+    background: rgba(245, 158, 11, 0.15);
+    color: #d97706;
+  }
+
+  .badge-prs {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
   }
 </style>

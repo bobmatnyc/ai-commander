@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
@@ -15,9 +16,10 @@ use axum::{
 };
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tracing::{debug, warn};
 
 use crate::error::{ApiError, Result};
 use crate::state::{AppState, SessionEvent};
@@ -849,6 +851,199 @@ pub async fn save_config(Json(body): Json<serde_json::Value>) -> Result<Json<Suc
     Ok(Json(SuccessResponse {
         message: "config saved".to_string(),
     }))
+}
+
+// ==================== GitHub stats ====================
+
+use crate::state::GitHubStats;
+
+/// GET /api/github-stats — Return cached GitHub issue/PR counts per project.
+pub async fn get_github_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let stats = state.github_stats.read().await;
+    Json(serde_json::json!({ "stats": *stats }))
+}
+
+/// Spawns a background task that polls GitHub for open issue/PR counts hourly.
+///
+/// Scans the same project directories as `list_project_directories`, extracts the
+/// GitHub remote URL from each git repo, and queries the GitHub Search API for
+/// open issue and PR counts.
+pub fn spawn_github_stats_poller(
+    github_stats: Arc<RwLock<HashMap<String, GitHubStats>>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = poll_github_stats(&github_stats).await {
+                warn!("github stats poll failed: {}", e);
+            }
+            // Poll every hour
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
+}
+
+/// Performs a single GitHub stats poll cycle.
+async fn poll_github_stats(
+    github_stats: &Arc<RwLock<HashMap<String, GitHubStats>>>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let home = dirs_home();
+    let scan_dirs = load_scan_directories(&home);
+    let search_roots: Vec<std::path::PathBuf> = scan_dirs
+        .iter()
+        .filter_map(|subdir| home.as_ref().map(|h| h.join(subdir)))
+        .filter(|p| p.is_dir())
+        .collect();
+
+    // Try to get a GitHub token for higher rate limits (30 search/min vs 10).
+    let gh_token = tokio::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|t| !t.is_empty());
+
+    let client = reqwest::Client::builder()
+        .user_agent("ai-commander")
+        .build()?;
+
+    let mut new_stats = HashMap::new();
+
+    for root in &search_roots {
+        let entries = match std::fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            // Get git remote origin URL
+            let output = match tokio::process::Command::new("git")
+                .args(["-C", &path.to_string_lossy(), "remote", "get-url", "origin"])
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                }
+                _ => continue,
+            };
+
+            let repo = match parse_github_repo(&output) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            let project_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            debug!("polling github stats for {} ({})", project_name, repo);
+
+            let open_issues = fetch_github_count(
+                &client,
+                &format!(
+                    "https://api.github.com/search/issues?q=repo:{}+is:issue+is:open",
+                    repo
+                ),
+                gh_token.as_deref(),
+            )
+            .await;
+
+            // Small delay to stay within rate limits
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            let open_prs = fetch_github_count(
+                &client,
+                &format!(
+                    "https://api.github.com/search/issues?q=repo:{}+is:pr+is:open",
+                    repo
+                ),
+                gh_token.as_deref(),
+            )
+            .await;
+
+            // Small delay between repos
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            new_stats.insert(
+                project_name,
+                GitHubStats {
+                    open_issues,
+                    open_prs,
+                    repo,
+                },
+            );
+        }
+    }
+
+    // Update shared state only if we got results
+    if !new_stats.is_empty() {
+        let mut stats = github_stats.write().await;
+        *stats = new_stats;
+    }
+
+    Ok(())
+}
+
+/// Parse "owner/repo" from a GitHub remote URL (SSH or HTTPS).
+fn parse_github_repo(url: &str) -> Option<String> {
+    // SSH: git@github.com:owner/repo.git
+    if let Some(rest) = url.strip_prefix("git@github.com:") {
+        return Some(rest.trim_end_matches(".git").to_string());
+    }
+    // Also handle ssh://git@github.com/owner/repo.git
+    if url.contains("github.com:") {
+        let parts: Vec<&str> = url.split("github.com:").collect();
+        if parts.len() == 2 {
+            return Some(parts[1].trim_end_matches(".git").to_string());
+        }
+    }
+    // HTTPS: https://github.com/owner/repo.git
+    if url.contains("github.com/") {
+        let parts: Vec<&str> = url.split("github.com/").collect();
+        if parts.len() == 2 {
+            return Some(parts[1].trim_end_matches(".git").to_string());
+        }
+    }
+    None
+}
+
+/// Fetch the `total_count` from a GitHub Search API URL.
+async fn fetch_github_count(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+) -> u32 {
+    let mut request = client
+        .get(url)
+        .header("Accept", "application/vnd.github.v3+json");
+
+    if let Some(tok) = token {
+        request = request.header("Authorization", format!("Bearer {}", tok));
+    }
+
+    match request.send().await {
+        Ok(resp) => {
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                data.get("total_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32
+            } else {
+                0
+            }
+        }
+        Err(e) => {
+            debug!("github api request failed: {}", e);
+            0
+        }
+    }
 }
 
 // ==================== Helpers ====================

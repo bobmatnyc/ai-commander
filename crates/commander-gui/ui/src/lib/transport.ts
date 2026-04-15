@@ -29,6 +29,7 @@ const API_MAP: Record<string, { method: string; path: string | ((args: Record<st
   rename_session: { method: 'POST', path: '/api/sessions/rename' },
   get_config: { method: 'GET', path: '/api/config' },
   save_config: { method: 'POST', path: '/api/config' },
+  get_github_stats: { method: 'GET', path: '/api/github-stats' },
 };
 
 // Request transformers — remap frontend args to REST API format

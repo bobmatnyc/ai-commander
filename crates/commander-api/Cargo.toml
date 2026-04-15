@@ -16,6 +16,7 @@ commander-core = { path = "../commander-core" }
 commander-daemon = { path = "../commander-daemon" }
 commander-tmux = { path = "../commander-tmux" }
 
+reqwest.workspace = true
 axum = { workspace = true, features = ["default"] }
 tokio-stream.workspace = true
 futures.workspace = true

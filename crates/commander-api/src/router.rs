@@ -68,6 +68,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/processes/clean", post(handlers::web::kill_stale_processes))
         // Web UI — Bot status
         .route("/api/bot/status", get(handlers::web::get_bot_status))
+        // Web UI — GitHub stats
+        .route("/api/github-stats", get(handlers::web::get_github_stats))
         // Web UI — Config
         .route("/api/config", get(handlers::web::get_config).post(handlers::web::save_config))
         // Apply middleware
@@ -106,6 +108,9 @@ pub async fn serve(config: ApiConfig, state: AppState) -> Result<(), std::io::Er
 
     // Start the SSE session poller that broadcasts interpreted output.
     handlers::web::spawn_session_poller(state.event_tx.clone(), state.session_adapters.clone());
+
+    // Start the GitHub stats poller (hourly).
+    handlers::web::spawn_github_stats_poller(state.github_stats.clone());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("API server listening on {}", addr);

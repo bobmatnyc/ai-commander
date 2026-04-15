@@ -107,9 +107,73 @@
     return content.replace(/^\w+:\s*/, '');
   }
 
+  function escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
   function renderContent(content: string): string {
-    return content.replace(/```(\w*)\n([\s\S]*?)```/g,
-      '<pre class="code-block"><code>$2</code></pre>');
+    // First handle code blocks (preserve them from table parsing)
+    const codeBlocks: string[] = [];
+    let processed = content.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) => {
+      const idx = codeBlocks.length;
+      codeBlocks.push(`<pre class="code-block"><code>${escapeHtml(code)}</code></pre>`);
+      return `\x00CODEBLOCK${idx}\x00`;
+    });
+
+    // Now handle markdown tables
+    const lines = processed.split('\n');
+    let result = '';
+    let inTable = false;
+    let tableHtml = '';
+    let headerDone = false;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // Detect table rows: starts with | and ends with |
+      if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+        // Separator row (|---|---|)
+        if (/^\|[\s\-:|]+\|$/.test(trimmed)) {
+          headerDone = true;
+          continue;
+        }
+
+        if (!inTable) {
+          inTable = true;
+          tableHtml = '<table class="chat-table"><thead>';
+        }
+
+        const cells = trimmed.split('|').filter(c => c.trim() !== '');
+
+        if (!headerDone) {
+          tableHtml += '<tr>' + cells.map(c => `<th>${escapeHtml(c.trim())}</th>`).join('') + '</tr></thead><tbody>';
+        } else {
+          tableHtml += '<tr>' + cells.map(c => `<td>${escapeHtml(c.trim())}</td>`).join('') + '</tr>';
+        }
+      } else {
+        if (inTable) {
+          tableHtml += '</tbody></table>';
+          result += tableHtml;
+          inTable = false;
+          tableHtml = '';
+          headerDone = false;
+        }
+        result += escapeHtml(line) + '\n';
+      }
+    }
+
+    if (inTable) {
+      tableHtml += '</tbody></table>';
+      result += tableHtml;
+    }
+
+    // Restore code blocks
+    result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_match, idx) => codeBlocks[parseInt(idx)]);
+
+    return result;
   }
 
   type Segment = { type: 'prompt' | 'output' | 'tool'; content: string };
@@ -554,7 +618,7 @@
         {:else if message.direction === 'system'}
           <div class="message system">
             <span class="message-sender">{extractSender(message.content)}</span>
-            <span class="line-content system-text">{stripSender(message.content)}</span>
+            <span class="line-content system-text">{@html renderContent(stripSender(message.content))}</span>
           </div>
         {:else if message.segmentType === 'prompt'}
           <div class="message received">
@@ -866,6 +930,29 @@
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
     font-size: 12px;
     color: var(--text-primary);
+  }
+
+  :global(.chat-table) {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin: 0.5rem 0;
+  }
+
+  :global(.chat-table th),
+  :global(.chat-table td) {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border, #ddd);
+    text-align: left;
+  }
+
+  :global(.chat-table th) {
+    background: var(--bg-surface, rgba(0,0,0,0.05));
+    font-weight: 600;
+  }
+
+  :global(.chat-table tr:nth-child(even)) {
+    background: var(--bg-surface, rgba(0,0,0,0.02));
   }
 
   .activity-dot {
