@@ -10,6 +10,10 @@ const REQUEST_TRANSFORMS: Record<string, (args: Record<string, any>) => Record<s
     session: get(currentSession)?.name || '',
     message: args.content || '',
   }),
+  rename_session: (args) => ({
+    old_name: args.oldName || args.old_name || '',
+    new_name: args.newName || args.new_name || '',
+  }),
 };
 
 // Response transformers — normalize REST responses to Tauri format

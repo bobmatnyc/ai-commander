@@ -37,6 +37,10 @@ const REQUEST_TRANSFORMS: Record<string, (args: Record<string, unknown>) => Reco
     session: get(currentSession)?.name || '',
     message: args.content || '',
   }),
+  rename_session: (args) => ({
+    old_name: args.oldName || args.old_name || '',
+    new_name: args.newName || args.new_name || '',
+  }),
 };
 
 async function fetchApi(command: string, args?: Record<string, unknown>): Promise<unknown> {
