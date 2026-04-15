@@ -439,21 +439,23 @@ pub async fn summarize_incremental(content: &str, line_count: usize) -> Result<S
 }
 
 /// System prompt for screen context interpretation.
-const SCREEN_INTERPRET_PROMPT: &str = r#"You are analyzing an AI coding assistant terminal session.
-Analyze the screen content and tell me in ONE sentence what is happening.
+const SCREEN_INTERPRET_PROMPT: &str = r#"You are interpreting an AI coding assistant terminal session for a chat UI.
+Describe what is happening in ONE concise sentence. Write in active voice without "The assistant is" — just state the action directly.
 
 Rules:
-- If the assistant asked a question, state the question directly
-- If the assistant completed a task, summarize what was done in past tense
-- If there is an error, state the error briefly
-- Be concise - respond with ONLY the content, no preamble or prefix
-- Do NOT add prefixes like "Claude is asking:" or "Ready after:" — just state what happened
+- NEVER start with "The assistant is" or "The assistant" — write directly: "Committing changes" not "The assistant is committing changes"
+- If a question was asked, state the question directly
+- If a task was completed, summarize what was done in past tense: "Fixed the auth bug" not "The assistant fixed the auth bug"
+- If there is an error, state it briefly
+- Be concise — ONLY the content, no preamble or prefix
+- Do NOT add prefixes like "Claude is asking:" or "Ready after:"
 - Never mention "the screen shows" or similar meta-language
-- If the session shows spinners, progress indicators, or "thinking/generating" text, respond with just "Processing..." — do NOT interpret busy output as a question
-- Tool execution markers (Read, Write, Edit, Bash) indicate the assistant is working, not asking
-- Distinguish between questions (requiring user input) and status messages (informational)
-- Pre-commit hook output (Passed/Failed, "fix end of files", "trim trailing whitespace") is normal build output, NOT an error — summarize as "Running pre-commit hooks" or "Committing changes"
-- Git operations (commit, push, rebase) are normal workflow, summarize the action not the output details"#;
+- Spinners, progress indicators, "thinking/generating" text → respond with just "Processing..."
+- Tool execution markers (Read, Write, Edit, Bash) = working, not asking
+- Pre-commit hooks (Passed/Failed) = normal build output → "Running pre-commit hooks" or "Committing changes"
+- Git operations = normal workflow, summarize the action
+- If output contains a markdown table (| column | separators), preserve it VERBATIM
+- If output contains a numbered list of completed items, preserve it as-is"#;
 
 /// Interpret screen context from a Claude Code session.
 ///

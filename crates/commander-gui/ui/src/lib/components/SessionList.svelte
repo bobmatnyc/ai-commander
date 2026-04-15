@@ -68,6 +68,23 @@
     return sessionName;
   }
 
+  /** Look up GitHub stats by session name, trying multiple key variants. */
+  function getGithubStats(sessionName: string): { repo: string; open_issues: number; open_prs: number } | undefined {
+    // Direct match
+    if ($githubStats.has(sessionName)) return $githubStats.get(sessionName);
+    // Strip common prefixes (e.g. "cmd-ai-commander" -> "ai-commander")
+    const stripped = sessionName.replace(/^cmd-/, '');
+    if ($githubStats.has(stripped)) return $githubStats.get(stripped);
+    // Case-insensitive scan
+    for (const [key, stats] of $githubStats.entries()) {
+      if (key.toLowerCase() === sessionName.toLowerCase() ||
+          key.toLowerCase() === stripped.toLowerCase()) {
+        return stats;
+      }
+    }
+    return undefined;
+  }
+
   function sessionsEqual(a: Session[], b: Session[]): boolean {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {
@@ -269,8 +286,8 @@
           <!-- Normal session row -->
           <button class="session-main" on:click={() => connect(session.name)}>
             <span class="session-name">{getDisplayName(session.name)}</span>
-            {#if $githubStats.has(session.name)}
-              {@const stats = $githubStats.get(session.name)}
+            {#if getGithubStats(session.name)}
+              {@const stats = getGithubStats(session.name)}
               {#if stats && stats.open_issues > 0}
                 <span class="badge badge-issues" title="{stats.repo}: {stats.open_issues} open issue{stats.open_issues > 1 ? 's' : ''}">
                   {stats.open_issues}

@@ -170,6 +170,31 @@
       result += tableHtml;
     }
 
+    // Detect numbered lists (2+ consecutive lines starting with N. or N) )
+    result = result.replace(
+      /(?:^|\n)((?:\d+[.)]\s+.+\n?){2,})/gm,
+      (match) => {
+        const items = match.trim().split('\n').map(line => {
+          const m = line.match(/^\d+[.)]\s+(.+)/);
+          return m ? `<li>${escapeHtml(m[1])}</li>` : '';
+        }).join('');
+        return `<ol class="chat-list">${items}</ol>`;
+      }
+    );
+
+    // Detect selector lines (lines with ❯ or > or → prefix in a group)
+    result = result.replace(
+      /(?:^|\n)((?:[❯>→ ]\s+.+\n?){2,})/gm,
+      (match) => {
+        const items = match.trim().split('\n').map(line => {
+          const isSelected = /^[❯→]/.test(line.trim());
+          const text = line.trim().replace(/^[❯>→ ]\s+/, '');
+          return `<div class="selector-item${isSelected ? ' selected' : ''}">${escapeHtml(text)}</div>`;
+        }).join('');
+        return `<div class="chat-selector">${items}</div>`;
+      }
+    );
+
     // Restore code blocks
     result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_match, idx) => codeBlocks[parseInt(idx)]);
 
@@ -628,12 +653,12 @@
         {:else if message.segmentType === 'prompt'}
           <div class="message received">
             <span class="seg-prompt-prefix">❯</span>
-            <span class="line-content seg-prompt-text">{message.content.replace(/^[❯>]\s*/, '')}</span>
+            <span class="line-content seg-prompt-text">{@html renderContent(message.content.replace(/^[❯>]\s*/, ''))}</span>
           </div>
         {:else if message.segmentType === 'tool'}
           <div class="message system">
             <span class="seg-tool-prefix">⏺</span>
-            <span class="line-content seg-tool-text">{message.content.replace(/^⏺\s*/, '')}</span>
+            <span class="line-content seg-tool-text">{@html renderContent(message.content.replace(/^⏺\s*/, ''))}</span>
           </div>
         {:else}
           <div class="message received">
@@ -958,6 +983,26 @@
 
   :global(.chat-table tr:nth-child(even)) {
     background: var(--bg-surface, rgba(0,0,0,0.02));
+  }
+
+  :global(.chat-list) {
+    margin: 0.25rem 0;
+    padding-left: 1.5rem;
+  }
+  :global(.chat-list li) {
+    margin: 0.15rem 0;
+  }
+  :global(.chat-selector) {
+    margin: 0.25rem 0;
+    font-family: monospace;
+  }
+  :global(.selector-item) {
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+  }
+  :global(.selector-item.selected) {
+    background: rgba(59, 130, 246, 0.15);
+    font-weight: 600;
   }
 
   .activity-dot {
