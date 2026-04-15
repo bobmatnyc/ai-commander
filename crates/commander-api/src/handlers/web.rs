@@ -1163,7 +1163,6 @@ pub fn spawn_session_poller(
                         if let Some(interpretation) =
                             commander_core::interpret_screen_context(&cleaned, is_idle)
                         {
-                            // Dedup: only broadcast if interpretation actually changed
                             let prev_interp = interps
                                 .lock()
                                 .unwrap()
@@ -1171,22 +1170,33 @@ pub fn spawn_session_poller(
                                 .cloned()
                                 .unwrap_or_default();
                             let has_prev = !prev_interp.is_empty();
-                            if interpretation != prev_interp {
-                                let _ = tx.send(SessionEvent {
-                                    session_name: session.clone(),
-                                    event_type: "interpretation".to_string(),
-                                    content: interpretation.clone(),
-                                    timestamp: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs(),
-                                    adapter,
-                                    is_update: has_prev,
-                                });
-                                interps
-                                    .lock()
-                                    .unwrap()
-                                    .insert(session, interpretation);
+
+                            // Skip "Processing..." if we already have a meaningful interpretation
+                            if interpretation == "Processing..." && has_prev && prev_interp != "Processing..." {
+                                // Don't downgrade a real interpretation to "Processing..."
+                            } else {
+                                // Fuzzy dedup: skip if first 30 chars match (LLM non-determinism)
+                                let prev_prefix = prev_interp.chars().take(30).collect::<String>().to_lowercase();
+                                let new_prefix = interpretation.chars().take(30).collect::<String>().to_lowercase();
+                                let is_similar = !prev_prefix.is_empty() && prev_prefix == new_prefix;
+
+                                if !is_similar {
+                                    let _ = tx.send(SessionEvent {
+                                        session_name: session.clone(),
+                                        event_type: "interpretation".to_string(),
+                                        content: interpretation.clone(),
+                                        timestamp: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs(),
+                                        adapter,
+                                        is_update: has_prev,
+                                    });
+                                    interps
+                                        .lock()
+                                        .unwrap()
+                                        .insert(session, interpretation);
+                                }
                             }
                         }
                     });

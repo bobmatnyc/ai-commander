@@ -27,7 +27,7 @@
 
   /** Normalize adapter ID to short chat nickname. */
   function adapterNick(id?: string): string {
-    if (!id) return 'ai';
+    if (!id) return 'claude';
     switch (id) {
       case 'claude-code': case 'claude': return 'claude';
       case 'claude-mpm': case 'mpm': return 'mpm';
