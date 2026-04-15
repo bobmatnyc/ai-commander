@@ -18,30 +18,57 @@
   let lastRefresh: Date | null = null;
   let error: string | null = null;
   let interval: number;
+  let isKilling = false;
+  let killResult: { killed: Array<{pid: number, name: string}>, count: number, message: string } | null = null;
+  let killResultTimeout: ReturnType<typeof setTimeout> | null = null;
+  let destroyed = false;
 
   async function refreshProcesses() {
-    if (loading) return;
+    if (loading || destroyed) return;
     loading = true;
     error = null;
     try {
-      processes = await invoke('list_processes') as ProcessInfo[];
+      const result = await invoke('list_processes');
+      if (destroyed) return;
+      processes = (Array.isArray(result) ? result : []).map((p: any) => ({
+        pid: p.pid ?? 0,
+        name: p.name ?? '',
+        cpu: p.cpu ?? 0,
+        memory_mb: p.memory_mb ?? 0,
+        session: p.session ?? null,
+        age_seconds: p.age_seconds ?? 0,
+        stale: p.stale ?? false,
+      }));
       lastRefresh = new Date();
     } catch (err) {
       console.error('Failed to list processes:', err);
-      // Backend command not yet implemented — show empty state
-      processes = [];
-      lastRefresh = new Date();
+      if (!destroyed) {
+        processes = [];
+        lastRefresh = new Date();
+      }
     } finally {
-      loading = false;
+      if (!destroyed) loading = false;
     }
   }
 
   async function killStale() {
+    isKilling = true;
+    killResult = null;
     try {
-      await invoke('kill_stale_processes');
+      const result = await invoke('kill_stale_processes');
+      if (destroyed) return;
+      killResult = result as any ?? { killed: [], count: 0, message: 'No response' };
       await refreshProcesses();
+      // Auto-dismiss result after 5 seconds
+      killResultTimeout = setTimeout(() => { killResult = null; }, 5000);
     } catch (err) {
       console.error('Failed to kill stale processes:', err);
+      if (!destroyed) {
+        killResult = { killed: [], count: 0, message: 'Failed to clean processes' };
+        killResultTimeout = setTimeout(() => { killResult = null; }, 5000);
+      }
+    } finally {
+      if (!destroyed) isKilling = false;
     }
   }
 
@@ -62,7 +89,9 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     clearInterval(interval);
+    if (killResultTimeout) clearTimeout(killResultTimeout);
   });
 </script>
 
@@ -86,17 +115,27 @@
       <button
         class="action-btn danger"
         on:click={killStale}
+        disabled={isKilling}
         title="Kill stale processes"
         aria-label="Kill stale processes"
       >
         <Trash2 size={13} />
-        <span>Clean</span>
+        <span>{isKilling ? 'Cleaning...' : 'Clean'}</span>
       </button>
     </div>
   </div>
 
   {#if error}
     <div class="error-banner">{error}</div>
+  {/if}
+
+  {#if killResult}
+    <div class="kill-banner" class:success={killResult.count > 0}>
+      {killResult.message}
+      {#if killResult.killed?.length}
+        — {killResult.killed.map(p => `${p.name} (${p.pid})`).join(', ')}
+      {/if}
+    </div>
   {/if}
 
   {#if processes.length === 0}
@@ -117,9 +156,9 @@
               <span class="proc-pid">PID {proc.pid}</span>
             </div>
             <div class="proc-stats">
-              <span class="proc-stat" title="CPU usage">{proc.cpu.toFixed(1)}%</span>
-              <span class="proc-stat" title="Memory usage">{formatMemory(proc.memory_mb)}</span>
-              <span class="proc-stat" title="Age">{formatAge(proc.age_seconds)}</span>
+              <span class="proc-stat" title="CPU usage">{(proc.cpu ?? 0).toFixed(1)}%</span>
+              <span class="proc-stat" title="Memory usage">{formatMemory(proc.memory_mb ?? 0)}</span>
+              <span class="proc-stat" title="Age">{formatAge(proc.age_seconds ?? 0)}</span>
             </div>
           </div>
           <div class="proc-meta">
@@ -229,6 +268,21 @@
     font-size: 0.8125rem;
     border-left: 3px solid #dc2626;
     flex-shrink: 0;
+  }
+
+  .kill-banner {
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--text-secondary);
+    padding: 0.625rem 1rem;
+    font-size: 0.8125rem;
+    border-left: 3px solid var(--accent);
+    flex-shrink: 0;
+  }
+
+  .kill-banner.success {
+    background: rgba(34, 197, 94, 0.1);
+    color: #16a34a;
+    border-left-color: #16a34a;
   }
 
   /* Empty state */

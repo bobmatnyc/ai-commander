@@ -695,13 +695,87 @@ pub async fn list_processes() -> Json<ProcessListResponse> {
 }
 
 /// POST /api/processes/clean — Kill stale commander processes.
-pub async fn kill_stale_processes() -> Json<SuccessResponse> {
-    // Best-effort: find and kill processes matching commander patterns that
-    // are no longer associated with a live tmux session. In practice the
-    // caller (web UI) knows which PIDs are stale.
-    Json(SuccessResponse {
-        message: "stale processes cleaned".to_string(),
-    })
+pub async fn kill_stale_processes() -> Result<Json<serde_json::Value>> {
+    // 1. Get tmux session names for correlation
+    let tmux_sessions: Vec<String> = match std::process::Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+        Err(_) => vec![],
+    };
+
+    // 2. Find stale processes (same logic as list_processes)
+    let ps_output = std::process::Command::new("ps")
+        .args(["axo", "pid,comm,%cpu,rss,etime,command"])
+        .output()
+        .map_err(|e| ApiError::Internal(format!("failed to run ps: {}", e)))?;
+
+    let output_str = String::from_utf8_lossy(&ps_output.stdout);
+    let mut killed = Vec::new();
+    let mut failed = Vec::new();
+
+    for line in output_str.lines().skip(1) {
+        let lower = line.to_lowercase();
+        if !lower.contains("claude") && !lower.contains("commander") && !lower.contains("mpm") {
+            continue;
+        }
+        // Skip our own process
+        if lower.contains("commander-gui") || lower.contains("cargo") {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 6 {
+            continue;
+        }
+
+        let pid: u32 = match parts[0].trim().parse() {
+            Ok(p) if p > 0 => p,
+            _ => continue,
+        };
+        let name = parts[1].trim().to_string();
+        let command = parts[5..].join(" ");
+        let age_seconds = parse_etime(parts[4]);
+
+        // Check session association
+        let has_session = tmux_sessions
+            .iter()
+            .any(|s| command.to_lowercase().contains(&s.to_lowercase()));
+
+        // Stale = old + no session
+        let stale = age_seconds > 3600 && !has_session;
+
+        if stale {
+            match std::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .output()
+            {
+                Ok(_) => killed.push(serde_json::json!({ "pid": pid, "name": name })),
+                Err(e) => {
+                    failed.push(serde_json::json!({ "pid": pid, "name": name, "error": e.to_string() }))
+                }
+            }
+        }
+    }
+
+    let count = killed.len();
+    let message = if count > 0 {
+        format!("Killed {} stale process(es)", count)
+    } else {
+        "No stale processes found".to_string()
+    };
+
+    Ok(Json(serde_json::json!({
+        "killed": killed,
+        "failed": failed,
+        "count": count,
+        "message": message,
+    })))
 }
 
 // ==================== Bot status handler ====================
@@ -1012,8 +1086,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_kill_stale_processes() {
-        let response = kill_stale_processes().await;
-        assert_eq!(response.message, "stale processes cleaned");
+        let response = kill_stale_processes().await.unwrap();
+        let val = response.0;
+        assert!(val.get("message").is_some());
+        assert!(val.get("count").is_some());
+        assert!(val.get("killed").is_some());
     }
 
     #[tokio::test]
