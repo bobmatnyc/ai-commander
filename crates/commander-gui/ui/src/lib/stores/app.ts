@@ -57,9 +57,23 @@ function extractMessageBody(content: string): string {
 
 // Helper to add message to specific session.
 // Consolidates consecutive messages from the same sender into one block.
+// Skips system messages that echo recent user input.
 export function addMessageToSession(sessionName: string, message: Message) {
   sessionMessages.update(map => {
     const msgs = map.get(sessionName) || [];
+
+    // Skip system interpretations that echo a recent user message
+    if (message.direction === 'system') {
+      const body = extractMessageBody(message.content).trim().toLowerCase();
+      const recentSent = msgs.slice(-5).filter(m => m.direction === 'sent');
+      for (const sent of recentSent) {
+        const sentText = sent.content.trim().toLowerCase();
+        if (sentText && (body.includes(sentText) || sentText.includes(body))) {
+          return map; // Skip — this is just echoing user input
+        }
+      }
+    }
+
     const lastMsg = msgs[msgs.length - 1];
 
     // Try to consolidate with previous message from same sender + direction
