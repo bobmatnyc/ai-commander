@@ -48,7 +48,10 @@
   }
 
   // Close sidebar on mobile when session selected
-  $: if ($currentSession) sidebarOpen = false;
+  $: if ($currentSession) {
+    sidebarOpen = false;
+    currentView = 'chat';
+  }
 
 </script>
 
