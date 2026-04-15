@@ -96,6 +96,17 @@
     if (autoScroll) setTimeout(scrollToBottom, 10);
   }
 
+  /** Extract sender name from "sender: content" pattern. */
+  function extractSender(content: string): string {
+    const match = content.match(/^(\w+):/);
+    return match ? match[1] : 'system';
+  }
+
+  /** Strip sender prefix from message content. */
+  function stripSender(content: string): string {
+    return content.replace(/^\w+:\s*/, '');
+  }
+
   function renderContent(content: string): string {
     return content.replace(/```(\w*)\n([\s\S]*?)```/g,
       '<pre class="code-block"><code>$2</code></pre>');
@@ -529,25 +540,27 @@
     >
       {#each $messages as message}
         {#if message.direction === 'sent'}
-          <div class="terminal-line sent">
-            <span class="line-prefix">you: </span><span class="line-content sent-text">{message.content}</span>
+          <div class="message sent">
+            <span class="message-sender">you</span>
+            <span class="line-content sent-text">{message.content}</span>
           </div>
         {:else if message.direction === 'system'}
-          <div class="terminal-line system">
-            <span class="line-prefix">[ </span><span class="line-content system-text">{message.content}</span><span class="line-prefix"> ]</span>
+          <div class="message system">
+            <span class="message-sender">{extractSender(message.content)}</span>
+            <span class="line-content system-text">{stripSender(message.content)}</span>
           </div>
         {:else if message.segmentType === 'prompt'}
-          <div class="terminal-line seg-prompt">
+          <div class="message received">
             <span class="seg-prompt-prefix">❯</span>
             <span class="line-content seg-prompt-text">{message.content.replace(/^[❯>]\s*/, '')}</span>
           </div>
         {:else if message.segmentType === 'tool'}
-          <div class="terminal-line seg-tool">
+          <div class="message system">
             <span class="seg-tool-prefix">⏺</span>
             <span class="line-content seg-tool-text">{message.content.replace(/^⏺\s*/, '')}</span>
           </div>
         {:else}
-          <div class="terminal-line received">
+          <div class="message received">
             <span class="line-content">{@html renderContent(message.content)}</span>
           </div>
         {/if}
@@ -574,6 +587,7 @@
     position: relative;
     background-color: var(--bg-primary);
     overflow: hidden;
+    min-height: 0;
   }
 
   .session-actions {
@@ -687,20 +701,34 @@
     border-radius: 3px;
   }
 
-  .terminal-line {
+  .message {
     white-space: pre-wrap;
     word-break: break-word;
-    margin: 0;
-    padding: 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    margin-bottom: 0.5rem;
+    max-width: 85%;
   }
 
-  .terminal-line + .terminal-line {
-    margin-top: 0.125rem;
+  .message.sent {
+    margin-left: auto;
+    background: var(--chat-user-bg, rgba(34, 197, 94, 0.08));
   }
 
-  .line-prefix {
+  .message.received {
+    background: var(--chat-ai-bg, rgba(59, 130, 246, 0.08));
+  }
+
+  .message.system {
+    background: var(--chat-system-bg, rgba(107, 114, 128, 0.08));
+  }
+
+  .message-sender {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
     color: var(--text-secondary);
-    user-select: none;
+    margin-bottom: 0.25rem;
   }
 
   .line-content {

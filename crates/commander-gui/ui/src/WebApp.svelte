@@ -6,21 +6,29 @@
   import SettingsModal from './lib/components/SettingsModal.svelte';
   import { Sun, Moon, Settings, Activity, MessageSquare } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
+  import { currentSession } from './lib/stores/app';
 
   // No auth needed — Tailscale handles network security
 
   let currentView: 'chat' | 'monitor' = 'chat';
   let showSettings = false;
+  let sidebarOpen = false;
 
   function toggleTheme() {
     setTheme($resolvedTheme === 'dark' ? 'light' : 'dark');
   }
+
+  // Close sidebar on mobile when session selected
+  $: if ($currentSession) sidebarOpen = false;
 
 </script>
 
 <main class="app">
     <header>
       <div class="header-left">
+        <button class="hamburger-btn" on:click={() => sidebarOpen = !sidebarOpen}>
+          ☰
+        </button>
         <img src="/ai-commander.png" alt="AI Commander" class="header-logo" />
         <h1>AI Commander</h1>
       </div>
@@ -67,9 +75,12 @@
     </header>
 
     <div class="content">
-      <aside>
+      <aside class:open={sidebarOpen}>
         <SessionList />
       </aside>
+      {#if sidebarOpen}
+        <div class="sidebar-backdrop" on:click={() => sidebarOpen = false} on:keydown={() => sidebarOpen = false} role="button" tabindex="-1" aria-label="Close sidebar"></div>
+      {/if}
       <section class="main-panel">
         {#if currentView === 'chat'}
           <ChatView />
@@ -251,10 +262,63 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-height: 0;
   }
 
   aside :global(.session-list) {
     flex: 1;
     min-height: 0;
+  }
+
+  .hamburger-btn {
+    display: none;
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: var(--text-primary);
+    padding: 0.25rem 0.5rem;
+  }
+
+  .sidebar-backdrop {
+    display: none;
+  }
+
+  @media (max-width: 768px) {
+    .hamburger-btn {
+      display: flex;
+      align-items: center;
+    }
+
+    aside {
+      position: fixed;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: 250px;
+      z-index: 100;
+      transform: translateX(-100%);
+      transition: transform 0.2s ease;
+      background-color: var(--bg-secondary);
+    }
+
+    aside.open {
+      transform: translateX(0);
+    }
+
+    .sidebar-backdrop {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.4);
+      z-index: 99;
+    }
+
+    .content {
+      position: relative;
+    }
   }
 </style>
