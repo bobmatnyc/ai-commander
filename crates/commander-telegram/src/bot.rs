@@ -190,6 +190,13 @@ impl TelegramBot {
             poll_notifications_loop(notify_bot, notify_state).await;
         });
 
+        // Start the API health polling task (detects server rebuilds/restarts)
+        let health_state = Arc::clone(&self.state);
+        let health_bot = bot.clone();
+        tokio::spawn(async move {
+            poll_api_health_loop(health_bot, health_state).await;
+        });
+
         // Set up the command and message handlers
         let state_for_commands = Arc::clone(&state);
         let state_for_messages = Arc::clone(&state);
@@ -734,6 +741,77 @@ async fn poll_output_loop(bot: Bot, state: Arc<TelegramState>) {
                     // Clean up progress message on error.
                     if let Some(prog_msg_id) = progress_messages.remove(&session_key) {
                         let _ = bot.delete_message(chat_id, prog_msg_id).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Background task to poll the API server health endpoint and detect rebuilds/restarts.
+///
+/// Checks `http://localhost:9876/api/health` every 30 seconds. After 3 consecutive
+/// failures it notifies authorized chats that the server is rebuilding. When the
+/// server comes back it sends a recovery notification and detects version changes.
+async fn poll_api_health_loop(bot: Bot, state: Arc<TelegramState>) {
+    use teloxide::types::ChatId;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
+    let mut last_version: Option<String> = None;
+    let mut consecutive_failures: u32 = 0;
+    let mut notified_down = false;
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+
+        match client.get("http://localhost:9876/api/health").send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    let version = data.get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    if notified_down {
+                        // Server is back -- notify connected chats
+                        let msg = if let Some(ref v) = version {
+                            format!("✅ API server is back (v{})", v)
+                        } else {
+                            "✅ API server is back".to_string()
+                        };
+
+                        for chat_id in state.get_authorized_chat_ids().await {
+                            let _ = bot.send_message(ChatId(chat_id), &msg).await;
+                        }
+                        notified_down = false;
+                    }
+
+                    // Check for version change
+                    if let Some(ref prev) = last_version {
+                        if let Some(ref curr) = version {
+                            if prev != curr {
+                                let msg = format!("🔄 API server updated: {} → {}", prev, curr);
+                                for chat_id in state.get_authorized_chat_ids().await {
+                                    let _ = bot.send_message(ChatId(chat_id), &msg).await;
+                                }
+                            }
+                        }
+                    }
+
+                    last_version = version;
+                    consecutive_failures = 0;
+                }
+            }
+            _ => {
+                consecutive_failures += 1;
+                if consecutive_failures >= 3 && !notified_down {
+                    notified_down = true;
+                    let msg = "⏳ API server is rebuilding...";
+                    for chat_id in state.get_authorized_chat_ids().await {
+                        let _ = bot.send_message(ChatId(chat_id), msg).await;
                     }
                 }
             }

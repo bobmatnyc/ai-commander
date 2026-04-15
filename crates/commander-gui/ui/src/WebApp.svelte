@@ -7,7 +7,7 @@
   import SettingsModal from './lib/components/SettingsModal.svelte';
   import { Sun, Moon, Settings, Activity, MessageSquare } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
-  import { currentSession } from './lib/stores/app';
+  import { currentSession, serverRebuilding } from './lib/stores/app';
 
   // No auth needed — Tailscale handles network security
 
@@ -15,32 +15,51 @@
   let showSettings = false;
   let sidebarOpen = false;
 
-  // Version check: detect server updates and prompt reload
+  // Version check + rebuild detection via dynamic health polling
   let loadedVersion: string | null = null;
   let newVersionAvailable = false;
-  let versionCheckInterval: ReturnType<typeof setInterval>;
+  let healthFailures = 0;
+  let healthTimeout: ReturnType<typeof setTimeout>;
 
-  async function checkVersion() {
+  async function checkHealth() {
     try {
       const resp = await fetch('/api/health');
       const data = await resp.json();
+
+      // Server is back after downtime — check for new version
+      if ($serverRebuilding && healthFailures > 0) {
+        if (loadedVersion && data.version !== loadedVersion) {
+          newVersionAvailable = true;
+        }
+      }
+
+      healthFailures = 0;
+      $serverRebuilding = false;
+
       if (loadedVersion === null) {
         loadedVersion = data.version;
       } else if (data.version !== loadedVersion) {
         newVersionAvailable = true;
       }
+
+      // Poll again in 60s when healthy
+      healthTimeout = setTimeout(checkHealth, 60000);
     } catch {
-      // Silently ignore — server may be restarting
+      healthFailures++;
+      if (healthFailures >= 2) {
+        $serverRebuilding = true;
+      }
+      // Poll more frequently when down (every 3s)
+      healthTimeout = setTimeout(checkHealth, 3000);
     }
   }
 
   onMount(() => {
-    checkVersion();
-    versionCheckInterval = setInterval(checkVersion, 60000);
+    checkHealth();
   });
 
   onDestroy(() => {
-    if (versionCheckInterval) clearInterval(versionCheckInterval);
+    if (healthTimeout) clearTimeout(healthTimeout);
   });
 
   function toggleTheme() {
@@ -82,6 +101,12 @@
           Monitor
         </button>
       </div>
+      {#if $serverRebuilding}
+        <div class="rebuild-banner">
+          <span class="rebuild-spinner">&#x27F3;</span>
+          Rebuilding...
+        </div>
+      {/if}
       {#if newVersionAvailable}
         <button class="update-banner" on:click={() => window.location.reload()}>
           🔄 Update available — Reload
@@ -246,6 +271,29 @@
     background: var(--bg-surface);
     color: var(--text-primary);
     border-color: var(--border);
+  }
+
+  .rebuild-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: var(--warning-bg, rgba(245, 158, 11, 0.15));
+    color: var(--warning-text, #d97706);
+    padding: 0.2rem 0.75rem;
+    border-radius: 0.375rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .rebuild-spinner {
+    display: inline-block;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   .update-banner {

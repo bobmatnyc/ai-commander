@@ -71,3 +71,4 @@ export function clearSessionMessages(sessionName: string) {
 export const sessions = writable<Session[]>([]);
 export const botRunning = writable(false);
 export const botPid = writable<number | null>(null);
+export const serverRebuilding = writable<boolean>(false);

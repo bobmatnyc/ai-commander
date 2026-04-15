@@ -4,7 +4,8 @@
     addMessageToSession,
     currentSession,
     sessions,
-    clearSessionMessages
+    clearSessionMessages,
+    serverRebuilding
   } from '../stores/app';
   import { Send } from 'lucide-svelte';
 
@@ -12,6 +13,7 @@
   let isSending = false;
 
   $: isDisabled = !$currentSession || isSending;
+  $: canSend = !isDisabled && !$serverRebuilding;
   $: isSlashCommand = input.trim().startsWith('/') && !input.trim().startsWith('/aic:send ');
 
   async function handleSlashCommand(command: string) {
@@ -119,7 +121,7 @@
   }
 
   async function sendMessage() {
-    if (!input.trim() || isDisabled) return;
+    if (!input.trim() || !canSend) return;
     if (!$currentSession) return;
 
     const content = input.trim();
@@ -176,9 +178,11 @@
     placeholder={
       !$currentSession
         ? 'Select a session first…'
-        : isSending
-          ? 'Sending…'
-          : 'Type message or /help for commands…'
+        : $serverRebuilding
+          ? 'Server rebuilding, please wait...'
+          : isSending
+            ? 'Sending…'
+            : 'Type message or /help for commands…'
     }
     disabled={isDisabled}
     class="input-field"
@@ -187,7 +191,7 @@
   />
   <button
     on:click={sendMessage}
-    disabled={isDisabled || !input.trim()}
+    disabled={!canSend || !input.trim()}
     class="send-button"
     class:loading={isSending}
     aria-label={isSending ? 'Sending…' : 'Send message'}
