@@ -151,7 +151,7 @@
       </div>
     </header>
 
-    <div class="content">
+    <div class="content" class:mobile-list={sidebarOpen}>
       <aside class:open={sidebarOpen}>
         <SessionList />
       </aside>
@@ -413,30 +413,26 @@
       align-items: center;
     }
 
+    /* Phone: session list and main panel replace each other */
     aside {
-      position: fixed;
-      top: 0;
-      left: 0;
-      bottom: 0;
-      width: 250px;
-      z-index: 100;
-      transform: translateX(-100%);
-      transition: transform 0.2s ease;
+      display: none;
+      width: 100%;
+      flex: 1;
+      min-height: 0;
       background-color: var(--bg-secondary);
     }
 
     aside.open {
-      transform: translateX(0);
+      display: flex;
+    }
+
+    /* When mobile-list is active, hide the main panel and backdrop */
+    .content.mobile-list .main-panel {
+      display: none;
     }
 
     .sidebar-backdrop {
-      display: block;
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0, 0, 0, 0.4);
+      display: none !important;
       z-index: 99;
     }
 

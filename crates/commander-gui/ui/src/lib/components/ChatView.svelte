@@ -367,6 +367,8 @@
         lastSummaryAt = lineCount;
         invoke('interpret_session', { name: sessionName })
           .then((result: unknown) => {
+            // Guard: only add if still on the same session
+            if ($currentSession?.name !== sessionName) return;
             const r = result as { output?: string; adapter?: string } | string;
             const text = typeof r === 'string' ? r : r?.output || '';
             const adapter = typeof r === 'string' ? undefined : r?.adapter;
@@ -470,14 +472,17 @@
       sseCleanup = null;
     }
 
-    invoke('interpret_session', { name: $currentSession.name })
+    // Capture session name at call time to prevent cross-session bleed
+    const connectingSession = $currentSession.name;
+    invoke('interpret_session', { name: connectingSession })
       .then((result: unknown) => {
-        if ($currentSession) {
+        // Only add message if we're still on the same session
+        if ($currentSession?.name === connectingSession) {
           const r = result as { output?: string; adapter?: string } | string;
           const text = typeof r === 'string' ? r : r?.output || '';
           const adapter = typeof r === 'string' ? undefined : r?.adapter;
           const display = `${adapterNick(adapter)}: ${text.trim()}`;
-          addMessageToSession($currentSession.name, {
+          addMessageToSession(connectingSession, {
             direction: 'system',
             content: display,
             timestamp: new Date(),
