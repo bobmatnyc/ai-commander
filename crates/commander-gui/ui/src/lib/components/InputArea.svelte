@@ -207,6 +207,22 @@
     padding: 0.75rem 1rem;
     border-top: 1px solid var(--border);
     background-color: var(--bg-secondary);
+    /* Ensure nothing bleeds off-screen on any viewport */
+    width: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  @media (max-width: 768px) {
+    .input-area {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      /* iPhone notch / home bar safe area */
+      padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));
+      z-index: 100;
+    }
   }
 
   .input-field {

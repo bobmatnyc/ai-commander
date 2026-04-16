@@ -789,6 +789,13 @@
     background: var(--bg-primary);
   }
 
+  @media (max-width: 768px) {
+    /* Leave room for the fixed InputArea bar (~4rem input + safe area) */
+    .terminal-output {
+      padding-bottom: calc(4rem + env(safe-area-inset-bottom));
+    }
+  }
+
   .terminal-output::-webkit-scrollbar {
     width: 6px;
   }
