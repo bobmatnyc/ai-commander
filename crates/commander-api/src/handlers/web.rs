@@ -202,14 +202,28 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
         .list_sessions()
         .map_err(|e| ApiError::Internal(format!("failed to list sessions: {}", e)))?;
 
-    // Load projects to resolve session nicknames. Failure is non-fatal.
-    let projects: Vec<commander_models::Project> = {
-        let state_dir = commander_core::config::state_dir();
-        let store = commander_persistence::StateStore::new(state_dir);
-        store
-            .load_all_projects()
-            .map(|map| map.into_values().collect())
+    // Load projects to resolve session nicknames. Uses a minimal ProjectStub that
+    // only deserializes `name` and `path`, avoiding silent failures from the full
+    // Project struct's complex nested fields. Failure is non-fatal.
+    #[derive(serde::Deserialize)]
+    struct ProjectStub {
+        name: String,
+        path: String,
+    }
+
+    let projects: Vec<ProjectStub> = {
+        let dir = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
             .unwrap_or_default()
+            .join(".ai-commander/projects");
+        std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map_or(false, |x| x == "json"))
+            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+            .filter_map(|s| serde_json::from_str::<ProjectStub>(&s).ok())
+            .collect()
     };
 
     let summaries: Vec<SessionSummary> = sessions
@@ -226,7 +240,7 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
             let nickname = projects
                 .iter()
                 .find(|p| {
-                    p.session_name() == s.name
+                    p.name.replace([' ', '.', '/', ':'], "-") == s.name
                         || p.path == s.name
                         || path.as_deref() == Some(p.path.as_str())
                 })
