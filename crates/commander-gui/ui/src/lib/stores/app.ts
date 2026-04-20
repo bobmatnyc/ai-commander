@@ -7,6 +7,7 @@ export interface Session {
   path?: string;
   is_active?: boolean;
   status_line?: string;
+  nickname?: string;
 }
 
 export interface Message {

@@ -38,6 +38,9 @@ pub struct SessionSummary {
     pub is_commander: bool,
     /// Current working directory of the session's active pane, if available.
     pub path: Option<String>,
+    /// Human-readable project nickname, if a registered project matches this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
 }
 
 /// Response for listing sessions.
@@ -199,6 +202,16 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
         .list_sessions()
         .map_err(|e| ApiError::Internal(format!("failed to list sessions: {}", e)))?;
 
+    // Load projects to resolve session nicknames. Failure is non-fatal.
+    let projects: Vec<commander_models::Project> = {
+        let state_dir = commander_core::config::state_dir();
+        let store = commander_persistence::StateStore::new(state_dir);
+        store
+            .load_all_projects()
+            .map(|map| map.into_values().collect())
+            .unwrap_or_default()
+    };
+
     let summaries: Vec<SessionSummary> = sessions
         .iter()
         .map(|s| {
@@ -210,11 +223,16 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
                     let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
                     if p.is_empty() { None } else { Some(p) }
                 });
+            let nickname = projects
+                .iter()
+                .find(|p| p.session_name() == s.name)
+                .map(|p| p.name.clone());
             SessionSummary {
                 is_commander: s.name.starts_with("cmd-"),
                 pane_count: s.panes.len(),
                 name: s.name.clone(),
                 path,
+                nickname,
             }
         })
         .collect();

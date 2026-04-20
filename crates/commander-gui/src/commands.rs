@@ -79,6 +79,7 @@ pub struct SessionInfo {
     pub created_at: String,
     pub is_connected: bool,
     pub path: Option<String>,
+    pub nickname: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -92,6 +93,17 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
     let tmux = state.tmux.as_ref().ok_or("Tmux not initialized")?;
     let sessions = tmux.list_sessions().map_err(|e| e.to_string())?;
 
+    // Load projects to resolve session nicknames. Failure is non-fatal — all
+    // nicknames stay None and session listing continues normally.
+    let projects: Vec<commander_models::Project> = {
+        let state_dir = commander_core::config::state_dir();
+        let store = commander_persistence::StateStore::new(state_dir);
+        store
+            .load_all_projects()
+            .map(|map| map.into_values().collect())
+            .unwrap_or_default()
+    };
+
     Ok(sessions
         .into_iter()
         .map(|s| {
@@ -103,6 +115,10 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
                     let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
                     if p.is_empty() { None } else { Some(p) }
                 });
+            let nickname = projects
+                .iter()
+                .find(|p| p.session_name() == s.name)
+                .map(|p| p.name.clone());
             SessionInfo {
                 name: s.name.clone(),
                 created_at: s.created_at.to_string(),
@@ -113,6 +129,7 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
                     .as_ref()
                     == Some(&s.name),
                 path,
+                nickname,
             }
         })
         .collect())

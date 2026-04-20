@@ -64,8 +64,8 @@
   // Dropdown state: tracks which session's gear menu is open
   let openDropdown: string | null = null;
 
-  function getDisplayName(sessionName: string): string {
-    return sessionName;
+  function getDisplayName(session: Session): string {
+    return session.nickname ?? session.name;
   }
 
   /** Look up GitHub stats by session name, trying multiple key variants. */
@@ -119,7 +119,7 @@
 
         addMessageToSession(name, {
           direction: 'system',
-          content: `Connected to session: ${getDisplayName(name)}`,
+          content: `Connected to session: ${getDisplayName(session)}`,
           timestamp: new Date(),
         });
 
@@ -140,7 +140,9 @@
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      lastError = `Cannot connect to ${getDisplayName(name)}: ${errorMessage}`;
+      const sessionObj = $sessions.find(s => s.name === name);
+      const displayName = sessionObj ? getDisplayName(sessionObj) : name;
+      lastError = `Cannot connect to ${displayName}: ${errorMessage}`;
       errorTimeout = setTimeout(() => { lastError = null; }, 5000);
 
       if ($currentSession) {
@@ -285,7 +287,7 @@
         {:else}
           <!-- Normal session row -->
           <button class="session-main" on:click={() => connect(session.name)}>
-            <span class="session-name">{getDisplayName(session.name)}</span>
+            <span class="session-name">{getDisplayName(session)}</span>
             {#if session.path}
               <span class="session-path" title={session.path}>{session.path}</span>
             {/if}
