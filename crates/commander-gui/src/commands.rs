@@ -117,7 +117,11 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
                 });
             let nickname = projects
                 .iter()
-                .find(|p| p.session_name() == s.name)
+                .find(|p| {
+                    p.session_name() == s.name
+                        || p.path == s.name
+                        || path.as_deref() == Some(p.path.as_str())
+                })
                 .map(|p| p.name.clone());
             SessionInfo {
                 name: s.name.clone(),
