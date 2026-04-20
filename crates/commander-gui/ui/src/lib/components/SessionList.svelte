@@ -286,6 +286,9 @@
           <!-- Normal session row -->
           <button class="session-main" on:click={() => connect(session.name)}>
             <span class="session-name">{getDisplayName(session.name)}</span>
+            {#if session.path}
+              <span class="session-path" title={session.path}>{session.path}</span>
+            {/if}
             {#if getGithubStats(session.name)}
               {@const stats = getGithubStats(session.name)}
               {#if stats && stats.open_issues > 0}
@@ -473,6 +476,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-align: left;
+  }
+
+  .session-path {
+    font-size: 0.7rem;
+    color: var(--text-muted, #888);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 180px;
+    display: block;
     text-align: left;
   }
 

@@ -78,6 +78,7 @@ pub struct SessionInfo {
     pub name: String,
     pub created_at: String,
     pub is_connected: bool,
+    pub path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,15 +94,26 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
 
     Ok(sessions
         .into_iter()
-        .map(|s| SessionInfo {
-            name: s.name.clone(),
-            created_at: s.created_at.to_string(),
-            is_connected: state
-                .current_session
-                .read()
-                .unwrap()
-                .as_ref()
-                == Some(&s.name),
+        .map(|s| {
+            let path = std::process::Command::new("tmux")
+                .args(["display-message", "-p", "-t", &s.name, "#{pane_current_path}"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if p.is_empty() { None } else { Some(p) }
+                });
+            SessionInfo {
+                name: s.name.clone(),
+                created_at: s.created_at.to_string(),
+                is_connected: state
+                    .current_session
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    == Some(&s.name),
+                path,
+            }
         })
         .collect())
 }

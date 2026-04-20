@@ -36,6 +36,8 @@ pub struct SessionSummary {
     pub pane_count: usize,
     /// Whether this session was created by commander (name starts with "cmd-").
     pub is_commander: bool,
+    /// Current working directory of the session's active pane, if available.
+    pub path: Option<String>,
 }
 
 /// Response for listing sessions.
@@ -199,10 +201,21 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
 
     let summaries: Vec<SessionSummary> = sessions
         .iter()
-        .map(|s| SessionSummary {
-            is_commander: s.name.starts_with("cmd-"),
-            pane_count: s.panes.len(),
-            name: s.name.clone(),
+        .map(|s| {
+            let path = std::process::Command::new("tmux")
+                .args(["display-message", "-p", "-t", &s.name, "#{pane_current_path}"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if p.is_empty() { None } else { Some(p) }
+                });
+            SessionSummary {
+                is_commander: s.name.starts_with("cmd-"),
+                pane_count: s.panes.len(),
+                name: s.name.clone(),
+                path,
+            }
         })
         .collect();
 

@@ -4,6 +4,9 @@ export interface Session {
   name: string;
   created_at: string;
   is_connected: boolean;
+  path?: string;
+  is_active?: boolean;
+  status_line?: string;
 }
 
 export interface Message {
@@ -183,6 +186,27 @@ export const serverRebuilding = writable<boolean>(false);
 export const activeSessions = writable<Set<string>>(new Set());
 
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// Current view for navigation (e.g. 'sessions', 'chat', 'dashboard')
+export const currentView = writable<string>('sessions');
+
+// Sessions explicitly hidden from the dashboard
+export const hiddenSessions = writable<Set<string>>(new Set());
+
+export function hideSession(name: string) {
+  hiddenSessions.update(set => {
+    const next = new Set(set);
+    next.add(name);
+    return next;
+  });
+}
+
+export function unhideAll() {
+  hiddenSessions.set(new Set());
+}
+
+// No-op stub — hydration from localStorage can be wired up later
+export async function hydrateSessionMessages(_sessionName: string): Promise<void> {}
 
 export function markSessionActive(sessionName: string) {
   activeSessions.update(set => {
