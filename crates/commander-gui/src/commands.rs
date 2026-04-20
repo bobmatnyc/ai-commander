@@ -1001,12 +1001,19 @@ pub async fn open_in_iterm(
     session_name: String,
     _state: State<'_, GuiState>,
 ) -> Result<(), String> {
-    // Open iTerm2 and attach to the named tmux session
+    // Open iTerm2 and attach to the named tmux session.
+    // If a window already exists, open a new tab rather than a new window.
     let script = format!(
         r#"tell application "iTerm2"
             activate
-            create window with default profile
-            tell current session of current window
+            if (count of windows) = 0 then
+                create window with default profile
+            else
+                tell current window
+                    create tab with default profile
+                end tell
+            end if
+            tell current session of current tab of current window
                 write text "tmux attach -t {}"
             end tell
         end tell"#,
