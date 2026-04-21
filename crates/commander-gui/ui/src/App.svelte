@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import SessionList from './lib/components/SessionList.svelte';
   import ChatView from './lib/components/ChatView.svelte';
@@ -8,7 +8,7 @@
   import MonitorView from './lib/components/MonitorView.svelte';
   import { RotateCw, Sun, Moon } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
-  import { currentSession } from './lib/stores/app';
+  import { currentSession, githubStats } from './lib/stores/app';
 
   type SidebarView = 'sessions' | 'monitor';
   let currentView: SidebarView = 'sessions';
@@ -20,6 +20,21 @@
   let rebuilding = false;
   let apiRunning = false;
   let daemonRunning = false;
+  let githubInterval: ReturnType<typeof setInterval>;
+
+  // Poll the Tauri `get_github_stats` command (which proxies commander-api's
+  // /api/github-stats) so SessionList can render PR/issue badges in the
+  // desktop build. The web build does this via WebApp.svelte over REST.
+  async function fetchGithubStats() {
+    try {
+      const result = await invoke('get_github_stats') as { stats?: Record<string, unknown> };
+      if (result?.stats) {
+        $githubStats = new Map(Object.entries(result.stats)) as typeof $githubStats;
+      }
+    } catch {
+      // Silent — API server may still be warming up, will retry on next tick.
+    }
+  }
 
   async function handleReload() {
     if (rebuilding) return;
@@ -35,7 +50,7 @@
 
   async function checkServices() {
     try {
-      const resp = await fetch('http://localhost:8765/api/health');
+      const resp = await fetch('http://localhost:9876/api/health');
       apiRunning = resp.ok;
     } catch {
       apiRunning = false;
@@ -58,10 +73,18 @@
     checkServices();
     const svcInterval = setInterval(checkServices, 5000);
 
+    fetchGithubStats();
+    // 30 min matches WebApp.svelte — GitHub rate-limits and stats change slowly.
+    githubInterval = setInterval(fetchGithubStats, 1800000);
+
     return () => {
       window.removeEventListener('keydown', handleKeydown);
       clearInterval(svcInterval);
     };
+  });
+
+  onDestroy(() => {
+    if (githubInterval) clearInterval(githubInterval);
   });
 </script>
 
