@@ -1385,12 +1385,24 @@ pub async fn set_session_nickname(
 
 #[tauri::command]
 pub async fn open_in_terminal_app(session_name: String) -> Result<(), String> {
+    // Session names may contain shell glob metacharacters (e.g. "cto [cto3]").
+    // When AppleScript's `do script` hands the command to the user's login shell
+    // (usually zsh), brackets are interpreted as glob patterns, producing
+    // `zsh: no matches found: [cto3]`. Single-quote the session name so the
+    // shell treats it as a literal string. The escape-single-quote idiom
+    // `'\''` closes the quoted span, inserts a literal `'`, and reopens it.
+    //
+    // We also escape any embedded double quotes so the AppleScript string
+    // literal that wraps the shell command isn't broken out of by a crafted
+    // session name.
+    let shell_safe = session_name.replace('\'', r"'\''");
+    let applescript_safe = shell_safe.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         r#"tell application "Terminal"
             activate
-            do script "tmux attach -t {}"
+            do script "tmux attach -t '{}'"
         end tell"#,
-        session_name
+        applescript_safe
     );
 
     std::process::Command::new("osascript")
@@ -1667,12 +1679,21 @@ pub async fn open_in_iterm(
     // so users can tell tabs apart by the project label rather than the raw
     // tmux session name.
     //
-    // Defensive escape: tmux session names are normally constrained to safe
-    // characters (alphanumerics, '-', '_', '.'), but escape backslashes and
-    // double quotes anyway so a crafted name cannot break out of the AppleScript
-    // string literal.
+    // Session names may contain shell metacharacters: spaces (from tmux rename),
+    // brackets (e.g. "cto [cto3]" which zsh interprets as a glob pattern and
+    // fails with "zsh: no matches found: [cto3]"), parentheses, etc. iTerm2's
+    // `write text` hands the string to the shell, so we must shell-quote the
+    // target. The escape-single-quote idiom `'\''` safely terminates and
+    // re-opens the quoted span so a literal `'` can pass through unchanged.
+    //
+    // We also escape backslashes and double quotes so a crafted session name
+    // cannot break out of the AppleScript string literal that wraps the
+    // shell-quoted command.
     let display_name = resolve_session_display_name(&session_name);
-    let escaped_session = session_name.replace('\\', "\\\\").replace('"', "\\\"");
+    let shell_safe_session = session_name.replace('\'', r"'\''");
+    let escaped_session = shell_safe_session
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     let escaped_display = display_name.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         r#"tell application "iTerm2"
@@ -1685,7 +1706,7 @@ pub async fn open_in_iterm(
                 end tell
             end if
             tell current session of current tab of current window
-                write text "tmux attach -t {session}"
+                write text "tmux attach -t '{session}'"
                 set name to "{display}"
             end tell
         end tell"#,

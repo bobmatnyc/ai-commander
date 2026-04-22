@@ -400,8 +400,15 @@ fn poll_once(
             }
             None => {
                 // LLM returned nothing — could be "no meaningful content" or
-                // a hard backend failure. Count the failure and emit an
-                // `llm_unavailable` banner once we've seen enough in a row.
+                // a hard backend failure. Count the failure and, once we've
+                // seen enough in a row, emit BOTH (a) the `llm_unavailable`
+                // banner flag for the persistent UI banner and (b) an
+                // explicit `error` chat event explaining why the summary
+                // view has stopped updating. Without the error event, a
+                // broken-LLM session silently stalls while still emitting
+                // `session-output` pulses — users reported that as "raw
+                // output bleeding into Summary view" because activity
+                // counters tick but nothing readable appears.
                 let should_emit = {
                     let mut states = states_for_task.lock().unwrap();
                     match states.get_mut(&session_for_task) {
@@ -424,6 +431,17 @@ fn poll_once(
                         "chat-event",
                         serde_json::json!({
                             "type": "llm_unavailable",
+                            "session": session_for_task,
+                        }),
+                    );
+                    // Surface a concrete error message in the chat stream
+                    // so users see WHY summaries stopped updating, rather
+                    // than having to guess from the banner alone.
+                    let _ = app_for_task.emit(
+                        "chat-event",
+                        serde_json::json!({
+                            "type": "error",
+                            "content": "LLM unavailable — summaries paused. Switch to Raw view to see terminal output.",
                             "session": session_for_task,
                         }),
                     );

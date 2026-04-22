@@ -337,7 +337,9 @@
     // Second click — fire the command.
     pendingUnregister = null;
     try {
-      await invoke('unregister_session', { session_name: sessionName });
+      // Tauri v2 maps Rust snake_case params to JS camelCase invoke keys.
+      // Rust param is `session_name: String`, so JS must pass `sessionName`.
+      await invoke('unregister_session', { sessionName });
       await loadSessions();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -350,7 +352,8 @@
   async function unregisterFromMenu(sessionName: string) {
     closeDropdown();
     try {
-      await invoke('unregister_session', { session_name: sessionName });
+      // Tauri v2: Rust `session_name` param ↔ JS `sessionName` invoke key.
+      await invoke('unregister_session', { sessionName });
       await loadSessions();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -402,7 +405,8 @@
     editingNickname = null;
 
     try {
-      await invoke('set_session_nickname', { session_name: sessionName, nickname });
+      // Tauri v2: Rust `session_name` param ↔ JS `sessionName` invoke key.
+      await invoke('set_session_nickname', { sessionName, nickname });
       await loadSessions();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -426,7 +430,8 @@
     editingNickname = null;
 
     try {
-      await invoke('set_session_nickname', { session_name: sessionName, nickname: '' });
+      // Tauri v2: Rust `session_name` param ↔ JS `sessionName` invoke key.
+      await invoke('set_session_nickname', { sessionName, nickname: '' });
       await loadSessions();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
