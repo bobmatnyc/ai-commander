@@ -3,18 +3,31 @@
   import SessionList from './lib/components/SessionList.svelte';
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
-  import MonitorView from './lib/components/MonitorView.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
-  import { Sun, Moon, Settings, Activity, MessageSquare } from 'lucide-svelte';
+  import { Sun, Moon, Settings } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
   import { currentSession, serverRebuilding, githubStats } from './lib/stores/app';
   import { invoke } from './lib/transport';
 
   // No auth needed — Tailscale handles network security
 
-  let currentView: 'chat' | 'monitor' = 'chat';
+  // Bug 2 fix: the Monitor tab was replaced by a collapsible
+  // ProcessMonitorPanel inside SessionList — see App.svelte for rationale.
   let showSettings = false;
-  let sidebarOpen = false;
+
+  /**
+   * Why: On mobile (≤768px) the two-panel layout collapses to a master-detail
+   * flow. We track which "pane" is visible so the user lands on the session
+   * list at startup rather than an empty chat view.
+   * What: 'list' shows the session panel full-width; 'chat' shows the chat
+   * panel full-width. On desktop both panels are always visible and this
+   * variable has no effect.
+   * Test: Load on a ≤768px viewport — assert the session list is visible and
+   * the chat panel is not. Tap a session — assert the chat panel appears and
+   * the session list is hidden. Tap "← Sessions" — assert the session list
+   * returns and currentSession is cleared.
+   */
+  let mobileView: 'list' | 'chat' = 'list';
 
   // Version check + rebuild detection via dynamic health polling
   let loadedVersion: string | null = null;
@@ -81,10 +94,24 @@
     setTheme($resolvedTheme === 'dark' ? 'light' : 'dark');
   }
 
-  // Close sidebar on mobile when session selected
+  // On mobile: navigate to chat when a session is selected, return to list
+  // when the session is cleared (e.g. disconnect or back button).
   $: if ($currentSession) {
-    sidebarOpen = false;
-    currentView = 'chat';
+    mobileView = 'chat';
+  } else {
+    mobileView = 'list';
+  }
+
+  /**
+   * Why: The back button in the mobile chat header needs to clear the current
+   * session so the session list re-appears and the user can pick a different one.
+   * What: Resets currentSession to null and switches mobileView to 'list'.
+   * Test: While in chat view on mobile, tap back — assert mobileView === 'list'
+   * and $currentSession === null.
+   */
+  function goBackToList() {
+    currentSession.set(null);
+    mobileView = 'list';
   }
 
 </script>
@@ -92,30 +119,20 @@
 <main class="app">
     <header>
       <div class="header-left">
-        <button class="hamburger-btn" on:click={() => sidebarOpen = !sidebarOpen}>
-          ☰
-        </button>
+        <!-- Mobile back button: visible only in chat view on narrow viewports -->
+        {#if mobileView === 'chat'}
+          <button
+            class="back-btn"
+            on:click={goBackToList}
+            aria-label="Back to session list"
+          >
+            &#8592; Sessions
+          </button>
+        {/if}
         <img src="/ai-commander.png" alt="AI Commander" class="header-logo" />
         <h1>AI Commander</h1>
       </div>
-      <div class="header-center">
-        <button
-          class="tab-btn"
-          class:active={currentView === 'chat'}
-          on:click={() => currentView = 'chat'}
-        >
-          <MessageSquare size={13} />
-          Chat
-        </button>
-        <button
-          class="tab-btn"
-          class:active={currentView === 'monitor'}
-          on:click={() => currentView = 'monitor'}
-        >
-          <Activity size={13} />
-          Monitor
-        </button>
-      </div>
+      <div class="header-center"></div>
       {#if $serverRebuilding}
         <div class="rebuild-banner">
           <span class="rebuild-spinner">&#x27F3;</span>
@@ -151,20 +168,13 @@
       </div>
     </header>
 
-    <div class="content" class:mobile-list={sidebarOpen}>
-      <aside class:open={sidebarOpen}>
+    <div class="content" class:mobile-show-list={mobileView === 'list'} class:mobile-show-chat={mobileView === 'chat'}>
+      <aside>
         <SessionList />
       </aside>
-      {#if sidebarOpen}
-        <div class="sidebar-backdrop" on:click={() => sidebarOpen = false} on:keydown={() => sidebarOpen = false} role="button" tabindex="-1" aria-label="Close sidebar"></div>
-      {/if}
       <section class="main-panel">
-        {#if currentView === 'chat'}
-          <ChatView />
-          <InputArea />
-        {:else if currentView === 'monitor'}
-          <MonitorView />
-        {/if}
+        <ChatView />
+        <InputArea />
       </section>
     </div>
   </main>
@@ -260,32 +270,6 @@
     display: flex;
     align-items: center;
     gap: 0.25rem;
-  }
-
-  .tab-btn {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.3rem 0.625rem;
-    border: 1px solid transparent;
-    border-radius: 0.375rem;
-    background: transparent;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 0.8rem;
-    font-weight: 500;
-    transition: all 0.15s;
-  }
-
-  .tab-btn:hover {
-    background: var(--bg-surface);
-    color: var(--text-primary);
-  }
-
-  .tab-btn.active {
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border-color: var(--border);
   }
 
   .rebuild-banner {
@@ -393,47 +377,66 @@
     min-height: 0;
   }
 
-  .hamburger-btn {
+  /* Back button: hidden on desktop, shown only on mobile when in chat view */
+  .back-btn {
     display: none;
+    align-items: center;
+    gap: 0.25rem;
     background: none;
     border: none;
-    font-size: 1.5rem;
+    font-size: 0.9rem;
+    font-weight: 600;
     cursor: pointer;
-    color: var(--text-primary);
+    color: var(--accent);
     padding: 0.25rem 0.5rem;
+    border-radius: 0.375rem;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
-  .sidebar-backdrop {
-    display: none;
+  .back-btn:hover {
+    background: var(--bg-surface);
   }
 
   @media (max-width: 768px) {
-    .hamburger-btn {
+    .back-btn {
       display: flex;
-      align-items: center;
     }
 
-    /* Phone: session list and main panel replace each other */
+    /* Master-detail: both panels fill the viewport; only one is visible at a time */
     aside {
-      display: none;
+      position: absolute;
+      inset: 0;
       width: 100%;
-      flex: 1;
-      min-height: 0;
+      z-index: 10;
       background-color: var(--bg-secondary);
+      display: flex;
+      flex-direction: column;
     }
 
-    aside.open {
+    .main-panel {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      z-index: 10;
+    }
+
+    /* Show list, hide chat */
+    .content.mobile-show-list aside {
       display: flex;
     }
 
-    /* When mobile-list is active, hide the main panel and backdrop */
-    .content.mobile-list .main-panel {
+    .content.mobile-show-list .main-panel {
       display: none;
     }
 
-    .sidebar-backdrop {
-      display: none !important;
-      z-index: 99;
+    /* Show chat, hide list */
+    .content.mobile-show-chat aside {
+      display: none;
+    }
+
+    .content.mobile-show-chat .main-panel {
+      display: flex;
     }
 
     .content {

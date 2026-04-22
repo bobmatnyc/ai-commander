@@ -295,6 +295,127 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
 /// Test: Seed two log entries under a fake HOME, invoke this command, assert
 /// `connected_sessions.contains(&name)` and the returned `history` array has
 /// two items with matching `text` values.
+/// Resolve a user-supplied session identifier to a live tmux session name.
+///
+/// Why: The UI shows a mix of raw tmux names, user-chosen nicknames (via
+/// `session-overrides.json`), project nicknames (from `~/.ai-commander/projects/*.json`)
+/// and registered-only placeholders (projects with no running tmux session).
+/// Any of those strings can land in `connect_session`, but tmux itself only
+/// understands the raw session name. Without fuzzy resolution, clicking a row
+/// whose label doesn't match the raw tmux name (e.g. the project nickname
+/// "izzie" while tmux has a different name or no session at all) fails with
+/// "session not found" even when the user's intent is obvious.
+/// What: Tries, in priority order:
+///   1. Exact match against live tmux sessions.
+///   2. Case-insensitive exact match.
+///   3. Strip bracket suffix ("foo [bar]" on either side) and retry.
+///   4. Override map: any tmux session whose override value equals `input`.
+///   5. Project JSON: if a project's `name` or sanitized name equals `input`,
+///      find a tmux session whose pane cwd matches that project's `path`.
+/// Returns `Ok(tmux_name)` on a match, or `Err(message)` with a friendly list
+/// of available sessions when nothing matched.
+/// Test: With tmux sessions ["cto [cto3]", "hyperdev"], call with "cto" (an
+/// override target) and assert it returns "cto [cto3]". Call with "izzie" (no
+/// matching tmux session, but a project JSON with that name) and assert the
+/// error message enumerates the available session names.
+fn resolve_to_tmux_session(input: &str, live_sessions: &[String]) -> Result<String, String> {
+    // 1. Exact match — fast path for the common case.
+    if live_sessions.iter().any(|s| s == input) {
+        return Ok(input.to_string());
+    }
+
+    // 2. Case-insensitive exact match.
+    let input_lower = input.to_lowercase();
+    if let Some(hit) = live_sessions
+        .iter()
+        .find(|s| s.to_lowercase() == input_lower)
+    {
+        return Ok(hit.clone());
+    }
+
+    // 3. Bracket-suffix strip on both sides. Examples the helper covers:
+    //    input "cto" matches live "cto [cto3]"
+    //    input "cto [cto3]" matches live "cto"
+    let strip_suffix = |s: &str| -> String {
+        s.split_once(" [")
+            .map(|(head, _)| head.trim().to_string())
+            .unwrap_or_else(|| s.trim().to_string())
+    };
+    let input_stripped = strip_suffix(input).to_lowercase();
+    if !input_stripped.is_empty() {
+        if let Some(hit) = live_sessions
+            .iter()
+            .find(|s| strip_suffix(s).to_lowercase() == input_stripped)
+        {
+            return Ok(hit.clone());
+        }
+    }
+
+    // 4. Override map: find any tmux session whose user-set override equals input.
+    let overrides = read_session_overrides();
+    if let Some((tmux_name, _)) = overrides
+        .iter()
+        .find(|(_, v)| v.as_str() == input || v.to_lowercase() == input_lower)
+    {
+        if live_sessions.contains(tmux_name) {
+            return Ok(tmux_name.clone());
+        }
+    }
+
+    // 5. Project JSON match: if `input` equals a project's name/sanitized name,
+    //    look for a tmux session whose pane cwd matches the project's path.
+    let projects_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/projects");
+    let mut project_path: Option<String> = None;
+    if let Ok(entries) = std::fs::read_dir(&projects_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |x| x == "json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let proj_name = val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let proj_path = val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let sanitized = proj_name.replace([' ', '.', '/', ':'], "-");
+                        if proj_name == input || sanitized == input {
+                            project_path = Some(proj_path.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(pp) = project_path.filter(|p| !p.is_empty()) {
+        for live in live_sessions {
+            let pane_path = std::process::Command::new("tmux")
+                .args(["display-message", "-p", "-t", live, "#{pane_current_path}"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if p.is_empty() { None } else { Some(p) }
+                });
+            if pane_path.as_deref() == Some(pp.as_str()) {
+                return Ok(live.clone());
+            }
+        }
+    }
+
+    // No match — return a helpful error listing what IS available so the user
+    // (or a developer tailing logs) can see why the click failed.
+    let available = if live_sessions.is_empty() {
+        "none".to_string()
+    } else {
+        live_sessions.join(", ")
+    };
+    Err(format!(
+        "session '{}' not found; available: [{}]",
+        input, available
+    ))
+}
+
 #[tauri::command]
 pub async fn connect_session(
     name: String,
@@ -304,10 +425,24 @@ pub async fn connect_session(
         "Cannot connect: tmux is not available. Make sure tmux is installed and accessible."
     )?;
 
-    if !tmux.session_exists(&name) {
+    // Fuzzy-resolve the identifier to a live tmux session. This tolerates
+    // nickname/override inputs (e.g. "cto" → "cto [cto3]") and surfaces a clear
+    // error that enumerates the available sessions when the target is absent
+    // (e.g. a registered-only project that hasn't been quickstarted yet).
+    let live_sessions: Vec<String> = tmux
+        .list_sessions()
+        .map(|v| v.into_iter().map(|s| s.name).collect())
+        .unwrap_or_default();
+    let resolved = resolve_to_tmux_session(&name, &live_sessions)?;
+
+    // After fuzzy resolution, the name we use for tmux MUST be the raw tmux
+    // session name, not the user-facing label the frontend sent in.
+    if !tmux.session_exists(&resolved) {
         return Err(format!(
-            "Session '{}' does not exist. Available sessions can be seen in the list.",
-            name
+            "session '{}' resolved to '{}' but tmux has-session failed; available: [{}]",
+            name,
+            resolved,
+            live_sessions.join(", ")
         ));
     }
 
@@ -316,18 +451,18 @@ pub async fn connect_session(
         .connected_sessions
         .write()
         .unwrap()
-        .insert(name.clone());
+        .insert(resolved.clone());
     // And mark as the currently-displayed session.
-    *state.current_session.write().unwrap() = Some(name.clone());
+    *state.current_session.write().unwrap() = Some(resolved.clone());
 
     // Refresh the tmux session title in case the nickname/project JSON changed
     // since the session was created. Cheap (two tmux option writes) and keeps
     // all attached terminal emulators in sync on reconnect.
-    let display = resolve_session_display_name(&name);
-    set_tmux_session_title(&name, &display);
+    let display = resolve_session_display_name(&resolved);
+    set_tmux_session_title(&resolved, &display);
 
     // Full log history for client-side hydration.
-    let history: Vec<serde_json::Value> = commander_core::read_all_log_entries(&name)
+    let history: Vec<serde_json::Value> = commander_core::read_all_log_entries(&resolved)
         .unwrap_or_default()
         .into_iter()
         .map(|e| {
@@ -339,7 +474,7 @@ pub async fn connect_session(
         })
         .collect();
 
-    Ok(serde_json::json!({ "session": name, "history": history }))
+    Ok(serde_json::json!({ "session": resolved, "history": history }))
 }
 
 /// Disconnect a session (stop monitoring it). If `name` is provided, that
