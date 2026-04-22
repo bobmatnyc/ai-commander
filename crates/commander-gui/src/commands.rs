@@ -1425,12 +1425,158 @@ pub struct ProcessInfo {
     pub stale: bool,
 }
 
+/// Minimum age in seconds before a process can be considered stale.
+///
+/// Why: Freshly-spawned processes (a second-old python helper) should never be
+/// killed just because we haven't yet correlated them with a tmux session.
+const STALE_MIN_AGE_SECONDS: u64 = 300; // 5 minutes
+
+/// Max tmux inactivity (seconds) before we stop treating the session as "recently active".
+///
+/// Why: Bug 1 — an active session was killed because the correlated tmux session
+/// happened to not appear in our list at the moment of the scan. Sessions with
+/// recent pane activity (a running process writing output, a user typing) must
+/// never be classified as stale, regardless of correlation. 30 minutes is a
+/// conservative threshold that covers long LLM turns and slow test runs without
+/// leaving truly-dead sessions alive forever.
+const TMUX_RECENT_ACTIVITY_SECONDS: u64 = 30 * 60;
+
+/// Process name/command substrings that are NEVER eligible to be killed.
+///
+/// Why: URGENT bug — the process monitor was killing active claude-mpm
+/// sessions when their command line did not contain the tmux session name
+/// verbatim. This allowlist is the last line of defense: AI assistant
+/// processes and commander binaries must never be swept by "Clean stale".
+/// Mirrors the list in `commander-api/src/handlers/web.rs`.
+const PROTECTED_PROCESS_PATTERNS: &[&str] = &[
+    "mpm",
+    "claude",
+    "claude-mpm",
+    "claude_mpm",
+    "ai-commander",
+    "ai_commander",
+    "commander-gui",
+    "commander-daemon",
+    "commander-api",
+    "commander-telegram",
+];
+
+/// Returns true when the process name or command matches a protected pattern.
+fn is_protected_process(command: &str) -> bool {
+    let cmd_lower = command.to_lowercase();
+    PROTECTED_PROCESS_PATTERNS
+        .iter()
+        .any(|pat| cmd_lower.contains(pat))
+}
+
+/// Query live tmux session names (empty on failure — treated as "no sessions").
+fn live_tmux_sessions() -> Vec<String> {
+    std::process::Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Check whether a tmux session had pane activity within the last
+/// `TMUX_RECENT_ACTIVITY_SECONDS`.
+///
+/// Why: Bug 1 guard — even if a session didn't correlate by name match, if its
+/// pane was active in the last 30 minutes it is almost certainly still in use
+/// (long LLM turn, test run, file watch). Refusing to classify such sessions
+/// as stale costs us one `tmux display-message` per candidate process — cheap.
+/// What: Runs `tmux display-message -t <session> -p "#{session_activity}"`
+/// (milliseconds since tmux epoch) and returns true when `(now - activity_ms)`
+/// is less than the threshold. Parse failure → treat as "recently active" to
+/// stay on the safe side.
+/// Test: Create session `foo`; immediately call with `"foo"`, assert true.
+/// Kill `foo` and call again, assert false (session missing → false).
+fn tmux_session_recently_active(session: &str) -> bool {
+    let output = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-t",
+            session,
+            "-p",
+            "#{session_activity}",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // tmux emits milliseconds since the Unix epoch.
+    let activity_ms: u64 = match raw.parse() {
+        Ok(v) => v,
+        // Any unexpected output → be conservative and keep the session alive.
+        Err(_) => return true,
+    };
+    let activity_secs = activity_ms / 1000;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now <= activity_secs {
+        // Clock skew — be conservative.
+        return true;
+    }
+    (now - activity_secs) < TMUX_RECENT_ACTIVITY_SECONDS
+}
+
+/// Correlate a process with a tmux session by command-line substring match.
+///
+/// Why: tmux-spawned commands typically include the session name somewhere in
+/// their argv (pane titles, working dirs, wrapper scripts). A substring match
+/// over the full command line is an imperfect but conservative heuristic —
+/// we'd rather over-associate (keep a process alive) than under-associate
+/// (accidentally kill an in-use process).
+fn correlate_session(command: &str, tmux_sessions: &[String]) -> Option<String> {
+    let lower = command.to_lowercase();
+    tmux_sessions
+        .iter()
+        .find(|s| lower.contains(&s.to_lowercase()))
+        .cloned()
+}
+
+/// List commander-related processes and classify each as stale or active.
+///
+/// Why: The monitor UI needs a list of candidate processes and a stale flag so
+/// the user can decide what to kill. The stale flag is the gate that controls
+/// whether `kill_stale_processes` would target a row, so the logic must be
+/// conservative.
+/// What: Scans `ps aux` output, filters to python/node/cargo processes that
+/// are not part of AI Commander itself, correlates each with a live tmux
+/// session by name, and sets `stale = true` only when ALL of:
+///   1. The correlated tmux session (if any) is NOT in `tmux list-sessions`.
+///   2. `age_seconds > STALE_MIN_AGE_SECONDS`.
+///   3. The process is NOT associated with a session in `connected_sessions`.
+/// Test: Spawn a long-running python, create a tmux session whose name appears
+/// in its command, assert the returned row has `stale == false`. Kill the
+/// tmux session, wait, assert `stale` flips to true only after the age
+/// threshold has passed.
 #[tauri::command]
-pub async fn list_processes() -> Result<Vec<ProcessInfo>, String> {
+pub async fn list_processes(state: State<'_, GuiState>) -> Result<Vec<ProcessInfo>, String> {
     let output = std::process::Command::new("ps")
         .args(["aux"])
         .output()
         .map_err(|e| e.to_string())?;
+
+    let tmux_sessions = live_tmux_sessions();
+    let connected: std::collections::HashSet<String> = state
+        .connected_sessions
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut processes = Vec::new();
@@ -1466,11 +1612,38 @@ pub async fn list_processes() -> Result<Vec<ProcessInfo>, String> {
         // age_seconds: parse elapsed time from the TIME field (field 9) — "MM:SS" or "HH:MM:SS"
         let age_seconds = parse_ps_time(fields[9]);
 
-        // session: not derived here — would require tracing parent PIDs through tmux
-        let session: Option<String> = None;
+        // Correlate with a live tmux session. If we find one, the process is
+        // NOT stale — it is owned by an active session.
+        let session = correlate_session(&command, &tmux_sessions);
 
-        // Stale: no tmux session association and CPU is essentially idle
-        let stale = session.is_none() && cpu < 0.1;
+        // Belt-and-suspenders stale check. A process is stale only when ALL of:
+        //   - its correlated tmux session (if any) is NOT alive per `tmux list-sessions`
+        //   - the correlated session is NOT in `connected_sessions` (actively monitored)
+        //   - the correlated session has NO recent pane activity (guards against a
+        //     session being temporarily absent from our list snapshot — Bug 1)
+        //   - age exceeds the min threshold so we never kill freshly-spawned helpers
+        let session_alive = session
+            .as_ref()
+            .map(|s| tmux_sessions.iter().any(|t| t == s))
+            .unwrap_or(false);
+        let is_connected_session = session
+            .as_ref()
+            .map(|s| connected.contains(s))
+            .unwrap_or(false);
+        // If correlated, check recency; otherwise we have nothing to query.
+        let recently_active = session
+            .as_ref()
+            .map(|s| tmux_session_recently_active(s))
+            .unwrap_or(false);
+        // Protected-process guard: AI assistant processes must never be
+        // classified as stale, even when correlation fails.
+        let protected = is_protected_process(&command);
+
+        let stale = !protected
+            && !session_alive
+            && !is_connected_session
+            && !recently_active
+            && age_seconds > STALE_MIN_AGE_SECONDS;
 
         let name = if command.len() > 80 {
             format!("{}...", &command[..77])
@@ -1519,13 +1692,87 @@ fn parse_ps_time(time_str: &str) -> u64 {
     }
 }
 
+/// Kill every process that `list_processes` flags as stale.
+///
+/// Why: After Bug 1 (active sessions were being killed), the single source of
+/// truth for "is this process killable?" is `list_processes`. We re-run its
+/// check here rather than duplicating heuristics. We also re-verify with a
+/// fresh `tmux has-session` call per row, which closes the race window where
+/// a session came back between list and kill.
+/// What: Enumerates stale rows from `list_processes`, double-checks that each
+/// row's correlated tmux session is still absent and that the session is not
+/// currently in `connected_sessions`, then sends SIGTERM.
+/// Test: Seed a python process whose command contains "foo-session", create
+/// tmux session "foo-session", call this, assert 0 kills. Kill the tmux
+/// session, wait past STALE_MIN_AGE_SECONDS, assert the python is killed.
+/// Tauri command: kill stale commander processes (requires `confirm: true`).
+///
+/// Why: URGENT fix — this command was killing active claude-mpm sessions.
+/// The callers now MUST pass `confirm = true` to actually kill; any other
+/// value performs a dry-run and returns 0 so the UI can preview the list.
+/// A defense-in-depth `is_protected_process` check is applied per row so
+/// even if the classifier regresses, AI assistant processes cannot be
+/// killed by this path.
+/// What: Enumerates stale rows, filters out protected processes, re-checks
+/// tmux state, and only calls `kill -TERM` when `confirm == true`.
+/// Test: Call with `confirm = false`, assert returned count is 0 and no
+/// process is killed. Spawn a process named `claude-mpm` with no tmux
+/// correlation and age > STALE_MIN_AGE_SECONDS; call with `confirm = true`;
+/// assert the process is NOT killed (protected allowlist).
 #[tauri::command]
-pub async fn kill_stale_processes() -> Result<u32, String> {
-    let processes = list_processes().await?;
-    let stale: Vec<_> = processes.iter().filter(|p| p.stale).collect();
-    let mut killed = 0u32;
+pub async fn kill_stale_processes(
+    state: State<'_, GuiState>,
+    confirm: Option<bool>,
+) -> Result<u32, String> {
+    let confirm = confirm.unwrap_or(false);
+    let processes = list_processes(state.clone()).await?;
+    let live_sessions = live_tmux_sessions();
+    let connected: std::collections::HashSet<String> = state
+        .connected_sessions
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
 
-    for proc in &stale {
+    let mut killed = 0u32;
+    let mut would_kill = 0u32;
+
+    for proc in processes.iter().filter(|p| p.stale) {
+        // Defense-in-depth allowlist: never kill protected processes even if
+        // the classifier ever regresses.
+        if is_protected_process(&proc.name) {
+            eprintln!(
+                "[GUI] Skipping kill for PID {} — name '{}' is on the protected allowlist",
+                proc.pid, proc.name
+            );
+            continue;
+        }
+
+        // Final safety gate: refuse to kill if a correlated session has come
+        // back, is actively connected, or had recent pane activity between the
+        // list and the kill. Recency protects against the Bug 1 scenario where
+        // a session transiently disappears from our list snapshot.
+        if let Some(ref s) = proc.session {
+            if live_sessions.iter().any(|t| t == s)
+                || connected.contains(s)
+                || tmux_session_recently_active(s)
+            {
+                eprintln!(
+                    "[GUI] Skipping kill for PID {} — session '{}' is alive/connected/recent",
+                    proc.pid, s
+                );
+                continue;
+            }
+        }
+
+        if !confirm {
+            would_kill += 1;
+            eprintln!(
+                "[GUI] DRY-RUN: would kill process {} (PID {})",
+                proc.name, proc.pid
+            );
+            continue;
+        }
+
         let result = std::process::Command::new("kill")
             .args(["-TERM", &proc.pid.to_string()])
             .output();
@@ -1534,6 +1781,14 @@ pub async fn kill_stale_processes() -> Result<u32, String> {
             killed += 1;
             eprintln!("[GUI] Killed stale process {} (PID {})", proc.name, proc.pid);
         }
+    }
+
+    if !confirm {
+        eprintln!(
+            "[GUI] DRY-RUN complete: {} process(es) would be killed. Pass confirm=true to kill.",
+            would_kill
+        );
+        return Ok(0);
     }
 
     Ok(killed)

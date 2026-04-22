@@ -640,14 +640,15 @@ fn is_copied_from_input(summary: &str, input: &str) -> bool {
 /// as their "summary". Stripping it BEFORE the LLM sees it is the most
 /// reliable fix.
 /// What: Drops every line that `is_llm_noise` recognises, keeps at most the
-/// trailing 50 meaningful lines, and returns `None` when fewer than 3 useful
-/// lines remain (don't bother calling the LLM).
+/// trailing 50 meaningful lines, and returns `None` only when no useful lines
+/// remain (any single non-noise line is worth summarising — e.g. a terminal
+/// showing `"Tests passed."` after the prompt glyph is filtered out).
 /// Test: Pass a screen containing `│ Sonnet 4.6 │`, `⏵⏵ bypass permissions`,
 /// `Bash(ls)` and one content line → assert result contains only the content
-/// line (or is None if under threshold).
+/// line. Pass only-noise input → assert `None`.
 fn prepare_for_llm(raw: &str) -> Option<String> {
     let filtered: Vec<&str> = raw.lines().filter(|line| !is_llm_noise(line)).collect();
-    if filtered.len() < 3 {
+    if filtered.is_empty() {
         return None;
     }
     let start = filtered.len().saturating_sub(50);
@@ -1135,7 +1136,7 @@ fn interpret_via_ollama(user_prompt: &str) -> Option<String> {
             {"role": "user", "content": user_prompt}
         ],
         "stream": false,
-        "options": { "num_predict": 120 }
+        "options": { "num_predict": 600 }
     });
 
     let response = client
@@ -1155,14 +1156,20 @@ fn interpret_via_ollama(user_prompt: &str) -> Option<String> {
     // tags. Strip that block BEFORE `is_valid_summary` sees the string, or the
     // response's length will blow past the 300-char limit and every reply gets
     // rejected regardless of its actual content.
-    let result = json["message"]["content"]
+    let content = json["message"]["content"]
         .as_str()
         .map(|s| strip_think_tags(s).to_string())
-        .filter(|s| !s.is_empty());
-    if result.is_some() {
-        info!(model = %model, "interpret_via_ollama succeeded");
+        .unwrap_or_default();
+    if content.is_empty() {
+        if let Some(reason) = json["done_reason"].as_str() {
+            warn!(
+                "Ollama returned empty content, done_reason={reason}; model may have exhausted token budget in reasoning"
+            );
+        }
+        return None;
     }
-    result
+    info!(model = %model, "interpret_via_ollama succeeded");
+    Some(content)
 }
 
 #[cfg(test)]
