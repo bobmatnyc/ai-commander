@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats } from '../stores/app';
   import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor, X } from 'lucide-svelte';
   import type { Session } from '../stores/app';
@@ -467,15 +468,29 @@
     loadSessions();
   }
 
+  // Tauri unlistener for the `session-auto-connected` backend event. Stored so
+  // we can drop the subscription on component destroy.
+  let unlistenAutoConnected: (() => void) | null = null;
+
   onMount(() => {
     loadSessions();
     interval = window.setInterval(loadSessions, 2000);
     window.addEventListener('click', handleGlobalClick);
+
+    // Backend emits `session-auto-connected` once per session during startup
+    // auto-connect. Refresh immediately rather than waiting for the 2s poll
+    // so freshly-connected rows flip to the "connected" state without delay.
+    listen('session-auto-connected', () => {
+      loadSessions();
+    })
+      .then((fn) => { unlistenAutoConnected = fn; })
+      .catch(() => { /* web mode uses the no-op shim; nothing to wire up */ });
   });
 
   onDestroy(() => {
     clearInterval(interval);
     window.removeEventListener('click', handleGlobalClick);
+    if (unlistenAutoConnected) unlistenAutoConnected();
   });
 </script>
 

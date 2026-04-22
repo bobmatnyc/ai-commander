@@ -4,7 +4,90 @@ mod commands;
 mod events;
 mod state;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+/// Auto-connect every running tmux session on startup.
+///
+/// Why: Users expect the app to "just work" on launch — requiring a manual
+/// click to connect each existing tmux session creates friction and leaves
+/// the ChatView silent for sessions that are actively producing output. By
+/// enumerating `tmux ls` at startup and replicating the core side effect of
+/// `connect_session` (insert into `connected_sessions`), the polling loop
+/// (`events::start_session_polling`) immediately begins emitting
+/// `session-output` / `chat-event` events for each one.
+/// What: Iterates all live tmux sessions, inserts each name into
+/// `state.connected_sessions`, and emits a `session-auto-connected` event per
+/// session so the frontend can refresh its session list view. Silently
+/// no-ops when tmux is unavailable or no sessions exist.
+/// Test: Start tmux with two sessions, launch the app, assert both names
+/// appear in `connected_sessions` and two `session-auto-connected` events
+/// are emitted to the frontend.
+async fn auto_connect_running_sessions(app: tauri::AppHandle, state: state::GuiState) {
+    // Brief delay so the Tauri window is fully initialised and ready to
+    // receive events before we fan out notifications. Without this, very
+    // fast startup paths can race the frontend's `listen()` registration.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let Some(tmux) = state.tmux.as_ref() else {
+        // No tmux orchestrator — feature unavailable, silent no-op.
+        return;
+    };
+
+    let sessions = match tmux.list_sessions() {
+        Ok(s) => s,
+        Err(_) => {
+            // tmux server not running or command failed — nothing to connect.
+            return;
+        }
+    };
+
+    if sessions.is_empty() {
+        return;
+    }
+
+    // Snapshot existing connections so we only auto-connect sessions the user
+    // hasn't already manually touched (e.g. a previous disconnect during this
+    // run — unlikely at startup but defensive).
+    let already_connected: std::collections::HashSet<String> = state
+        .connected_sessions
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
+    let mut newly_connected: Vec<String> = Vec::new();
+    {
+        let mut connected = match state.connected_sessions.write() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        for s in &sessions {
+            if already_connected.contains(&s.name) {
+                continue;
+            }
+            connected.insert(s.name.clone());
+            newly_connected.push(s.name.clone());
+        }
+    }
+
+    if newly_connected.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "[GUI] auto-connected {} running tmux session(s): {:?}",
+        newly_connected.len(),
+        newly_connected
+    );
+
+    // Emit a per-session event so the frontend can update its UI state
+    // (mark each row as connected, prompt a session-list refresh, etc.).
+    for name in &newly_connected {
+        let _ = app.emit(
+            "session-auto-connected",
+            serde_json::json!({ "session": name }),
+        );
+    }
+}
 
 fn main() {
     tauri::Builder::default()
@@ -89,6 +172,16 @@ fn main() {
             if let Ok(mut handle) = state.daemon_handle.write() {
                 *handle = Some(daemon_handle);
             }
+
+            // Auto-connect every running tmux session in the background so
+            // the app is immediately useful on launch without requiring each
+            // session to be clicked. Runs non-blocking; the window opens now
+            // and connections fan out ~500ms later.
+            let auto_connect_handle = app.handle().clone();
+            let auto_connect_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                auto_connect_running_sessions(auto_connect_handle, auto_connect_state).await;
+            });
 
             app.manage(state);
 

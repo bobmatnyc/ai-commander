@@ -9,11 +9,15 @@ BLUE        := \033[0;34m
 YELLOW      := \033[1;33m
 NC          := \033[0m
 
-.PHONY: build start restart stop status logs connect pair help
+.PHONY: build rebuild start restart stop status logs connect pair help
 
 ## build: compile release binaries and install to ~/.ai-commander/bin/
 build:
 	@./scripts/services.sh install
+
+## rebuild: full Tauri desktop rebuild + relaunch (synchronous — blocks until done)
+rebuild:
+	@./scripts/rebuild-and-relaunch.sh --sync
 
 ## start: start daemon + telegram bot (no-op if already running)
 start:
