@@ -238,7 +238,8 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
             let matched_project = projects.iter().find(|p| {
                 p.name.replace([' ', '.', '/', ':'], "-") == s.name
                     || p.path == s.name
-                    || path.as_deref() == Some(p.path.as_str())
+                    || path.as_deref().map(|x| x.to_lowercase())
+                        == Some(p.path.to_lowercase())
             });
             if let Some(p) = matched_project {
                 matched_project_names.insert(p.name.clone());
@@ -539,7 +540,9 @@ fn resolve_to_tmux_session(input: &str, live_sessions: &[String]) -> Result<Stri
                     let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
                     if p.is_empty() { None } else { Some(p) }
                 });
-            if pane_path.as_deref() == Some(pp.as_str()) {
+            if pane_path.as_deref().map(|x| x.to_lowercase())
+                == Some(pp.to_lowercase())
+            {
                 return Ok(live.clone());
             }
         }
@@ -583,7 +586,17 @@ pub async fn connect_session(
         .list_sessions()
         .map(|v| v.into_iter().map(|s| s.name).collect())
         .unwrap_or_default();
-    let resolved = resolve_to_tmux_session(&name, &live_sessions)?;
+    // resolve_to_tmux_session may call try_auto_create_registered_session which
+    // contains std::thread::sleep. Move it off the async runtime thread to avoid
+    // blocking the tokio executor.
+    let name_clone = name.clone();
+    let sessions_clone = live_sessions.clone();
+    let resolved = tokio::task::spawn_blocking(move || {
+        resolve_to_tmux_session(&name_clone, &sessions_clone)
+    })
+    .await
+    .map_err(|e| format!("resolve task panicked: {e}"))?
+    .map_err(|e| e)?;
 
     // After fuzzy resolution, the name we use for tmux MUST be the raw tmux
     // session name, not the user-facing label the frontend sent in.
