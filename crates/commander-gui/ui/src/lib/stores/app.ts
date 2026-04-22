@@ -198,6 +198,30 @@ export const activeSessions = writable<Set<string>>(new Set());
 
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+// Why: The session list needs a subtle pulse on any row that just received
+// data — not just the currently-selected session. We record the timestamp of
+// the most recent `session-output` / SSE event per session name; a ticker
+// in SessionList re-evaluates "recent" every 200 ms.
+// What: Reactive map of `sessionName -> lastActivityAt (ms since epoch)`.
+// Test: Call `markSessionDataReceived('foo')`, assert `$lastActivityAt.get('foo')`
+// is within the last 100 ms.
+export const lastActivityAt = writable<Map<string, number>>(new Map());
+
+/**
+ * Why: Funnels both Tauri `session-output` events and REST SSE events through a
+ * single helper so the pulse-dot logic has one source of truth.
+ * What: Sets lastActivityAt for the given session to the current timestamp.
+ * Test: Call this with 'foo', read $lastActivityAt.get('foo') — should be close
+ * to Date.now() and `isRecentlyActive('foo')` should return true for 3s.
+ */
+export function markSessionDataReceived(sessionName: string) {
+  lastActivityAt.update(map => {
+    const next = new Map(map);
+    next.set(sessionName, Date.now());
+    return next;
+  });
+}
+
 // Current view for navigation (e.g. 'sessions', 'chat', 'dashboard')
 export const currentView = writable<string>('sessions');
 

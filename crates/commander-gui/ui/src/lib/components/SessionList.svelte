@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats } from '../stores/app';
+  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats, lastActivityAt, markSessionDataReceived } from '../stores/app';
+  import { subscribeSessionEvents, isDesktop, type SessionEventData } from '../transport';
   import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor, X } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
@@ -168,11 +169,14 @@
       if (session) {
         currentSession.set({ ...session, is_connected: true });
 
-        addMessageToSession(name, {
-          direction: 'system',
-          content: `Connected to session: ${getDisplayName(session, $sessions)}`,
-          timestamp: new Date(),
-        });
+        // Why: Connection state is now signaled visually (green pulse dot on
+        // the row + green tinge in the ChatView header + live activity
+        // counter). A "Connected to session" chat bubble was noisy and
+        // redundant once those signals landed.
+        // What: Just set currentSession and continue to history hydration —
+        // no system message injection.
+        // Test: Click Connect on a session, assert no "Connected to session"
+        // message is added to $sessionMessages for that session.
 
         // Hydrate cached history returned by the backend (when any).
         // Skip the hydration if the session already has in-memory messages,
@@ -475,11 +479,82 @@
   // Tauri unlistener for the `session-auto-connected` backend event. Stored so
   // we can drop the subscription on component destroy.
   let unlistenAutoConnected: (() => void) | null = null;
+  // Tauri unlistener for `session-output` — fires whenever any session emits
+  // new content, used to pulse the green dot on the matching row.
+  let unlistenSessionOutput: (() => void) | null = null;
+
+  // Web mode: one SSE subscription per *connected* session so the dot pulses
+  // for rows other than the currently-selected one. Keyed by session name so
+  // we can tear down stale subscriptions when sessions disconnect.
+  const sseSubscriptions = new Map<string, () => void>();
+
+  // Ticker that forces a reactive re-evaluation of "recently active" state
+  // every 200 ms. Why: Svelte reactivity only re-runs when a depended-upon
+  // store changes; without this ticker, a row would pulse indefinitely or
+  // never stop because the decay is purely time-based.
+  let nowTick = Date.now();
+  let nowInterval: number | null = null;
+
+  /**
+   * Why: Defines "recently active" so the pulse animation runs for a bounded
+   * window after the last event. 3 s matches the activity decay used in
+   * ChatView and feels snappy without flickering on rapid-fire events.
+   * What: Returns true when the session's last activity timestamp is within
+   * the last 3 s relative to the current `nowTick`.
+   * Test: Call markSessionDataReceived('foo'), assert isRecentlyActive('foo')
+   * is true; advance nowTick 4s into the future, assert it becomes false.
+   */
+  function isRecentlyActive(name: string): boolean {
+    const ts = $lastActivityAt.get(name);
+    return !!ts && (nowTick - ts) < 3000;
+  }
+
+  /**
+   * Why: Keep SSE subscriptions in sync with the session list. When a new
+   * session becomes "connected", we subscribe so its row can pulse. When it
+   * disconnects, we tear down the subscription to avoid leaking EventSources.
+   * What: Diffs the current set of connected session names against the
+   * existing subscriptions and adds/removes as needed.
+   * Test: Start with 0 connected sessions, reload with 2 connected — assert
+   * sseSubscriptions.size === 2. Disconnect one — assert it drops to 1.
+   */
+  function syncSseSubscriptions(connectedNames: string[]) {
+    if (isDesktop()) return; // Tauri events handle this
+    const wanted = new Set(connectedNames);
+    // Tear down subscriptions for sessions that are no longer connected
+    for (const [name, cleanup] of sseSubscriptions) {
+      if (!wanted.has(name)) {
+        cleanup();
+        sseSubscriptions.delete(name);
+      }
+    }
+    // Add subscriptions for newly-connected sessions
+    for (const name of wanted) {
+      if (sseSubscriptions.has(name)) continue;
+      const cleanup = subscribeSessionEvents(name, (data: SessionEventData) => {
+        markSessionDataReceived(data.session_name || name);
+      });
+      sseSubscriptions.set(name, cleanup);
+    }
+  }
+
+  // Reactive: whenever the session list updates, reconcile SSE subscriptions
+  // against the set of connected sessions so the pulse dot tracks every
+  // connected row, not just the selected one.
+  $: syncSseSubscriptions(
+    $sessions
+      .filter(s => stateOf(s) === 'connected')
+      .map(s => s.name)
+  );
 
   onMount(() => {
     loadSessions();
     interval = window.setInterval(loadSessions, 2000);
     window.addEventListener('click', handleGlobalClick);
+
+    // Re-evaluate "recently active" every 200ms. Keeps the pulse animation
+    // starting/stopping cleanly without needing per-session timers.
+    nowInterval = window.setInterval(() => { nowTick = Date.now(); }, 200);
 
     // Backend emits `session-auto-connected` once per session during startup
     // auto-connect. Refresh immediately rather than waiting for the 2s poll
@@ -489,12 +564,28 @@
     })
       .then((fn) => { unlistenAutoConnected = fn; })
       .catch(() => { /* web mode uses the no-op shim; nothing to wire up */ });
+
+    // Tauri mode: `session-output` fires for the currently-polled session.
+    // We mark the session as recently active so its row pulses regardless
+    // of whether it's the currently-selected one in the chat view.
+    listen('session-output', (event: any) => {
+      const payload = event?.payload || {};
+      const name = payload.session_name || payload.session || payload.name || $currentSession?.name;
+      if (name) markSessionDataReceived(name);
+    })
+      .then((fn) => { unlistenSessionOutput = fn; })
+      .catch(() => { /* web mode — no-op */ });
   });
 
   onDestroy(() => {
     clearInterval(interval);
+    if (nowInterval) clearInterval(nowInterval);
     window.removeEventListener('click', handleGlobalClick);
     if (unlistenAutoConnected) unlistenAutoConnected();
+    if (unlistenSessionOutput) unlistenSessionOutput();
+    // Tear down all SSE subscriptions
+    for (const cleanup of sseSubscriptions.values()) cleanup();
+    sseSubscriptions.clear();
   });
 </script>
 
@@ -543,6 +634,12 @@
             >✕</button>
           </form>
         {:else}
+          <!--
+            `active` reflects whether a `session-output` / SSE event hit this
+            session in the last 3s. `nowTick` forces Svelte re-evaluation
+            every 200ms so the class decays cleanly without per-session timers.
+          -->
+          {@const active = s === 'connected' && nowTick > 0 && isRecentlyActive(session.name)}
           <!-- Normal session row -->
           <button
             class="session-main"
@@ -551,14 +648,19 @@
           >
             <div class="session-info">
               <div class="name-row">
+                <!--
+                  Pulse dot — solid circle that reflects session state and
+                  flashes when data arrives.
+                -->
                 <span
                   class="state-dot"
                   class:dot-connected={s === 'connected'}
                   class:dot-disconnected={s === 'disconnected'}
                   class:dot-registered={s === 'registered'}
-                  title={s}
-                  aria-label={s}
-                >{s === 'connected' ? '●' : s === 'disconnected' ? '○' : '·'}</span>
+                  class:dot-active={active}
+                  title={s === 'connected' && active ? 'receiving data' : s}
+                  aria-label={s === 'connected' && active ? 'receiving data' : s}
+                ></span>
                 <span class="session-name" title={session.name}>{getDisplayName(session, $sessions)}</span>
               </div>
               {#if session.path}
@@ -829,17 +931,64 @@
     min-width: 0;
   }
 
+  /*
+   * 8px circular pulse dot — gray when disconnected/registered, solid green
+   * when connected-idle, and animated (expanding ring) when data is flowing
+   * within the last 3 s. Implemented with a background-color on the element
+   * and an ::after pseudo for the expanding ring so we don't need to add a
+   * separate DOM node per row.
+   */
   .state-dot {
-    font-size: 0.75rem;
-    line-height: 1;
+    position: relative;
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
     flex-shrink: 0;
-    width: 10px;
-    text-align: center;
+    background-color: var(--text-secondary, #999);
+    transition: background-color 0.2s, box-shadow 0.2s;
   }
 
-  .dot-connected { color: #22c55e; }
-  .dot-disconnected { color: var(--text-secondary, #999); opacity: 0.6; }
-  .dot-registered { color: var(--text-secondary, #999); opacity: 0.4; }
+  .dot-connected {
+    background-color: #22c55e;
+  }
+
+  .dot-disconnected {
+    background-color: var(--text-secondary, #999);
+    opacity: 0.55;
+  }
+
+  .dot-registered {
+    background-color: var(--text-secondary, #999);
+    opacity: 0.35;
+  }
+
+  /* Active pulse — brighter core + expanding ring */
+  .dot-active {
+    background-color: #4ade80;
+    box-shadow: 0 0 6px rgba(74, 222, 128, 0.7);
+  }
+
+  .dot-active::after {
+    content: '';
+    position: absolute;
+    inset: -2px;
+    border-radius: 50%;
+    border: 2px solid rgba(74, 222, 128, 0.7);
+    animation: dot-ring 1.2s ease-out infinite;
+    pointer-events: none;
+  }
+
+  @keyframes dot-ring {
+    0% {
+      transform: scale(0.8);
+      opacity: 0.9;
+    }
+    100% {
+      transform: scale(2.2);
+      opacity: 0;
+    }
+  }
 
   .session-main {
     display: flex;

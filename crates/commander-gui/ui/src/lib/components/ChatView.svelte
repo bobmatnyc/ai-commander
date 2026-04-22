@@ -29,6 +29,17 @@
   let activityTimer: number;
   let lineCount = 0;
 
+  // Why: Surface a subtle, always-visible metric of incoming data volume in
+  // place of the old "Connected to session" chat bubble. Gives the user a
+  // diagnostic signal that data is flowing without cluttering the message
+  // stream. Resets on session switch / disconnect.
+  // What: Running totals of characters and newline-delimited lines observed
+  // since connecting to the current session.
+  // Test: Send an SSE event with content "abc\ndef", assert charsReceived
+  // becomes 7 and linesReceived becomes 2.
+  let charsReceived = 0;
+  let linesReceived = 0;
+
   // True when the polling loop has reported that both LLM backends (Ollama
   // and OpenRouter) have failed multiple times in a row. Surfaces a banner
   // so the user can take action instead of seeing silent no-ops.
@@ -320,6 +331,14 @@
     if (!$currentSession || $currentSession.name !== data.session_name) return;
     markSessionActive(data.session_name);
 
+    // Increment the activity counter shown in the summary status bar so the
+    // user gets a live diagnostic signal of incoming data volume.
+    const rawChunk = data.content || '';
+    if (rawChunk) {
+      charsReceived += rawChunk.length;
+      linesReceived += rawChunk.split('\n').length;
+    }
+
     // Activity indicator
     isActive = true;
     clearTimeout(activityTimer);
@@ -544,6 +563,10 @@
 
       // Track activity indicator only (no content added in summary mode)
       lineCount += raw.split('\n').length;
+      // Increment the diagnostic chars/lines counter that replaces the old
+      // "Connected to session" message. Applies to both summary and raw mode.
+      charsReceived += raw.length;
+      linesReceived += raw.split('\n').length;
       isActive = true;
       clearTimeout(activityTimer);
       activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
@@ -676,6 +699,10 @@
     connecting = true;
     waitingForResponse = false;
     lineCount = 0;
+    // Reset the diagnostic chars/lines counter so it only reflects data
+    // received during the current connection.
+    charsReceived = 0;
+    linesReceived = 0;
     isActive = false;
     streamingMessageId = null;
     llmUnavailable = false;
@@ -689,20 +716,19 @@
     if (existing.length > 0) {
       connecting = false;
     } else {
-      // In summary mode, replay persisted log history BEFORE the connect
-      // marker so the user sees "history …" lines then "Connected to …".
+      // In summary mode, replay persisted log history on open so users see
+      // prior summaries without waiting for new activity.
       if (viewMode === 'summary') {
         loadLogHistory(sessionName);
       }
-      // Emit a one-time connect marker when opening a fresh session
-      const marker = `Connected to session: ${sessionName}`;
-      if (!isDuplicateSystemMessage(sessionName, marker)) {
-        addMessageToSession(sessionName, {
-          direction: 'system',
-          content: marker,
-          timestamp: new Date(),
-        });
-      }
+      // Why: Previously we injected a "Connected to session: X" system
+      // message here. That bubble has been replaced by purely visual signals
+      // — the green pulse dot on the session row (SessionList.svelte) and a
+      // green tinge on the chat header (below) — so the chat stream stays
+      // clean of redundant lifecycle chatter.
+      // Test: Open a fresh session, assert $sessionMessages.get(name) does
+      // NOT contain a "Connected to session" system entry.
+
       // Let the 2s onMount timer clear `connecting`
       setTimeout(() => { connecting = false; }, 500);
     }
@@ -710,6 +736,8 @@
     connecting = false;
     waitingForResponse = false;
     streamingMessageId = null;
+    charsReceived = 0;
+    linesReceived = 0;
     stopSseSubscription();
   }
 
@@ -724,7 +752,12 @@
       <p>Select a session to start chatting</p>
     </div>
   {:else}
-    <div class="session-actions">
+    <!--
+      `connected` class adds a subtle green tinge to the header bar as a
+      persistent (non-noisy) signal that the chat is wired up to a live
+      session. Replaces the old "Connected to session" chat bubble.
+    -->
+    <div class="session-actions" class:connected={$currentSession?.is_connected}>
       <button
         class="tab"
         on:click={handleStatus}
@@ -793,6 +826,20 @@
         <span class="status-badge waiting">
           <span class="spinner"></span>
           Waiting for response…
+        </span>
+      {/if}
+
+      <!--
+        Activity counter — small, muted, monospace diagnostic metric showing
+        volume of data received from the backend since connect. Replaces the
+        old "Connected to session" chat bubble with a continuously-updated
+        signal. Hidden when disconnected.
+        Test: Connect to a session, assert this span renders; disconnect,
+        assert it disappears.
+      -->
+      {#if $currentSession?.is_connected}
+        <span class="activity-counter" title="Bytes / lines received since connect">
+          ↓ {charsReceived.toLocaleString()} chars · {linesReceived.toLocaleString()} lines
         </span>
       {/if}
     </div>
@@ -890,6 +937,35 @@
     flex-wrap: wrap;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+    /* Transition both tint and border so connect/disconnect is a smooth fade */
+    border-left: 4px solid transparent;
+    transition: background-color 0.3s ease, border-left-color 0.3s ease;
+  }
+
+  /*
+   * Connected-state visual: subtle green left-border + background tint.
+   * Intentionally low-contrast — meant to be peripherally noticed, never
+   * distracting. Replaces the old "Connected to session" system message.
+   */
+  .session-actions.connected {
+    background-color: rgba(34, 197, 94, 0.08);
+    border-left-color: #22c55e;
+  }
+
+  /*
+   * Diagnostic activity counter — small, muted, monospace. Sits in the chat
+   * toolbar alongside status badges. Visually distinct from chat content so
+   * the user reads it as a metric, not a message.
+   */
+  .activity-counter {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    opacity: 0.75;
+    padding: 0.2rem 0.5rem;
+    white-space: nowrap;
+    letter-spacing: 0.01em;
+    user-select: none;
   }
 
   .tab {
