@@ -308,10 +308,11 @@
   // (shimmed by vite.web.config.ts → tauri-event-shim.ts), so we bridge the
   // REST SSE endpoint `/api/sessions/:name/events` into the same UI updates.
   //
-  // The backend currently emits `event_type: 'interpretation'` events with
-  // LLM-generated summaries of tmux screen changes. We render these as
-  // received Claude messages in summary mode, or trigger a raw refresh
-  // in raw mode, mirroring the Tauri `session-output` path.
+  // The backend emits `event_type: 'interpretation'` (primary poller) and
+  // `event_type: 'update'` (shell-adapter path) events with LLM-generated
+  // summaries of tmux screen changes. We render both as received Claude
+  // messages in summary mode, or trigger a raw refresh in raw mode,
+  // mirroring the Tauri `session-output` path.
   function handleSseEvent(data: SessionEventData) {
     connecting = false;
     markActivity();
@@ -336,7 +337,18 @@
     const content = (data.content || '').trim();
     if (!content) return;
 
-    if (data.event_type === 'interpretation') {
+    // Why: The REST API emits both `interpretation` (from the primary poller
+    // in handlers/web.rs:2014) and `update` (from the shell-adapter path at
+    // handlers/web.rs:1903) as semantically identical LLM-summary events.
+    // Accepting only `'interpretation'` here silently drops summaries for
+    // shell-adapter sessions, leaving the Summary view blank while raw
+    // output continues to accumulate — which was contributing to the
+    // "summary never shows anything useful" symptom in web mode.
+    // What: Treats both event_type values as a render-this-summary signal.
+    // Unknown event_types are still ignored.
+    // Test: Send an SSE event with event_type="update" and content="Hello",
+    // assert a received message containing "Hello" appears in $messages.
+    if (data.event_type === 'interpretation' || data.event_type === 'update') {
       if (data.is_update && streamingMessageId) {
         // Replace the in-progress message with the newer interpretation
         updateMessageContent(data.session_name, streamingMessageId, content);
@@ -825,8 +837,30 @@
             </div>
           {/if}
         {:else}
+          <!--
+            Why: Summary mode intentionally renders only LLM-interpreted
+            messages, never raw terminal output. On initial connect the
+            summary buffer is empty while the first LLM call is throttled
+            (see events.rs: `LLM_THROTTLE_STARTUP_MS`). Without this
+            placeholder the pane looks dead and users toggle to Raw to
+            "see what's happening", which is the symptom that was being
+            reported as "raw text bleeding into Summary view".
+            What: Shows a subtle waiting indicator tied to `lineCount` —
+            once activity has been observed from the polling loop we know
+            a summary is imminent rather than the session being empty.
+            Test: Open a fresh session, assert the pane shows
+            "Waiting for summary…" while `lineCount > 0` and no messages
+            are in the store yet.
+          -->
           <div class="terminal-empty">
-            <span>No messages yet — send a message to start the conversation…</span>
+            {#if lineCount > 0}
+              <span class="waiting-summary">
+                <span class="spinner"></span>
+                Waiting for summary…
+              </span>
+            {:else}
+              <span>No messages yet — send a message to start the conversation…</span>
+            {/if}
           </div>
         {/each}
       </div>
@@ -1073,6 +1107,16 @@
     color: var(--text-secondary);
     font-style: italic;
     padding: 0.5rem 0;
+  }
+
+  .waiting-summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-style: normal;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    opacity: 0.8;
   }
 
   .empty-state {

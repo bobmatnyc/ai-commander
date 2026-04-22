@@ -427,21 +427,25 @@ fn poll_once(
                     }
                 };
                 if should_emit {
+                    // Why: Users reported the explicit "switch to Raw view"
+                    // error we previously emitted here as "raw text bleeding
+                    // into Summary view" — the phrase `terminal output` in
+                    // the message body looked indistinguishable from actual
+                    // raw content in the rendered chat. Emit only the
+                    // structured `llm_unavailable` flag; the frontend banner
+                    // (llm-banner) is the canonical surface for this state
+                    // and already gives the user a clear remediation path.
+                    // What: Single lightweight event carrying no textual
+                    // content. The ChatView banner uses it to flip
+                    // `llmUnavailable = true` without polluting the
+                    // message stream.
+                    // Test: Trigger two consecutive LLM failures; assert
+                    // the chat message store is unchanged and the banner
+                    // appears.
                     let _ = app_for_task.emit(
                         "chat-event",
                         serde_json::json!({
                             "type": "llm_unavailable",
-                            "session": session_for_task,
-                        }),
-                    );
-                    // Surface a concrete error message in the chat stream
-                    // so users see WHY summaries stopped updating, rather
-                    // than having to guess from the banner alone.
-                    let _ = app_for_task.emit(
-                        "chat-event",
-                        serde_json::json!({
-                            "type": "error",
-                            "content": "LLM unavailable — summaries paused. Switch to Raw view to see terminal output.",
                             "session": session_for_task,
                         }),
                     );
