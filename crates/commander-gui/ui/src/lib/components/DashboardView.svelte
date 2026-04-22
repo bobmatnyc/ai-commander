@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { sessions, currentSession, currentView, sessionMessages, addMessageToSession, hydrateSessionMessages, hiddenSessions, hideSession, unhideAll } from '../stores/app';
+  import { sessions, currentSession, currentView, hydrateSessionMessages, hiddenSessions, hideSession, unhideAll } from '../stores/app';
   import { Terminal, MessageSquare, Plus, Zap, EyeOff } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
@@ -63,16 +63,8 @@
 
       currentSession.set({ ...session, is_connected: true });
 
-      // Add initial message only if no history exists
-      const existingMessages = $sessionMessages.get(session.name);
-      if (!existingMessages || existingMessages.length === 0) {
-        addMessageToSession(session.name, {
-          direction: 'system',
-          content: `Connected to session: ${getDisplayName(session.name)}`,
-          timestamp: new Date(),
-        });
-      }
-
+      // Connection state is communicated via UI affordances (green pulse dot on
+      // session rows, green tinge on the chat header). No system message needed.
       currentView.set('chat');
     } catch (err) {
       console.error('Failed to connect:', err);

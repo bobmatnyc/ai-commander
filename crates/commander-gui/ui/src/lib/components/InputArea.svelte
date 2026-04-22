@@ -14,6 +14,7 @@
 
   $: isDisabled = !$currentSession || isSending;
   $: canSend = !isDisabled && !$serverRebuilding;
+  $: isConnected = !!$currentSession?.is_connected;
   $: isSlashCommand = input.trim().startsWith('/') && !input.trim().startsWith('/aic:send ');
 
   async function handleSlashCommand(command: string) {
@@ -170,7 +171,7 @@
   }
 </script>
 
-<div class="input-area">
+<div class="input-area" class:connected={isConnected}>
   <input
     type="text"
     bind:value={input}
@@ -223,6 +224,24 @@
       padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));
       z-index: 100;
     }
+  }
+
+  /*
+   * Connected state: subtle animated green ring around the entire input
+   * container — same green (#22c55e) as the session list pulse dot.
+   * The ring pulses between a tight 2 px glow and a slightly looser fade so
+   * it's peripherally noticeable without being distracting.
+   * Transitions in/out smoothly via box-shadow animation.
+   * Test: Connect to a session, assert the input-area has box-shadow with
+   * rgba(34,197,94,…); disconnect, assert it returns to `none`.
+   */
+  .input-area.connected {
+    animation: input-ring-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes input-ring-pulse {
+    0%, 100% { box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.35); }
+    50%       { box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.12); }
   }
 
   .input-field {

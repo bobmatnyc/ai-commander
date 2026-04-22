@@ -5,8 +5,6 @@
     sessions,
     currentSession,
     currentView,
-    sessionMessages,
-    addMessageToSession,
     hydrateSessionMessages,
     botRunning,
   } from '../stores/app';
@@ -37,14 +35,8 @@
       await invoke('connect_session', { name: session.name });
       hydrateSessionMessages(session.name);
       currentSession.set({ ...session, is_connected: true });
-      const existingMessages = $sessionMessages.get(session.name);
-      if (!existingMessages || existingMessages.length === 0) {
-        addMessageToSession(session.name, {
-          direction: 'system',
-          content: `Connected to session: ${getDisplayName(session.name)}`,
-          timestamp: new Date(),
-        });
-      }
+      // Connection state is communicated via UI affordances (green pulse dot on
+      // session rows, green tinge on the chat header). No system message needed.
       currentView.set('chat');
     } catch (err) {
       console.error('Connect failed:', err);
