@@ -9,6 +9,75 @@
   import CreateSessionModal from './CreateSessionModal.svelte';
   import ProcessMonitorPanel from './ProcessMonitorPanel.svelte';
 
+  // Sort mode: 'alpha' (A→Z by display name) or 'recent' (last active first,
+  // connected-first fallback, then alpha). Persisted in localStorage so the
+  // preference survives reload.
+  type SortMode = 'alpha' | 'recent';
+
+  function loadSortMode(): SortMode {
+    try {
+      const stored = localStorage.getItem('aic-session-sort');
+      if (stored === 'alpha' || stored === 'recent') return stored;
+    } catch {}
+    return 'recent';
+  }
+
+  let sessionSort: SortMode = loadSortMode();
+
+  /**
+   * Why: Toggles between alpha and recent sort and persists the choice.
+   * What: Flips sessionSort and writes to localStorage.
+   * Test: Click sort toggle; assert sessionSort changes between 'alpha'/'recent'
+   *       and localStorage.getItem('aic-session-sort') matches.
+   */
+  function toggleSort() {
+    sessionSort = sessionSort === 'alpha' ? 'recent' : 'alpha';
+    try {
+      localStorage.setItem('aic-session-sort', sessionSort);
+    } catch {}
+  }
+
+  /**
+   * Why: Provides a deterministic sort of the session list for display.
+   * What: For 'alpha' mode sorts A→Z by display name. For 'recent' mode sorts
+   *       connected sessions first (by lastActivityAt desc, then alpha), then
+   *       disconnected (same), then registered (alpha).
+   * Test: Given sessions [C-disconnected, A-connected, B-registered], 'alpha'
+   *       mode should return [A, B, C]; 'recent' mode with A having recent
+   *       activity should return [A-connected, C-disconnected, B-registered].
+   */
+  function sortSessions(list: Session[], mode: SortMode, activityMap: Map<string, number>): Session[] {
+    const copy = [...list];
+    if (mode === 'alpha') {
+      copy.sort((a, b) => {
+        const nameA = (a.nickname ?? a.name).toLowerCase();
+        const nameB = (b.nickname ?? b.name).toLowerCase();
+        return nameA.localeCompare(nameB);
+      });
+    } else {
+      // Recent: connected first, then disconnected, then registered.
+      // Within each group, most recently active first; ties broken by alpha.
+      const stateOrder = { connected: 0, disconnected: 1, registered: 2 } as const;
+      const getState = (s: Session): 'connected' | 'disconnected' | 'registered' =>
+        (s.session_state as any) || (s.is_connected ? 'connected' : 'disconnected');
+      copy.sort((a, b) => {
+        const sa = getState(a);
+        const sb = getState(b);
+        if (sa !== sb) return stateOrder[sa] - stateOrder[sb];
+        const ta = activityMap.get(a.name) ?? 0;
+        const tb = activityMap.get(b.name) ?? 0;
+        if (ta !== tb) return tb - ta; // more recent first
+        return (a.nickname ?? a.name).localeCompare(b.nickname ?? b.name);
+      });
+    }
+    return copy;
+  }
+
+  // Derived sorted session list — re-evaluated whenever sessions, sort mode, or
+  // activity map changes. sessionSort is a local variable so we reference it
+  // inside a reactive block to ensure Svelte tracks it.
+  $: sortedSessions = sortSessions($sessions, sessionSort, $lastActivityAt);
+
   let interval: number;
   let showCreateModal = false;
   let lastError: string | null = null;
@@ -592,10 +661,20 @@
 <div class="session-list">
   <div class="session-list-header">
     <h2 class="header-title">Sessions</h2>
-    <button class="create-btn" on:click={() => showCreateModal = true} title="Create new session">
-      <Plus size={16} />
-      <span>New</span>
-    </button>
+    <div class="header-actions">
+      <button
+        class="sort-btn"
+        on:click={toggleSort}
+        title={sessionSort === 'alpha' ? 'Sorted A→Z — click for recent first' : 'Sorted by recent — click for A→Z'}
+        aria-label="Toggle sort order"
+      >
+        {sessionSort === 'alpha' ? 'A↓' : '↓t'}
+      </button>
+      <button class="create-btn" on:click={() => showCreateModal = true} title="Create new session">
+        <Plus size={16} />
+        <span>New</span>
+      </button>
+    </div>
   </div>
 
   {#if lastError}
@@ -605,7 +684,7 @@
   {/if}
 
   <div class="session-items">
-    {#each $sessions as session}
+    {#each sortedSessions as session}
       {@const s = stateOf(session)}
       <div
         class="session-item"
@@ -870,6 +949,37 @@
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+  }
+
+  /* Sort toggle — small, muted; matches the aesthetic of the action-btn row. */
+  .sort-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 28px;
+    min-width: 28px;
+    padding: 0 6px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.02em;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .sort-btn:hover {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
   }
 
   .create-btn {
