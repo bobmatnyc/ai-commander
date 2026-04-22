@@ -314,6 +314,26 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
 /// Test: Seed a project JSON with name "dci" and path "/tmp/dci"; call with
 /// "dci"; assert a tmux session named "dci" exists afterwards and the helper
 /// returned `Some("dci")`. Call again with "nonexistent"; assert `None`.
+/// Map an adapter_type string from a project JSON to its startup command.
+///
+/// Why: When auto-creating a tmux session for a registered project we want to
+/// immediately launch the project's AI tool so the user lands in a live REPL
+/// rather than a bare shell.
+/// What: Returns the CLI binary name for known adapter types; returns None for
+/// Shell (no command needed) and for unknown/missing types (fail-safe: let the
+/// user decide what to run rather than launching the wrong tool).
+/// Test: Assert "claude-mpm" -> Some("claude-mpm"), "shell" -> None, unknown -> None.
+fn adapter_start_command(adapter_type: &str) -> Option<&'static str> {
+    match adapter_type {
+        "claude-mpm" | "mpm" => Some("claude-mpm"),
+        "claude-code" | "cc" => Some("claude"),
+        "auggie" | "augment" => Some("auggie"),
+        "codex" => Some("codex"),
+        "shell" | "sh" => None,
+        _ => None,
+    }
+}
+
 fn try_auto_create_registered_session(input: &str) -> Option<String> {
     // Same sanitization as `list_sessions` and `delete_registration`.
     let sanitize = |s: &str| -> String { s.replace([' ', '.', '/', ':'], "-") };
@@ -324,7 +344,8 @@ fn try_auto_create_registered_session(input: &str) -> Option<String> {
         .unwrap_or_default()
         .join(".ai-commander/projects");
 
-    let mut match_info: Option<(String, String)> = None; // (project_name, project_path)
+    // (project_name, project_path, optional adapter_type string)
+    let mut match_info: Option<(String, String, Option<String>)> = None;
     if let Ok(entries) = std::fs::read_dir(&projects_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -335,7 +356,11 @@ fn try_auto_create_registered_session(input: &str) -> Option<String> {
                         let proj_path = val.get("path").and_then(|v| v.as_str()).unwrap_or("");
                         let sanitized = sanitize(proj_name);
                         if (proj_name == input || sanitized == input) && !proj_path.is_empty() {
-                            match_info = Some((proj_name.to_string(), proj_path.to_string()));
+                            let adapter = val
+                                .get("adapter_type")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            match_info = Some((proj_name.to_string(), proj_path.to_string(), adapter));
                             break;
                         }
                     }
@@ -344,7 +369,7 @@ fn try_auto_create_registered_session(input: &str) -> Option<String> {
         }
     }
 
-    let (proj_name, proj_path) = match_info?;
+    let (proj_name, proj_path, adapter_type) = match_info?;
     let session_name = sanitize(&proj_name);
 
     // `tmux new-session -d -s <name> -c <path>`: detached so we don't attach
@@ -371,6 +396,35 @@ fn try_auto_create_registered_session(input: &str) -> Option<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
         return None;
+    }
+
+    // Give the shell a moment to initialize before sending keystrokes.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Launch the adapter's startup command if one is defined for this project.
+    if let Some(cmd) = adapter_type.as_deref().and_then(adapter_start_command) {
+        let send_result = std::process::Command::new("tmux")
+            .args(["send-keys", "-t", &session_name, cmd, "Enter"])
+            .output();
+        match send_result {
+            Ok(out) if out.status.success() => {
+                eprintln!(
+                    "[GUI] Launched '{}' in tmux session '{}'",
+                    cmd, session_name
+                );
+            }
+            Ok(out) => {
+                eprintln!(
+                    "[GUI] send-keys failed for '{}' in '{}': {}",
+                    cmd,
+                    session_name,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Err(e) => {
+                eprintln!("[GUI] send-keys error for session '{}': {}", session_name, e);
+            }
+        }
     }
 
     eprintln!(
