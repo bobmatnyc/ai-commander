@@ -286,11 +286,24 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
         })
         .collect();
 
+    // Collect paths already emitted by the live-session loop (lowercased) so
+    // the registered-only loop can skip projects that were matched by path even
+    // when the casing differed (e.g. live session path has mixed case but the
+    // registered project JSON has a different case).
+    let emitted_paths: std::collections::HashSet<String> = summaries
+        .iter()
+        .filter_map(|s| s.path.as_deref().map(|p| p.to_lowercase()))
+        .collect();
+
     // Append registered-only projects (no matching tmux session).
     let existing_names: std::collections::HashSet<String> =
         summaries.iter().map(|s| s.name.clone()).collect();
     for proj in &projects {
         if matched_project_names.contains(&proj.name) {
+            continue;
+        }
+        // Skip projects whose path was already emitted via case-insensitive match.
+        if emitted_paths.contains(&proj.path.to_lowercase()) {
             continue;
         }
         let sanitized = proj.name.replace([' ', '.', '/', ':'], "-");

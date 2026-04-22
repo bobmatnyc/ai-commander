@@ -348,6 +348,21 @@
     clearTimeout(activityTimer);
     activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
 
+    // Handle lightweight raw-data events: update activity counters only,
+    // no content to render. This fires even when the LLM filter strips
+    // everything (pure tool-use chrome), keeping the counter alive.
+    // Why: counters must update regardless of viewMode — incrementing them
+    // after the raw-mode early return meant they were never reached in raw
+    // view, leaving the chars/lines display frozen at zero.
+    // Test: Switch to raw view, receive a 'raw' SSE event with char_count=10,
+    // assert charsReceived increments by 10 even though viewMode === 'raw'.
+    if (data.event_type === 'raw') {
+      charsReceived += data.char_count ?? 0;
+      linesReceived += data.line_count ?? 0;
+      markSessionDataReceived(data.session_name);
+      // Fall through to view-mode handling below (raw mode just needs a refresh).
+    }
+
     if (viewMode === 'raw') {
       // Raw mode is driven by polling capture_session_output; just trigger a
       // refresh so the pane updates promptly when new content is detected.
@@ -371,15 +386,9 @@
     // Unknown event_types are still ignored.
     // Test: Send an SSE event with event_type="update" and content="Hello",
     // assert a received message containing "Hello" appears in $messages.
-    // Handle lightweight raw-data events: update activity counters only,
-    // no content to render. This fires even when the LLM filter strips
-    // everything (pure tool-use chrome), keeping the counter alive.
-    if (data.event_type === 'raw') {
-      charsReceived += data.char_count ?? 0;
-      linesReceived += data.line_count ?? 0;
-      markSessionDataReceived(data.session_name);
-      return;
-    }
+
+    // 'raw' events carry no renderable content in summary mode — skip them.
+    if (data.event_type === 'raw') return;
 
     // Both LLM backends (Ollama + OpenRouter) returned nothing — surface banner.
     if (data.event_type === 'llm_unavailable') {
