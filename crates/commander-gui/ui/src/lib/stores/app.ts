@@ -8,6 +8,16 @@ export interface Session {
   is_active?: boolean;
   status_line?: string;
   nickname?: string;
+  /**
+   * Tri-state lifecycle label returned by the backend:
+   * - "connected"    — tmux session exists AND is actively monitored
+   * - "disconnected" — tmux session exists but not currently monitored
+   * - "registered"   — only a project registration exists (no tmux)
+   *
+   * Optional for defensive compatibility with older backends; the session
+   * list UI falls back to "disconnected" when absent.
+   */
+  session_state?: 'connected' | 'disconnected' | 'registered';
 }
 
 export interface Message {

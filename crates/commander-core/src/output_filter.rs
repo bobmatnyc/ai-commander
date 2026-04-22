@@ -138,6 +138,44 @@ pub fn is_ui_noise(line: &str) -> bool {
         return true;
     }
 
+    // Claude Code status bar: "◆ masa │ Sonnet 4.6 │ 42% ctx │ ~/path │ main │ style:..."
+    // Uses Unicode │ (U+2502) separators + model name OR "ctx │" token.
+    let trimmed_full = line.trim();
+    if trimmed_full.contains('\u{2502}')
+        && (lower.contains("sonnet")
+            || lower.contains("opus")
+            || lower.contains("haiku")
+            || lower.contains("ctx \u{2502}")
+            || lower.contains("ctx│"))
+    {
+        return true;
+    }
+
+    // Bypass-permissions banner shown at the bottom of Claude Code
+    if lower.contains("bypass permissions on") || lower.contains("shift+tab to cycle") {
+        return true;
+    }
+
+    // Claude Code mode indicator glyphs at line start
+    if trimmed_full.starts_with('\u{25C6}')  // ◆
+        || trimmed_full.starts_with('\u{23F5}')  // ⏵
+    {
+        return true;
+    }
+
+    // Bare prompt line (just ❯ with optional whitespace)
+    if trimmed_full == "\u{276F}" {
+        return true;
+    }
+
+    // Horizontal separator: line is mostly ─ box-drawing chars
+    if !trimmed_full.is_empty() {
+        let dash_count = trimmed_full.chars().filter(|&c| c == '\u{2500}').count();
+        if dash_count > trimmed_full.chars().count() / 2 {
+            return true;
+        }
+    }
+
     // MCP tool invocation noise (keep the result, not the invocation)
     if line.contains("(MCP)(") && (line.contains("owner:") || line.contains("repo:")) {
         return true;

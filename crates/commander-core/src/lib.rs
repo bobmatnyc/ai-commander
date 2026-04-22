@@ -15,6 +15,7 @@
 pub mod change_detector;
 pub mod client_adapter;
 pub mod config;
+pub mod log;
 pub mod migration;
 pub mod notification_parser;
 pub mod ollama;
@@ -28,6 +29,13 @@ pub mod usage;
 // Re-export Ollama client
 pub use ollama::{OllamaClient, OllamaError};
 
+// Re-export session log helpers
+pub use log::{
+    append_log_entry, archive_session_logs, list_dates as list_log_dates,
+    log_dir_for, read_all_entries as read_all_log_entries,
+    read_entries as read_log_entries, LogEntry,
+};
+
 // Re-export commonly used items for convenience
 pub use config::{
     cache_dir, chroma_dir, config_dir, config_file, db_dir, ensure_all_dirs, ensure_config_dir,
@@ -39,9 +47,10 @@ pub use migration::migrate_if_needed;
 pub use onboarding::{load_config, needs_onboarding, run_onboarding};
 pub use output_filter::{clean_response, clean_screen_preview, detect_adapter, detect_selector, find_new_lines, is_claude_ready, is_mpm_ready, is_ui_noise, Adapter, SelectorPrompt, SessionEvent};
 pub use summarizer::{
-    interpret_screen_context, is_available as is_summarization_available, summarize_async,
-    summarize_blocking, summarize_blocking_with_fallback, summarize_incremental,
-    summarize_incremental_tiered, summarize_tiered, summarize_with_fallback, SummarizerError,
+    interpret_screen_context, is_actively_working, is_available as is_summarization_available,
+    llm_available, summarize_async, summarize_blocking, summarize_blocking_with_fallback,
+    summarize_incremental, summarize_incremental_tiered, summarize_tiered, summarize_with_fallback,
+    SummarizerError,
 };
 
 // Re-export change detection types

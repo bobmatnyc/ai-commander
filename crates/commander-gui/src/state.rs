@@ -1,6 +1,8 @@
 use anyhow::Result;
 use commander_persistence::StateStore;
 use commander_tmux::TmuxOrchestrator;
+use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use tauri::async_runtime::JoinHandle;
 
@@ -8,12 +10,22 @@ use tauri::async_runtime::JoinHandle;
 pub struct GuiState {
     pub store: Arc<StateStore>,
     pub tmux: Option<Arc<TmuxOrchestrator>>,
+    /// Which session is currently displayed in ChatView (single-session view).
     pub current_session: Arc<RwLock<Option<String>>>,
+    /// All sessions that are actively monitored (polled + summarized). May
+    /// include the current_session plus any others the user has "connected"
+    /// without opening in the ChatView.
+    pub connected_sessions: Arc<RwLock<HashSet<String>>>,
     pub bot_status: Arc<RwLock<DaemonStatus>>,
     /// Handle to the running API server task (abort on shutdown).
     pub api_server_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
     /// Handle to the running daemon service task (abort on shutdown).
     pub daemon_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// True while `send_message_streaming` owns the `chat-event` channel for
+    /// the current session (i.e. mpm-serve SSE is handling streaming).  When
+    /// set, the polling-loop interpreter must NOT emit `chat-event` to avoid
+    /// duplicated text.  Shared across the async command and the polling task.
+    pub streaming_active: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,12 +45,14 @@ impl GuiState {
             store: Arc::new(store),
             tmux: tmux.map(Arc::new),
             current_session: Arc::new(RwLock::new(None)),
+            connected_sessions: Arc::new(RwLock::new(HashSet::new())),
             bot_status: Arc::new(RwLock::new(DaemonStatus {
                 running: false,
                 pid: None,
             })),
             api_server_handle: Arc::new(RwLock::new(None)),
             daemon_handle: Arc::new(RwLock::new(None)),
+            streaming_active: Arc::new(AtomicBool::new(false)),
         })
     }
 }

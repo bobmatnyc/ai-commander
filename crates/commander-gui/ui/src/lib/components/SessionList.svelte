@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats } from '../stores/app';
-  import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor } from 'lucide-svelte';
+  import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor, X } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
 
@@ -10,6 +10,7 @@
   let showCreateModal = false;
   let lastError: string | null = null;
   let errorTimeout: number | null = null;
+  let loadingSessionsInProgress = false;
 
   // Detect iOS/iPadOS — hide iTerm/Terminal buttons on these platforms
   const isIOS = typeof navigator !== 'undefined' && (
@@ -56,16 +57,41 @@
     }
   })();
 
-  // Rename state
-  let renamingSession: string | null = null;
-  let renameValue = '';
-  let renameInput: HTMLInputElement | null = null;
+  // Nickname editor state
+  // Why: Per Fix 4 we replaced the tmux-rename flow with a "set display
+  // nickname" flow. The nickname is a display-only override that's recorded
+  // in ~/.ai-commander/session-overrides.json and leaves the underlying tmux
+  // session name untouched — safer for existing tooling that matches on tmux
+  // names.
+  let editingNickname: string | null = null;
+  let nicknameInput = '';
+  let nicknameInputEl: HTMLInputElement | null = null;
 
   // Dropdown state: tracks which session's gear menu is open
   let openDropdown: string | null = null;
 
-  function getDisplayName(session: Session): string {
-    return session.nickname ?? session.name;
+  // Unregister confirmation state: tracks which session is awaiting second click.
+  // Why: A single-click would be too easy to trigger by accident — the two-click
+  // confirmation matches the "Confirm?" pattern the user asked for and adds
+  // friction without a full modal dialog. Auto-clears after 3s so a forgotten
+  // pending row doesn't linger.
+  let pendingUnregister: string | null = null;
+  let unregisterTimeout: number | null = null;
+
+  /**
+   * Why: Sessions that share the same nickname (e.g. three tmux windows for the
+   *      same project) would otherwise appear as identical rows, confusing the user.
+   * What: Returns the nickname when unique, or appends the raw tmux name in brackets
+   *       when another session resolves to the same display name.
+   * Test: Pass two sessions with the same nickname; assert both results include [tmux-name].
+   *       Pass two sessions with different nicknames; assert neither has a bracket suffix.
+   */
+  function getDisplayName(session: Session, allSessions: Session[]): string {
+    const base = session.nickname ?? session.name;
+    const hasDuplicate = allSessions.some(
+      s => s.name !== session.name && (s.nickname ?? s.name) === base
+    );
+    return hasDuplicate ? `${base} [${session.name}]` : base;
   }
 
   /** Look up GitHub stats by session name, trying multiple key variants. */
@@ -94,13 +120,29 @@
   }
 
   async function loadSessions() {
+    // Guard against overlapping calls: if a fetch is already in flight, skip
+    // this tick. This prevents duplicate entries appearing when the backend
+    // responds slowly (>2 s) and the 2 s polling interval fires again.
+    if (loadingSessionsInProgress) return;
+    loadingSessionsInProgress = true;
     try {
       const result = await invoke('list_sessions') as Session[];
-      if (!sessionsEqual(result, $sessions)) {
-        sessions.set(result);
+      // Deduplicate by session name as a frontend safety net in case the
+      // backend ever returns the same tmux name more than once (e.g. two
+      // project JSON files both matching the same session by path).
+      const seen = new Set<string>();
+      const deduped = result.filter(s => {
+        if (seen.has(s.name)) return false;
+        seen.add(s.name);
+        return true;
+      });
+      if (!sessionsEqual(deduped, $sessions)) {
+        sessions.set(deduped);
       }
     } catch (err) {
       console.error('Failed to load sessions:', err);
+    } finally {
+      loadingSessionsInProgress = false;
     }
   }
 
@@ -112,16 +154,37 @@
       const priorMessages = $sessionMessages.get(name);
       const hasCachedHistory = priorMessages && priorMessages.length > 0;
 
-      await invoke('connect_session', { name });
+      // `connect_session` now returns `{session, history}` — pre-populate the
+      // chat with the persisted JSONL log so users see prior summaries without
+      // waiting for the polling loop to re-emit them.
+      const result = (await invoke('connect_session', { name })) as {
+        session?: string;
+        history?: Array<{ text: string; ts: number; hash: string }>;
+      } | null;
+
       const session = $sessions.find(s => s.name === name);
       if (session) {
         currentSession.set({ ...session, is_connected: true });
 
         addMessageToSession(name, {
           direction: 'system',
-          content: `Connected to session: ${getDisplayName(session)}`,
+          content: `Connected to session: ${getDisplayName(session, $sessions)}`,
           timestamp: new Date(),
         });
+
+        // Hydrate cached history returned by the backend (when any).
+        // Skip the hydration if the session already has in-memory messages,
+        // which happens when the user reconnects during the same GUI run.
+        if (!hasCachedHistory && result?.history?.length) {
+          for (const entry of result.history) {
+            const ts = new Date(entry.ts * 1000);
+            addMessageToSession(name, {
+              direction: 'system',
+              content: `history ${ts.toLocaleTimeString()}: ${entry.text}`,
+              timestamp: ts,
+            });
+          }
+        }
 
         if (!hasCachedHistory) {
           try {
@@ -138,10 +201,11 @@
           }
         }
       }
+      await loadSessions();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       const sessionObj = $sessions.find(s => s.name === name);
-      const displayName = sessionObj ? getDisplayName(sessionObj) : name;
+      const displayName = sessionObj ? getDisplayName(sessionObj, $sessions) : name;
       lastError = `Cannot connect to ${displayName}: ${errorMessage}`;
       errorTimeout = setTimeout(() => { lastError = null; }, 5000);
 
@@ -157,6 +221,83 @@
     }
   }
 
+  /**
+   * Why: Users need to stop monitoring a specific session without touching
+   * the ChatView (and without destroying the underlying tmux session).
+   * What: Removes the session from the backend `connected_sessions` set and
+   * refreshes the list so the row re-renders as "disconnected" (dimmed).
+   * Test: Connect to a session, call this, assert the row's session_state
+   * transitions from "connected" to "disconnected" and the ChatView clears
+   * if the disconnected session was the current one.
+   */
+  async function disconnectSession(name: string) {
+    closeDropdown();
+    try {
+      await invoke('disconnect_session', { name });
+      if ($currentSession?.name === name) {
+        currentSession.set(null);
+      }
+      await loadSessions();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      lastError = `Failed to disconnect ${name}: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
+    }
+  }
+
+  /**
+   * Why: Registered-only rows (no tmux session) need a clean delete path.
+   * Stop Session is inapplicable because there's nothing to destroy, so we
+   * surface a dedicated confirmation-gated delete.
+   * What: Prompts the user, then invokes `delete_registration` and reloads.
+   * Test: Seed a registered project, click Delete, confirm, assert the row
+   * disappears and the underlying JSON file is gone.
+   */
+  async function deleteRegistration(session: Session) {
+    closeDropdown();
+    const label = getDisplayName(session, $sessions);
+    if (!confirm(`Remove registration for "${label}"?`)) return;
+    try {
+      await invoke('delete_registration', { name: session.name });
+      await loadSessions();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      lastError = `Failed to delete registration: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
+    }
+  }
+
+  /**
+   * Why: Registered projects need a one-click way to launch a tmux session
+   * and immediately connect — the equivalent of opening a saved workspace.
+   * What: Creates a tmux session using the project's stored path (default
+   * adapter "mpm" — TODO: persist the adapter choice in the registration),
+   * then reloads and auto-connects so the user lands directly in ChatView.
+   * Test: Click Start on a registered row, assert a new tmux session appears
+   * and the row transitions to "connected".
+   */
+  async function quickstart(session: Session) {
+    closeDropdown();
+    try {
+      await invoke('create_session', {
+        name: session.name,
+        directory: session.path || '',
+        adapter: 'mpm', // TODO: persist adapter choice in project registration
+      });
+      await loadSessions();
+      await connect(session.name);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      lastError = `Failed to start ${session.name}: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
+    }
+  }
+
+  /** Convenience: label of a session's current lifecycle state. */
+  function stateOf(session: Session): 'connected' | 'disconnected' | 'registered' {
+    return (session.session_state as any) || (session.is_connected ? 'connected' : 'disconnected');
+  }
+
   async function openInIterm(sessionName: string) {
     closeDropdown();
     await invoke('open_in_iterm', { sessionName });
@@ -165,6 +306,56 @@
   async function openInTerminal(sessionName: string) {
     closeDropdown();
     await invoke('open_in_terminal_app', { sessionName });
+  }
+
+  /**
+   * Why: Users want to "forget" a session — drop its project JSON from the
+   * AI Commander registry — without destroying the underlying tmux session.
+   * `delete_registration` only matches by name; `unregister_session` also
+   * matches by pane path, so it cleanly works for running sessions.
+   * What: First click on the ✕ button on a session row flags it as pending
+   * and re-labels the button "Confirm?". Second click fires the invoke.
+   * A timeout clears the flag after 3s to avoid stuck state.
+   * Test: Click ✕ once, assert the button flips to "Confirm?". Click again,
+   * assert `unregister_session` is invoked with the session name and the row
+   * re-renders without the session while the tmux process survives.
+   */
+  async function handleUnregisterClick(sessionName: string, e: MouseEvent) {
+    e.stopPropagation();
+    if (unregisterTimeout) {
+      clearTimeout(unregisterTimeout);
+      unregisterTimeout = null;
+    }
+    if (pendingUnregister !== sessionName) {
+      pendingUnregister = sessionName;
+      unregisterTimeout = window.setTimeout(() => {
+        pendingUnregister = null;
+      }, 3000);
+      return;
+    }
+    // Second click — fire the command.
+    pendingUnregister = null;
+    try {
+      await invoke('unregister_session', { session_name: sessionName });
+      await loadSessions();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      lastError = `Failed to unregister ${sessionName}: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
+    }
+  }
+
+  /** Dropdown-menu entry variant — keeps the same two-click confirmation. */
+  async function unregisterFromMenu(sessionName: string) {
+    closeDropdown();
+    try {
+      await invoke('unregister_session', { session_name: sessionName });
+      await loadSessions();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      lastError = `Failed to unregister ${sessionName}: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
+    }
   }
 
   async function stopSession(sessionName: string) {
@@ -179,45 +370,82 @@
     }
   }
 
-  function startRename(sessionName: string) {
+  /**
+   * Why: Pre-fill the editor with the current display name (nickname if set,
+   * otherwise the tmux session name) so the user can tweak it in place.
+   * What: Opens the inline nickname editor for the given session and focuses
+   * the input on the next tick.
+   * Test: Click Set Nickname on a session with nickname "Foo" — assert the
+   * input is populated with "Foo" and focused.
+   */
+  function startEditNickname(session: Session) {
     closeDropdown();
-    renamingSession = sessionName;
-    renameValue = sessionName;
+    editingNickname = session.name;
+    nicknameInput = session.nickname ?? session.name;
     // Focus the input on next tick
-    setTimeout(() => renameInput?.focus(), 0);
+    setTimeout(() => nicknameInputEl?.focus(), 0);
   }
 
-  async function commitRename() {
-    if (!renamingSession) return;
-    const oldName = renamingSession;
-    const newName = renameValue.trim();
-
-    renamingSession = null;
-
-    if (!newName || newName === oldName) return;
+  /**
+   * Why: Persist the user's chosen nickname via the REST/Tauri endpoint, then
+   * refresh the session list so the new display name renders.
+   * What: Calls `set_session_nickname` with the trimmed input. An empty value
+   * removes the override on the server side.
+   * Test: Type a nickname, press enter, assert the session row re-renders with
+   * the new display name after loadSessions() resolves.
+   */
+  async function saveNickname() {
+    if (!editingNickname) return;
+    const sessionName = editingNickname;
+    const nickname = nicknameInput.trim();
+    editingNickname = null;
 
     try {
-      await invoke('rename_session', { oldName, newName });
+      await invoke('set_session_nickname', { session_name: sessionName, nickname });
       await loadSessions();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      lastError = `Failed to rename: ${errorMessage}`;
+      lastError = `Failed to set nickname: ${errorMessage}`;
       errorTimeout = setTimeout(() => { lastError = null; }, 5000);
     }
   }
 
-  function cancelRename() {
-    renamingSession = null;
-    renameValue = '';
+  /**
+   * Why: Users need an explicit way to revert a nicknamed session back to the
+   * project-derived default; pressing "x" is faster than clearing the input
+   * and hitting enter.
+   * What: Posts an empty nickname, which on the server removes the override
+   * entry entirely.
+   * Test: Seed an override for a session, call this, assert the override is
+   * gone from the JSON file.
+   */
+  async function clearNickname() {
+    if (!editingNickname) return;
+    const sessionName = editingNickname;
+    editingNickname = null;
+
+    try {
+      await invoke('set_session_nickname', { session_name: sessionName, nickname: '' });
+      await loadSessions();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      lastError = `Failed to clear nickname: ${errorMessage}`;
+      errorTimeout = setTimeout(() => { lastError = null; }, 5000);
+    }
   }
 
-  function handleRenameKeydown(e: KeyboardEvent) {
+  function cancelNickname() {
+    editingNickname = null;
+    nicknameInput = '';
+  }
+
+  function handleNicknameKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter') {
       e.preventDefault();
-      commitRename();
+      saveNickname();
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      cancelRename();
+      cancelNickname();
     }
   }
 
@@ -268,48 +496,77 @@
 
   <div class="session-items">
     {#each $sessions as session}
+      {@const s = stateOf(session)}
       <div
         class="session-item"
         class:active={$currentSession?.name === session.name}
+        class:connected={s === 'connected'}
+        class:disconnected={s === 'disconnected'}
+        class:registered={s === 'registered'}
       >
-        {#if renamingSession === session.name}
-          <!-- Inline rename editor -->
-          <div class="rename-row">
+        {#if editingNickname === session.name}
+          <!-- Inline nickname editor (non-destructive display label) -->
+          <form class="nickname-form" on:submit|preventDefault={saveNickname}>
             <input
-              bind:this={renameInput}
-              bind:value={renameValue}
-              class="rename-input"
-              on:keydown={handleRenameKeydown}
-              on:blur={commitRename}
+              bind:this={nicknameInputEl}
+              bind:value={nicknameInput}
+              class="nickname-input"
+              placeholder="Display nickname…"
+              on:keydown={handleNicknameKeydown}
               spellcheck="false"
             />
-          </div>
+            <button type="submit" class="nickname-save" title="Save nickname">✓</button>
+            <button
+              type="button"
+              class="nickname-clear"
+              on:click={clearNickname}
+              title="Remove nickname (revert to project name)"
+            >✕</button>
+          </form>
         {:else}
           <!-- Normal session row -->
-          <button class="session-main" on:click={() => connect(session.name)}>
-            <span class="session-name">{getDisplayName(session)}</span>
-            {#if session.path}
-              <span class="session-path" title={session.path}>{session.path}</span>
-            {/if}
-            {#if getGithubStats(session.name)}
-              {@const stats = getGithubStats(session.name)}
-              {#if stats && stats.open_issues > 0}
-                <span class="badge badge-issues" title="{stats.repo}: {stats.open_issues} open issue{stats.open_issues > 1 ? 's' : ''}">
-                  {stats.open_issues}
-                </span>
+          <button
+            class="session-main"
+            on:click={() => s === 'registered' ? quickstart(session) : connect(session.name)}
+            title={s === 'registered' ? 'Quickstart registered project' : 'Connect to session'}
+          >
+            <div class="session-info">
+              <div class="name-row">
+                <span
+                  class="state-dot"
+                  class:dot-connected={s === 'connected'}
+                  class:dot-disconnected={s === 'disconnected'}
+                  class:dot-registered={s === 'registered'}
+                  title={s}
+                  aria-label={s}
+                >{s === 'connected' ? '●' : s === 'disconnected' ? '○' : '·'}</span>
+                <span class="session-name" title={session.name}>{getDisplayName(session, $sessions)}</span>
+              </div>
+              {#if session.path}
+                <span class="session-path" title={session.path}>{session.path.replace(/^\/Users\/[^/]+/, '~')}</span>
               {/if}
-              {#if stats && stats.open_prs > 0}
-                <span class="badge badge-prs" title="{stats.repo}: {stats.open_prs} open PR{stats.open_prs > 1 ? 's' : ''}">
-                  {stats.open_prs}
-                </span>
+            </div>
+            <div class="session-badges">
+              {#if getGithubStats(session.name)}
+                {@const stats = getGithubStats(session.name)}
+                {#if stats && stats.open_issues > 0}
+                  <span class="badge badge-issues" title="{stats.repo}: {stats.open_issues} open issue{stats.open_issues > 1 ? 's' : ''}">
+                    {stats.open_issues}
+                  </span>
+                {/if}
+                {#if stats && stats.open_prs > 0}
+                  <span class="badge badge-prs" title="{stats.repo}: {stats.open_prs} open PR{stats.open_prs > 1 ? 's' : ''}">
+                    {stats.open_prs}
+                  </span>
+                {/if}
               {/if}
-            {/if}
-            {#if gitUser}
-              <span class="user-initial" title={gitUser}>{gitUserInitial}</span>
-            {/if}
-            <span class="activity-icon" class:active={$activeSessions.has(session.name)} title={$activeSessions.has(session.name) ? 'Active' : 'Idle'}>
-              <Activity size={14} />
-            </span>
+              {#if gitUser}
+                <span class="user-initial" title={gitUser}>{gitUserInitial}</span>
+              {/if}
+              <span class="activity-icon" class:active={$activeSessions.has(session.name)} title={$activeSessions.has(session.name) ? 'Active' : 'Idle'}>
+                <Activity size={14} />
+              </span>
+            </div>
           </button>
 
           <!-- Action buttons: always visible -->
@@ -322,6 +579,26 @@
                 title="Open in iTerm2"
               >
                 <Terminal size={14} />
+              </button>
+            {/if}
+
+            <!-- Unregister button: two-click confirmation. Hidden on
+                 registered-only rows where `delete_registration` is the correct
+                 path (there's no tmux session to dissociate from). -->
+            {#if s !== 'registered'}
+              <button
+                class="action-btn unregister-btn"
+                class:pending={pendingUnregister === session.name}
+                on:click={(e) => handleUnregisterClick(session.name, e)}
+                title={pendingUnregister === session.name
+                  ? 'Click again to confirm unregister'
+                  : 'Unregister (remove from AIC registry, keep tmux alive)'}
+              >
+                {#if pendingUnregister === session.name}
+                  <span class="confirm-label">Confirm?</span>
+                {:else}
+                  <X size={14} />
+                {/if}
               </button>
             {/if}
 
@@ -338,25 +615,80 @@
 
               {#if openDropdown === session.name}
                 <div class="dropdown-menu" on:click|stopPropagation>
-                  <button class="dropdown-item" on:click={() => startRename(session.name)}>
-                    <Pencil size={13} />
-                    <span>Rename</span>
-                  </button>
-                  {#if !isIOS}
-                    <button class="dropdown-item" on:click={() => openInIterm(session.name)}>
-                      <Terminal size={13} />
-                      <span>Open in iTerm2</span>
+                  {#if s === 'registered'}
+                    <!-- Registered: no tmux session running yet. -->
+                    <button class="dropdown-item" on:click={() => quickstart(session)}>
+                      <Activity size={13} />
+                      <span>Start</span>
                     </button>
-                    <button class="dropdown-item" on:click={() => openInTerminal(session.name)}>
-                      <Monitor size={13} />
-                      <span>Open in Terminal.app</span>
+                    <div class="dropdown-divider"></div>
+                    <button class="dropdown-item danger" on:click={() => deleteRegistration(session)}>
+                      <Square size={13} />
+                      <span>Delete Registration</span>
+                    </button>
+                  {:else if s === 'disconnected'}
+                    <!-- Disconnected: tmux exists, not monitored. -->
+                    <button class="dropdown-item" on:click={() => connect(session.name)}>
+                      <Activity size={13} />
+                      <span>Connect</span>
+                    </button>
+                    <button class="dropdown-item" on:click={() => startEditNickname(session)}>
+                      <Pencil size={13} />
+                      <span>Set Nickname</span>
+                    </button>
+                    {#if !isIOS}
+                      <button class="dropdown-item" on:click={() => openInIterm(session.name)}>
+                        <Terminal size={13} />
+                        <span>Open in iTerm2</span>
+                      </button>
+                      <button class="dropdown-item" on:click={() => openInTerminal(session.name)}>
+                        <Monitor size={13} />
+                        <span>Open in Terminal.app</span>
+                      </button>
+                    {/if}
+                    <div class="dropdown-divider"></div>
+                    <button class="dropdown-item" on:click={() => unregisterFromMenu(session.name)}>
+                      <X size={13} />
+                      <span>Unregister (keep tmux)</span>
+                    </button>
+                    <button class="dropdown-item danger" on:click={() => stopSession(session.name)}>
+                      <Square size={13} />
+                      <span>Stop Session</span>
+                    </button>
+                    <button class="dropdown-item danger" on:click={() => deleteRegistration(session)}>
+                      <Square size={13} />
+                      <span>Delete Registration</span>
+                    </button>
+                  {:else}
+                    <!-- Connected: tmux + monitored. -->
+                    <button class="dropdown-item" on:click={() => disconnectSession(session.name)}>
+                      <Activity size={13} />
+                      <span>Disconnect</span>
+                    </button>
+                    <button class="dropdown-item" on:click={() => startEditNickname(session)}>
+                      <Pencil size={13} />
+                      <span>Set Nickname</span>
+                    </button>
+                    {#if !isIOS}
+                      <button class="dropdown-item" on:click={() => openInIterm(session.name)}>
+                        <Terminal size={13} />
+                        <span>Open in iTerm2</span>
+                      </button>
+                      <button class="dropdown-item" on:click={() => openInTerminal(session.name)}>
+                        <Monitor size={13} />
+                        <span>Open in Terminal.app</span>
+                      </button>
+                    {/if}
+                    <div class="dropdown-divider"></div>
+                    <button class="dropdown-item" on:click={() => unregisterFromMenu(session.name)}>
+                      <X size={13} />
+                      <span>Unregister (keep tmux)</span>
+                    </button>
+                    <button class="dropdown-item danger" on:click={() => stopSession(session.name)}>
+                      <Square size={13} />
+                      <span>Stop Session</span>
                     </button>
                   {/if}
-                  <div class="dropdown-divider"></div>
-                  <button class="dropdown-item danger" on:click={() => stopSession(session.name)}>
-                    <Square size={13} />
-                    <span>Stop Session</span>
-                  </button>
                 </div>
               {/if}
             </div>
@@ -373,6 +705,7 @@
   <CreateSessionModal
     bind:show={showCreateModal}
     on:created={handleSessionCreated}
+    on:close={() => (showCreateModal = false)}
   />
 </div>
 
@@ -456,6 +789,31 @@
     border-color: var(--accent);
   }
 
+  /* Tri-state lifecycle visuals. Connected rows stay full-color, disconnected
+   * rows dim, and registered rows go grayscale to hint "start me first". */
+  .session-item.connected { opacity: 1.0; }
+  .session-item.disconnected { opacity: 0.7; }
+  .session-item.registered { opacity: 0.45; filter: grayscale(0.6); }
+
+  .name-row {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    min-width: 0;
+  }
+
+  .state-dot {
+    font-size: 0.75rem;
+    line-height: 1;
+    flex-shrink: 0;
+    width: 10px;
+    text-align: center;
+  }
+
+  .dot-connected { color: #22c55e; }
+  .dot-disconnected { color: var(--text-secondary, #999); opacity: 0.6; }
+  .dot-registered { color: var(--text-secondary, #999); opacity: 0.4; }
+
   .session-main {
     display: flex;
     flex: 1;
@@ -470,8 +828,21 @@
     min-width: 0;
   }
 
-  .session-name {
+  .session-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
     flex: 1;
+  }
+
+  .session-badges {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+  }
+
+  .session-name {
     font-size: 0.875rem;
     font-weight: 500;
     color: var(--text-primary);
@@ -479,16 +850,17 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     text-align: left;
+    max-width: 100%;
   }
 
   .session-path {
     font-size: 0.7rem;
-    color: var(--text-muted, #888);
+    color: var(--text-secondary);
+    opacity: 0.65;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 180px;
-    display: block;
+    max-width: 100%;
     text-align: left;
   }
 
@@ -527,9 +899,29 @@
     border-color: var(--accent);
   }
 
-  .rename-btn:hover {
-    color: #f59e0b;
-    border-color: #f59e0b;
+  /* Unregister button — neutral by default, bright red in pending state so the
+   * "Confirm?" label is impossible to miss. */
+  .unregister-btn:hover {
+    color: #dc2626;
+    border-color: #dc2626;
+  }
+
+  .unregister-btn.pending {
+    color: white;
+    background: #dc2626;
+    border-color: #dc2626;
+    width: auto;
+    padding: 0 6px;
+  }
+
+  .unregister-btn.pending:hover {
+    filter: brightness(1.1);
+  }
+
+  .confirm-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
   }
 
   .gear-btn:hover,
@@ -539,28 +931,41 @@
     background: var(--bg-surface);
   }
 
-  /* Rename inline input */
-  .rename-row {
+  /* Nickname inline form (compact, inline) */
+  .nickname-form {
+    display: flex;
+    align-items: center;
+    gap: 4px;
     flex: 1;
     padding: 0.375rem 0.5rem;
   }
 
-  .rename-input {
-    width: 100%;
-    padding: 0.25rem 0.5rem;
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: var(--text-primary);
+  .nickname-input {
+    flex: 1;
+    font-size: 0.8rem;
+    padding: 2px 6px;
+    border: 1px solid #3b82f6;
+    border-radius: 4px;
     background: var(--bg-primary);
-    border: 1px solid var(--accent);
-    border-radius: 0.25rem;
+    color: var(--text-primary);
     outline: none;
-    box-sizing: border-box;
   }
 
-  .rename-input:focus {
-    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
+  .nickname-input:focus {
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
   }
+
+  .nickname-save,
+  .nickname-clear {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 4px;
+    font-size: 0.8rem;
+  }
+
+  .nickname-save { color: #10b981; }
+  .nickname-clear { color: #ef4444; }
 
   /* Dropdown */
   .dropdown-wrapper {

@@ -1,12 +1,16 @@
 <script lang="ts">
   import { get } from 'svelte/store';
-  import { messages, currentSession, addMessageToSession, updateMessageContent, updateLastSystemMessage, clearSessionMessages, sessionMessages, markSessionActive } from '../stores/app';
+  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive } from '../stores/app';
   import { onMount, onDestroy } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { invoke } from '@tauri-apps/api/core';
-  import { isDesktop, subscribeSessionEvents } from '../transport';
-  import type { SessionEventData } from '../transport';
-  import { ArrowDown, Terminal } from 'lucide-svelte';
+  import { invoke, subscribeSessionEvents, isDesktop, type SessionEventData } from '../transport';
+  import { ArrowDown, Archive } from 'lucide-svelte';
+
+  interface LogEntry {
+    ts: number;
+    text: string;
+    hash: string;
+  }
 
   let terminalEl: HTMLDivElement;
   let autoScroll = true;
@@ -16,27 +20,30 @@
   let waitingForResponse = false;
   let waitingTimer: number;
   let streamingMessageId: string | null = null;
-  let viewMode: 'interpreted' | 'raw' = 'interpreted';
+  let viewMode: 'summary' | 'raw' = 'summary';
+  // Tracks sessions whose history has already been replayed to avoid
+  // re-appending the same log entries on re-render.
+  const loadedHistorySessions = new Set<string>();
 
-  let lineCount = 0;
-  let lastSummaryAt = 0;
-  const SUMMARY_THRESHOLD = 50;
   let isActive = false;
   let activityTimer: number;
+  let lineCount = 0;
+
+  // True when the polling loop has reported that both LLM backends (Ollama
+  // and OpenRouter) have failed multiple times in a row. Surfaces a banner
+  // so the user can take action instead of seeing silent no-ops.
+  let llmUnavailable = false;
+
+  // Raw-mode terminal state
+  let rawContent = '';
+  let rawError = '';
+  let rawPollTimer: number | null = null;
+  let rawPaneEl: HTMLPreElement;
+
+  // Web-mode SSE subscription cleanup (no-op in Tauri mode)
   let sseCleanup: (() => void) | null = null;
 
-  /** Normalize adapter ID to short chat nickname. */
-  function adapterNick(id?: string): string {
-    if (!id) return 'claude';
-    switch (id) {
-      case 'claude-code': case 'claude': return 'claude';
-      case 'claude-mpm': case 'mpm': return 'mpm';
-      case 'auggie': return 'auggie';
-      case 'codex': return 'codex';
-      case 'shell': return 'shell';
-      default: return id;
-    }
-  }
+  const ANSI_ESCAPE = /\x1b\[[0-9;]*[mGKHF]/g;
 
   /** Check if the last system message in a session has the same content (dedup). */
   function isDuplicateSystemMessage(sessionName: string, content: string): boolean {
@@ -51,6 +58,10 @@
       autoScroll = true;
       showScrollButton = false;
     }
+  }
+
+  function scrollRawToBottom() {
+    if (rawPaneEl) rawPaneEl.scrollTop = rawPaneEl.scrollHeight;
   }
 
   function handleScroll() {
@@ -114,7 +125,30 @@
       .replace(/>/g, '&gt;');
   }
 
+  /**
+   * Why: LLM summaries frequently include markdown (tables, lists, bold, inline
+   * code). Rendering raw markdown text hurts readability, so we normalize it
+   * into sanitized HTML before handing it to Svelte's `{@html …}` sink.
+   * What: Escapes all user content, then opts specific markdown patterns
+   * (code blocks, tables, lists, bold/italic, inline code, headings) back into
+   * structured HTML.
+   * Test: Pass a string with a `| a | b |` table, `**bold**`, `\`code\``, and a
+   * numbered list; assert the output contains `<table class="chat-table">`,
+   * `<strong>bold</strong>`, `<code>code</code>`, and `<ol class="chat-list">`.
+   */
+  function renderInlineMarkdown(text: string): string {
+    // Text must already be HTML-escaped. We re-inject tags for known patterns.
+    // Order matters: inline code first so its contents aren't re-interpreted
+    // as bold/italic.
+    return text
+      .replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  }
+
   function renderContent(content: string): string {
+    if (!content) return '';
+
     // First handle code blocks (preserve them from table parsing)
     const codeBlocks: string[] = [];
     let processed = content.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) => {
@@ -149,9 +183,9 @@
         const cells = trimmed.split('|').filter(c => c.trim() !== '');
 
         if (!headerDone) {
-          tableHtml += '<tr>' + cells.map(c => `<th>${escapeHtml(c.trim())}</th>`).join('') + '</tr></thead><tbody>';
+          tableHtml += '<tr>' + cells.map(c => `<th>${renderInlineMarkdown(escapeHtml(c.trim()))}</th>`).join('') + '</tr></thead><tbody>';
         } else {
-          tableHtml += '<tr>' + cells.map(c => `<td>${escapeHtml(c.trim())}</td>`).join('') + '</tr>';
+          tableHtml += '<tr>' + cells.map(c => `<td>${renderInlineMarkdown(escapeHtml(c.trim()))}</td>`).join('') + '</tr>';
         }
       } else {
         if (inTable) {
@@ -170,15 +204,32 @@
       result += tableHtml;
     }
 
+    // Headings (applied to escaped text)
+    result = result.replace(/(^|\n)### (.+?)(?=\n|$)/g, '$1<h3 class="chat-h3">$2</h3>');
+    result = result.replace(/(^|\n)## (.+?)(?=\n|$)/g, '$1<h2 class="chat-h2">$2</h2>');
+    result = result.replace(/(^|\n)# (.+?)(?=\n|$)/g, '$1<h1 class="chat-h1">$2</h1>');
+
     // Detect numbered lists (2+ consecutive lines starting with N. or N) )
     result = result.replace(
       /(?:^|\n)((?:\d+[.)]\s+.+\n?){2,})/gm,
       (match) => {
         const items = match.trim().split('\n').map(line => {
           const m = line.match(/^\d+[.)]\s+(.+)/);
-          return m ? `<li>${escapeHtml(m[1])}</li>` : '';
+          return m ? `<li>${renderInlineMarkdown(m[1])}</li>` : '';
         }).join('');
         return `<ol class="chat-list">${items}</ol>`;
+      }
+    );
+
+    // Detect bullet lists (2+ consecutive lines starting with - or *)
+    result = result.replace(
+      /(?:^|\n)((?:[-*]\s+.+\n?){2,})/gm,
+      (match) => {
+        const items = match.trim().split('\n').map(line => {
+          const m = line.match(/^[-*]\s+(.+)/);
+          return m ? `<li>${renderInlineMarkdown(m[1])}</li>` : '';
+        }).join('');
+        return `<ul class="chat-list">${items}</ul>`;
       }
     );
 
@@ -195,61 +246,18 @@
       }
     );
 
+    // Apply inline markdown (bold/italic/inline-code) to the remaining body,
+    // avoiding the HTML we've already injected (tables, lists, code blocks).
+    // Strategy: split on tag boundaries, transform only text segments.
+    result = result.replace(
+      /(<(?:table|ol|ul|pre|h[1-3])[\s\S]*?<\/(?:table|ol|ul|pre|h[1-3])>|\x00CODEBLOCK\d+\x00)|([^<\x00]+)/g,
+      (_m, preserved, textChunk) => preserved ?? renderInlineMarkdown(textChunk)
+    );
+
     // Restore code blocks
     result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_match, idx) => codeBlocks[parseInt(idx)]);
 
     return result;
-  }
-
-  type Segment = { type: 'prompt' | 'output' | 'tool'; content: string };
-
-  function isUiChrome(line: string): boolean {
-    // Box drawing characters, status bars, empty decorations
-    return /^[─│╭╮╰╯┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬]+$/.test(line)
-      || /^\s*$/.test(line)
-      || line.includes('bypass permissions')
-      || line.includes('[r@')  // status bar fragment
-      || /^\s*⏵/.test(line);  // mode indicator
-  }
-
-  function parseTerminalOutput(raw: string): Segment[] {
-    const lines = raw.split('\n');
-    const segments: Segment[] = [];
-    let currentBlock: string[] = [];
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-
-      // Skip empty lines and UI chrome
-      if (!trimmed) continue;
-      if (isUiChrome(trimmed)) continue;
-
-      // Detect Claude Code prompt markers
-      if (trimmed.startsWith('❯') || trimmed.startsWith('>') || trimmed.match(/^\$\s/)) {
-        if (currentBlock.length) {
-          segments.push({ type: 'output', content: currentBlock.join('\n') });
-          currentBlock = [];
-        }
-        segments.push({ type: 'prompt', content: trimmed });
-      }
-      // Detect tool use markers
-      else if (trimmed.startsWith('⏺') || trimmed.includes('Tool:') || trimmed.match(/^\s*(Read|Write|Edit|Bash|Glob|Grep)\(/)) {
-        if (currentBlock.length) {
-          segments.push({ type: 'output', content: currentBlock.join('\n') });
-          currentBlock = [];
-        }
-        segments.push({ type: 'tool', content: trimmed });
-      }
-      else {
-        currentBlock.push(trimmed);
-      }
-    }
-
-    if (currentBlock.length) {
-      segments.push({ type: 'output', content: currentBlock.join('\n') });
-    }
-
-    return segments;
   }
 
   // Called by InputArea (via exported function) when a message is sent
@@ -262,30 +270,129 @@
     }, 60_000);
   }
 
+  // ─── Raw-mode terminal pane ────────────────────────────────────────────────
+
+  async function refreshRawContent() {
+    if (!$currentSession) return;
+    const sessionName = $currentSession.name;
+    try {
+      const raw = await invoke<string>('capture_session_output', { name: sessionName });
+      if ($currentSession?.name !== sessionName) return; // session switched during await
+      rawContent = (raw || '').replace(ANSI_ESCAPE, '');
+      rawError = '';
+      setTimeout(scrollRawToBottom, 10);
+    } catch (err) {
+      // Surface the error in the raw pane so it's visible on mobile
+      if ($currentSession?.name === sessionName) {
+        rawError = `Failed to fetch terminal output: ${err}`;
+      }
+    }
+  }
+
+  function startRawPolling() {
+    stopRawPolling();
+    refreshRawContent();
+    rawPollTimer = window.setInterval(refreshRawContent, 1000);
+  }
+
+  function stopRawPolling() {
+    if (rawPollTimer !== null) {
+      clearInterval(rawPollTimer);
+      rawPollTimer = null;
+    }
+  }
+
+  // ─── Web SSE event handling ──────────────────────────────────────────────
+  // In Tauri desktop mode, `session-output` and `chat-event` fire via native
+  // Tauri events (see onMount). In web mode those listeners are no-ops
+  // (shimmed by vite.web.config.ts → tauri-event-shim.ts), so we bridge the
+  // REST SSE endpoint `/api/sessions/:name/events` into the same UI updates.
+  //
+  // The backend currently emits `event_type: 'interpretation'` events with
+  // LLM-generated summaries of tmux screen changes. We render these as
+  // received Claude messages in summary mode, or trigger a raw refresh
+  // in raw mode, mirroring the Tauri `session-output` path.
+  function handleSseEvent(data: SessionEventData) {
+    connecting = false;
+    markActivity();
+
+    if (!$currentSession || $currentSession.name !== data.session_name) return;
+    markSessionActive(data.session_name);
+
+    // Activity indicator
+    isActive = true;
+    clearTimeout(activityTimer);
+    activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
+
+    if (viewMode === 'raw') {
+      // Raw mode is driven by polling capture_session_output; just trigger a
+      // refresh so the pane updates promptly when new content is detected.
+      refreshRawContent();
+      return;
+    }
+
+    // Summary mode: surface the interpretation text as a Claude message.
+    // Skip empty/placeholder interpretations.
+    const content = (data.content || '').trim();
+    if (!content) return;
+
+    if (data.event_type === 'interpretation') {
+      if (data.is_update && streamingMessageId) {
+        // Replace the in-progress message with the newer interpretation
+        updateMessageContent(data.session_name, streamingMessageId, content);
+      } else {
+        // Start a fresh received message for this interpretation
+        streamingMessageId = crypto.randomUUID();
+        addMessageToSession(data.session_name, {
+          id: streamingMessageId,
+          direction: 'received',
+          content,
+          timestamp: new Date(),
+        });
+      }
+      lineCount += content.split('\n').length;
+      if (autoScroll) setTimeout(scrollToBottom, 10);
+    }
+  }
+
+  function startSseSubscription(sessionName: string) {
+    stopSseSubscription();
+    if (isDesktop()) return; // Tauri events handle this
+    sseCleanup = subscribeSessionEvents(sessionName, handleSseEvent);
+  }
+
+  function stopSseSubscription() {
+    if (sseCleanup) {
+      sseCleanup();
+      sseCleanup = null;
+    }
+  }
+
+  // Toggle polling whenever viewMode or currentSession changes
+  $: {
+    if ($currentSession && viewMode === 'raw') {
+      startRawPolling();
+    } else {
+      stopRawPolling();
+      rawContent = '';
+      rawError = '';
+    }
+  }
+
+  // ─── Session actions ───────────────────────────────────────────────────────
+
   async function handleStatus() {
     if (!$currentSession || isActionLoading) return;
     const sessionName = $currentSession.name;
     isActionLoading = true;
 
     try {
-      // Get both structured summary and LLM interpretation
-      const [summary, interpretation] = await Promise.allSettled([
-        invoke('get_session_summary', { name: sessionName }),
-        invoke('interpret_session', { name: sessionName }),
-      ]);
-
+      const summary = await invoke('get_session_summary', { name: sessionName });
       let status = `📊 Session: ${sessionName}\n`;
-
-      if (summary.status === 'fulfilled') {
-        const s = summary.value as any;
-        status += `Adapter: ${s.adapter}\n`;
-        status += `State: ${s.is_idle ? '⏸ Idle' : '🔄 Active'}\n`;
-        status += `Lines tracked: ${lineCount}\n`;
-      }
-
-      if (interpretation.status === 'fulfilled' && interpretation.value) {
-        status += `\n${interpretation.value}`;
-      }
+      const s = summary as any;
+      status += `Adapter: ${s.adapter}\n`;
+      status += `State: ${s.is_idle ? '⏸ Idle' : '🔄 Active'}\n`;
+      status += `Lines tracked: ${lineCount}\n`;
 
       addMessageToSession(sessionName, {
         direction: 'system',
@@ -295,7 +402,7 @@
     } catch (err) {
       addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Connected to "${sessionName}" · ${lineCount} lines`,
+        content: `Connected to "${sessionName}"`,
         timestamp: new Date(),
       });
     } finally {
@@ -351,18 +458,64 @@
     }
   }
 
-  async function handleOpenIterm() {
-    if (!$currentSession) return;
+  // ─── Summary log persistence ─────────────────────────────────────────────
+  //
+  // Why: Summaries emitted by the polling loop are ephemeral; when a session
+  // is reopened the user sees an empty chat. We replay today's persisted log
+  // as system messages so history survives restarts and session switches.
+  // What: Fetches `get_session_log` for today's date and appends entries as
+  // muted system messages prefixed with a timestamp.
+  // Test: Seed a log file under a fake HOME, connect to the session, assert
+  // the chat contains one system message per log entry before the connect
+  // marker.
+  async function loadLogHistory(sessionName: string) {
+    if (loadedHistorySessions.has(sessionName)) return;
+    loadedHistorySessions.add(sessionName);
     try {
-      await invoke('open_in_iterm', { sessionName: $currentSession.name });
+      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+      const entries = (await invoke('get_session_log', {
+        name: sessionName,
+        date: today,
+      })) as LogEntry[];
+      if (!entries || entries.length === 0) return;
+      for (const entry of entries) {
+        const ts = new Date(entry.ts * 1000);
+        addMessageToSession(sessionName, {
+          direction: 'system',
+          content: `history ${ts.toLocaleTimeString()}: ${entry.text}`,
+          timestamp: ts,
+        });
+      }
     } catch (err) {
-      addMessageToSession($currentSession.name, {
+      // Non-fatal — absence of logs is normal.
+      console.debug('loadLogHistory failed:', err);
+    }
+  }
+
+  async function archiveLogs() {
+    if (!$currentSession) return;
+    const sessionName = $currentSession.name;
+    try {
+      const result = (await invoke('archive_session_logs', { name: sessionName })) as
+        | string
+        | { path: string };
+      const path = typeof result === 'string' ? result : result?.path;
+      addMessageToSession(sessionName, {
         direction: 'system',
-        content: `Failed to open iTerm2: ${err}`,
+        content: path ? `Logs archived to ${path}` : 'Logs archived',
+        timestamp: new Date(),
+      });
+    } catch (err) {
+      console.error('Archive failed:', err);
+      addMessageToSession(sessionName, {
+        direction: 'system',
+        content: `Archive failed: ${err}`,
         timestamp: new Date(),
       });
     }
   }
+
+  // ─── Lifecycle ─────────────────────────────────────────────────────────────
 
   onMount(() => {
     connecting = true;
@@ -379,71 +532,58 @@
       const raw = content && content.length > 0 ? content : full_content;
       if (!raw) return;
 
-      // Track activity
+      // Track activity indicator only (no content added in summary mode)
       lineCount += raw.split('\n').length;
       isActive = true;
       clearTimeout(activityTimer);
       activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
 
-      // Auto-summarize: first output immediately, then every SUMMARY_THRESHOLD lines
-      const shouldSummarize = (lastSummaryAt === 0 && lineCount >= 2)
-        || (lineCount - lastSummaryAt >= SUMMARY_THRESHOLD);
-      if (shouldSummarize && viewMode === 'interpreted') {
-        lastSummaryAt = lineCount;
-        invoke('interpret_session', { name: sessionName })
-          .then((result: unknown) => {
-            // Guard: only add if still on the same session
-            if ($currentSession?.name !== sessionName) return;
-            const r = result as { output?: string; adapter?: string } | string;
-            const text = typeof r === 'string' ? r : r?.output || '';
-            const adapter = typeof r === 'string' ? undefined : r?.adapter;
-            if (text.trim()) {
-              const display = `${adapterNick(adapter)}: ${text.trim()}`;
-              if (!isDuplicateSystemMessage(sessionName, display)) {
-                addMessageToSession(sessionName, {
-                  direction: 'system',
-                  content: display,
-                  timestamp: new Date(),
-                });
-              }
-            }
-          })
-          .catch(() => {});
-      }
-
+      // In raw mode, trigger an immediate refresh of the terminal pane
       if (viewMode === 'raw') {
-        // Raw mode: show parsed terminal segments (filtered)
-        const segments = parseTerminalOutput(raw);
-        for (const seg of segments) {
-          addMessageToSession(sessionName, {
-            direction: 'received',
-            content: seg.content,
-            timestamp: new Date(),
-            segmentType: seg.type,
-          });
-        }
+        refreshRawContent();
       }
-      // Interpreted mode: no raw output shown. Only LLM summaries
-      // from the auto-summarize block above are displayed.
-
-      if (autoScroll) {
-        setTimeout(scrollToBottom, 10);
-      }
+      // Summary mode: do nothing here. Content is driven purely by the
+      // `chat-event` stream (user messages + Claude responses).
     });
 
     const unlistenChatEvent = listen('chat-event', (event: any) => {
       connecting = false;
       markActivity();
 
-      const { type, content, accumulated, name, cost_usd, input } = event.payload;
+      const { type, content, accumulated, name, cost_usd, session } = event.payload;
       const sessionName = $currentSession?.name;
       if (!sessionName) return;
+
+      // Ignore events that carry an explicit `session` field targeting a
+      // different session. The polling loop only polls the current session,
+      // so in practice this is a no-op guard, but it keeps things correct if
+      // multiple sources ever fan in.
+      if (session && session !== sessionName) return;
 
       markSessionActive(sessionName);
 
       switch (type) {
         case 'text':
+          // Incremental text chunk (mpm-serve SSE path).
           updateStreamingMessage(sessionName, accumulated);
+          break;
+        case 'thinking':
+          // Placeholder emitted by the polling loop while Claude is mid-
+          // response.  Reuses the streaming-message slot so the final
+          // LLM summary replaces it cleanly when `complete` fires.
+          updateStreamingMessage(sessionName, content || 'Summarizing…');
+          break;
+        case 'update':
+          // Running summary for the current block. Replaces the current
+          // streaming bubble in place until a new block starts.
+          updateStreamingMessage(sessionName, content || '');
+          break;
+        case 'new_block':
+          // User sent new input — finalize the current summary bubble
+          // so the next `update` creates a fresh one.
+          if (streamingMessageId) {
+            streamingMessageId = null;
+          }
           break;
         case 'tool_use':
           addMessageToSession(sessionName, {
@@ -452,8 +592,37 @@
             timestamp: new Date(),
           });
           break;
-        case 'complete':
-          finalizeStreamingMessage(sessionName, content, cost_usd);
+        case 'complete': {
+          const finalText = (content || '').trim();
+          if (!finalText) {
+            // LLM returned nothing and the backend intentionally skipped
+            // the fallback preview (summary mode never shows raw tmux
+            // content). Discard any in-progress "Summarizing…" bubble
+            // rather than leaving it blank.
+            if (streamingMessageId) {
+              updateMessageContent(sessionName, streamingMessageId, '');
+              streamingMessageId = null;
+            }
+            break;
+          }
+          finalizeStreamingMessage(sessionName, finalText, cost_usd);
+          break;
+        }
+        case 'system':
+          // One-time degraded-mode notice (e.g. "LLM unavailable"). Dedup
+          // so repeated emissions don't stack.
+          if (content && !isDuplicateSystemMessage(sessionName, content)) {
+            addMessageToSession(sessionName, {
+              direction: 'system',
+              content,
+              timestamp: new Date(),
+            });
+          }
+          break;
+        case 'llm_unavailable':
+          // Show a non-blocking banner; the user can configure OpenRouter
+          // or dismiss. Reset on session switch (see reactive block below).
+          llmUnavailable = true;
           break;
         case 'error':
           addMessageToSession(sessionName, {
@@ -476,85 +645,65 @@
       unlistenChatEvent.then(f => f());
       clearTimeout(connectingTimer);
       clearTimeout(waitingTimer);
-      if (sseCleanup) {
-        sseCleanup();
-        sseCleanup = null;
-      }
+      stopRawPolling();
+      stopSseSubscription();
     };
   });
 
-  // Reset connecting state when session changes and show interpreted status
+  onDestroy(() => {
+    stopRawPolling();
+    stopSseSubscription();
+    clearTimeout(waitingTimer);
+    clearTimeout(activityTimer);
+  });
+
+  // When the current session changes, just reset transient UI state.
+  // The derived `messages` store already swaps to the cached history for the
+  // new session (keyed by session name in `sessionMessages`), so we do NOT
+  // clear anything and do NOT invoke the LLM summarizer.
   $: if ($currentSession) {
+    const sessionName = $currentSession.name;
     connecting = true;
     waitingForResponse = false;
     lineCount = 0;
-    lastSummaryAt = 0;
     isActive = false;
+    streamingMessageId = null;
+    llmUnavailable = false;
 
-    // Clean up previous SSE subscription
-    if (sseCleanup) {
-      sseCleanup();
-      sseCleanup = null;
-    }
+    // Web mode: (re)subscribe to the REST SSE event stream for this session.
+    // No-op in Tauri mode (handled by native events).
+    startSseSubscription(sessionName);
 
-    // Capture session name at call time to prevent cross-session bleed
-    const connectingSession = $currentSession.name;
-    invoke('interpret_session', { name: connectingSession })
-      .then((result: unknown) => {
-        // Only add message if we're still on the same session
-        if ($currentSession?.name === connectingSession) {
-          const r = result as { output?: string; adapter?: string } | string;
-          const text = typeof r === 'string' ? r : r?.output || '';
-          const adapter = typeof r === 'string' ? undefined : r?.adapter;
-          const display = `${adapterNick(adapter)}: ${text.trim()}`;
-          addMessageToSession(connectingSession, {
-            direction: 'system',
-            content: display,
-            timestamp: new Date(),
-          });
-        }
-        connecting = false;
-      })
-      .catch(() => { connecting = false; });
-
-    // In web mode, subscribe to SSE for live interpreted updates
-    if (!isDesktop()) {
-      const sessionName = $currentSession.name;
-      sseCleanup = subscribeSessionEvents(
-        sessionName,
-        (event: SessionEventData) => {
-          markActivity();
-          markSessionActive(sessionName);
-          lineCount += 1;
-          isActive = true;
-          clearTimeout(activityTimer);
-          activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
-
-          const display = `${adapterNick(event.adapter)}: ${event.content}`;
-          if (event.is_update) {
-            // Update the last system message instead of appending a new one
-            updateLastSystemMessage(sessionName, display);
-          } else if (!isDuplicateSystemMessage(sessionName, display)) {
-            addMessageToSession(sessionName, {
-              direction: 'system',
-              content: display,
-              timestamp: new Date(event.timestamp * 1000),
-            });
-          }
-          if (autoScroll) setTimeout(scrollToBottom, 10);
-        },
-      );
+    // Drop "connecting" once we know whether history exists (avoid flash)
+    const existing = get(sessionMessages).get(sessionName) || [];
+    if (existing.length > 0) {
+      connecting = false;
+    } else {
+      // In summary mode, replay persisted log history BEFORE the connect
+      // marker so the user sees "history …" lines then "Connected to …".
+      if (viewMode === 'summary') {
+        loadLogHistory(sessionName);
+      }
+      // Emit a one-time connect marker when opening a fresh session
+      const marker = `Connected to session: ${sessionName}`;
+      if (!isDuplicateSystemMessage(sessionName, marker)) {
+        addMessageToSession(sessionName, {
+          direction: 'system',
+          content: marker,
+          timestamp: new Date(),
+        });
+      }
+      // Let the 2s onMount timer clear `connecting`
+      setTimeout(() => { connecting = false; }, 500);
     }
   } else {
     connecting = false;
     waitingForResponse = false;
-    if (sseCleanup) {
-      sseCleanup();
-      sseCleanup = null;
-    }
+    streamingMessageId = null;
+    stopSseSubscription();
   }
 
-  $: if ($messages.length && autoScroll) {
+  $: if ($messages.length && autoScroll && viewMode === 'summary') {
     setTimeout(scrollToBottom, 10);
   }
 </script>
@@ -570,7 +719,7 @@
         class="tab"
         on:click={handleStatus}
         disabled={isActionLoading}
-        title="Show interpreted session status"
+        title="Show session status"
       >
         Status
       </button>
@@ -594,11 +743,11 @@
       <div class="view-mode-group">
         <button
           class="tab"
-          class:active={viewMode === 'interpreted'}
-          on:click={() => viewMode = 'interpreted'}
-          title="Show interpreted output"
+          class:active={viewMode === 'summary'}
+          on:click={() => viewMode = 'summary'}
+          title="Show summarized output"
         >
-          Interpreted
+          Summary
         </button>
         <button
           class="tab"
@@ -607,6 +756,14 @@
           title="Show raw terminal output"
         >
           Raw
+        </button>
+        <button
+          class="tab archive-btn"
+          on:click={archiveLogs}
+          title="Archive session logs to a zip file"
+          aria-label="Archive session logs"
+        >
+          <Archive size={14} />
         </button>
       </div>
 
@@ -634,48 +791,51 @@
       {/if}
     </div>
 
-    <div
-      bind:this={terminalEl}
-      on:scroll={handleScroll}
-      class="terminal-output"
-    >
-      {#each $messages as message}
-        {#if message.direction === 'sent'}
-          <div class="message sent">
-            <span class="message-sender">you</span>
-            <span class="line-content sent-text">{message.content}</span>
-          </div>
-        {:else if message.direction === 'system'}
-          <div class="message system">
-            <span class="message-sender">{extractSender(message.content)}</span>
-            <span class="line-content system-text">{@html renderContent(stripSender(message.content))}</span>
-          </div>
-        {:else if message.segmentType === 'prompt'}
-          <div class="message received">
-            <span class="seg-prompt-prefix">❯</span>
-            <span class="line-content seg-prompt-text">{@html renderContent(message.content.replace(/^[❯>]\s*/, ''))}</span>
-          </div>
-        {:else if message.segmentType === 'tool'}
-          <div class="message system">
-            <span class="seg-tool-prefix">⏺</span>
-            <span class="line-content seg-tool-text">{@html renderContent(message.content.replace(/^⏺\s*/, ''))}</span>
-          </div>
-        {:else}
-          <div class="message received">
-            <span class="line-content">{@html renderContent(message.content)}</span>
-          </div>
-        {/if}
-      {:else}
-        <div class="terminal-empty">
-          <span>No output yet — send a message or wait for session output…</span>
-        </div>
-      {/each}
-    </div>
+    {#if llmUnavailable && viewMode === 'summary'}
+      <div class="llm-banner">
+        <span>⚠ LLM summarization unavailable.</span>
+        <button on:click={() => { llmUnavailable = false; }}>Configure OpenRouter</button>
+        <button on:click={() => llmUnavailable = false}>Dismiss</button>
+      </div>
+    {/if}
 
-    {#if showScrollButton}
-      <button class="scroll-button" on:click={scrollToBottom} aria-label="Scroll to bottom">
-        <ArrowDown size={20} />
-      </button>
+    {#if viewMode === 'raw'}
+      <pre bind:this={rawPaneEl} class="raw-pane" class:raw-error={rawError}>{rawError || rawContent || 'Loading terminal…'}</pre>
+    {:else}
+      <div
+        bind:this={terminalEl}
+        on:scroll={handleScroll}
+        class="terminal-output"
+      >
+        {#each $messages as message}
+          {#if message.direction === 'sent'}
+            <div class="message sent">
+              <span class="message-sender">you</span>
+              <span class="line-content sent-text">{@html renderContent(message.content)}</span>
+            </div>
+          {:else if message.direction === 'system'}
+            <div class="message system">
+              <span class="message-sender">{extractSender(message.content)}</span>
+              <span class="line-content system-text">{@html renderContent(stripSender(message.content))}</span>
+            </div>
+          {:else}
+            <div class="message received">
+              <span class="message-sender">claude</span>
+              <span class="line-content">{@html renderContent(message.content)}</span>
+            </div>
+          {/if}
+        {:else}
+          <div class="terminal-empty">
+            <span>No messages yet — send a message to start the conversation…</span>
+          </div>
+        {/each}
+      </div>
+
+      {#if showScrollButton}
+        <button class="scroll-button" on:click={scrollToBottom} aria-label="Scroll to bottom">
+          <ArrowDown size={20} />
+        </button>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -699,6 +859,9 @@
     border-bottom: 1px solid var(--border);
     background-color: var(--bg-secondary);
     flex-shrink: 0;
+    flex-wrap: wrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .tab {
@@ -725,21 +888,6 @@
   .tab:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-
-  .iterm-tab {
-    display: flex;
-    align-items: center;
-    gap: 0.25rem;
-    margin-left: auto;
-    color: var(--accent);
-    border-color: var(--accent);
-  }
-
-  .iterm-tab:hover {
-    background: var(--accent);
-    color: white;
-    border-color: var(--accent);
   }
 
   .status-badge {
@@ -794,6 +942,9 @@
     .terminal-output {
       padding-bottom: calc(4rem + env(safe-area-inset-bottom));
     }
+    .raw-pane {
+      padding-bottom: calc(4rem + env(safe-area-inset-bottom));
+    }
   }
 
   .terminal-output::-webkit-scrollbar {
@@ -806,6 +957,43 @@
 
   .terminal-output::-webkit-scrollbar-thumb {
     background: var(--border);
+    border-radius: 3px;
+  }
+
+  /* Raw-mode terminal pane: shows live tmux capture verbatim */
+  .raw-pane {
+    flex: 1;
+    margin: 0;
+    padding: 0.75rem 1rem;
+    overflow-y: auto;
+    overflow-x: auto;
+    /* iOS Safari momentum scrolling — required for touch scroll on <pre> */
+    -webkit-overflow-scrolling: touch;
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.45;
+    white-space: pre;
+    /* Critical for flex children — without this the pane collapses to 0 height */
+    min-height: 0;
+  }
+
+  .raw-pane.raw-error {
+    color: #f38ba8;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .raw-pane::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .raw-pane::-webkit-scrollbar-track {
+    background: #0d1117;
+  }
+  .raw-pane::-webkit-scrollbar-thumb {
+    background: #30363d;
     border-radius: 3px;
   }
 
@@ -862,6 +1050,13 @@
     border-left: 1px solid var(--border);
   }
 
+  .archive-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.3rem 0.5rem;
+  }
+
   .tab.active {
     background-color: var(--accent);
     color: #fff;
@@ -878,45 +1073,6 @@
     color: var(--text-secondary);
     font-style: italic;
     padding: 0.5rem 0;
-  }
-
-  /* Segment: prompt line (cyan, ❯ prefix) */
-  .seg-prompt {
-    display: flex;
-    align-items: baseline;
-    gap: 0.4rem;
-    margin-top: 0.5rem;
-  }
-
-  .seg-prompt-prefix {
-    color: var(--color-prompt, #89dceb);
-    user-select: none;
-    flex-shrink: 0;
-  }
-
-  .seg-prompt-text {
-    color: var(--color-prompt, #89dceb);
-    font-weight: 500;
-  }
-
-  /* Segment: tool use line (indigo/accent, ⏺ prefix) */
-  .seg-tool {
-    display: flex;
-    align-items: baseline;
-    gap: 0.4rem;
-    margin-top: 0.25rem;
-    opacity: 0.85;
-  }
-
-  .seg-tool-prefix {
-    color: var(--accent, #6366f1);
-    user-select: none;
-    flex-shrink: 0;
-  }
-
-  .seg-tool-text {
-    color: var(--accent, #6366f1);
-    font-size: 0.8rem;
   }
 
   .empty-state {
@@ -999,6 +1155,23 @@
   :global(.chat-list li) {
     margin: 0.15rem 0;
   }
+  :global(.inline-code) {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
+    font-size: 0.85em;
+    padding: 0.1rem 0.3rem;
+    background: var(--bg-secondary, rgba(0,0,0,0.05));
+    border-radius: 0.2rem;
+  }
+  :global(.chat-h1),
+  :global(.chat-h2),
+  :global(.chat-h3) {
+    margin: 0.5rem 0 0.25rem 0;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+  :global(.chat-h1) { font-size: 1.15rem; }
+  :global(.chat-h2) { font-size: 1.05rem; }
+  :global(.chat-h3) { font-size: 0.95rem; }
   :global(.chat-selector) {
     margin: 0.25rem 0;
     font-family: monospace;
@@ -1034,5 +1207,27 @@
   .status-badge.idle-count {
     color: var(--text-secondary);
     background: var(--bg-surface);
+  }
+
+  .llm-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    background: #fef3c7;
+    color: #92400e;
+    font-size: 0.8rem;
+    border-bottom: 1px solid #fcd34d;
+    flex-wrap: wrap;
+  }
+
+  .llm-banner button {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid #d97706;
+    background: white;
+    color: #92400e;
+    cursor: pointer;
+    font-size: 0.75rem;
   }
 </style>

@@ -11,7 +11,7 @@ use std::time::Duration;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::sse::{Event, KeepAlive, Sse},
+    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
     Json,
 };
 use futures::stream::Stream;
@@ -41,6 +41,10 @@ pub struct SessionSummary {
     /// Human-readable project nickname, if a registered project matches this session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
+    /// Tri-state lifecycle label: "connected", "disconnected", or "registered".
+    /// Mirrors the GUI `SessionInfo.session_state` so both clients render the
+    /// same color/opacity states.
+    pub session_state: String,
 }
 
 /// Response for listing sessions.
@@ -205,7 +209,7 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
     // Load projects to resolve session nicknames. Uses a minimal ProjectStub that
     // only deserializes `name` and `path`, avoiding silent failures from the full
     // Project struct's complex nested fields. Failure is non-fatal.
-    #[derive(serde::Deserialize)]
+    #[derive(serde::Deserialize, Clone)]
     struct ProjectStub {
         name: String,
         path: String,
@@ -226,7 +230,24 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
             .collect()
     };
 
-    let summaries: Vec<SessionSummary> = sessions
+    // Per-session display-name overrides (user renames). Mirror of the GUI
+    // `read_session_overrides` helper so the web UI respects the same user
+    // choices. See crates/commander-gui/src/commands.rs for the rationale.
+    let overrides: HashMap<String, String> = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".ai-commander/session-overrides.json"))
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
+        .unwrap_or_default();
+
+    // Snapshot of actively-monitored sessions for the state label.
+    let connected_snapshot: std::collections::HashSet<String> =
+        state.connected_sessions.read().unwrap().clone();
+    let mut matched_project_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    let mut summaries: Vec<SessionSummary> = sessions
         .iter()
         .map(|s| {
             let path = std::process::Command::new("tmux")
@@ -237,23 +258,53 @@ pub async fn list_sessions(State(state): State<AppState>) -> Result<Json<Session
                     let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
                     if p.is_empty() { None } else { Some(p) }
                 });
-            let nickname = projects
-                .iter()
-                .find(|p| {
-                    p.name.replace([' ', '.', '/', ':'], "-") == s.name
-                        || p.path == s.name
-                        || path.as_deref() == Some(p.path.as_str())
-                })
-                .map(|p| p.name.clone());
+            let matched = projects.iter().find(|p| {
+                p.name.replace([' ', '.', '/', ':'], "-") == s.name
+                    || p.path == s.name
+                    || path.as_deref() == Some(p.path.as_str())
+            });
+            if let Some(p) = matched {
+                matched_project_names.insert(p.name.clone());
+            }
+            let project_nickname = matched.map(|p| p.name.clone());
+            // Overrides take highest priority — above project nickname.
+            let nickname = overrides.get(&s.name).cloned().or(project_nickname);
+            let session_state = if connected_snapshot.contains(&s.name) {
+                "connected"
+            } else {
+                "disconnected"
+            };
             SessionSummary {
                 is_commander: s.name.starts_with("cmd-"),
                 pane_count: s.panes.len(),
                 name: s.name.clone(),
                 path,
                 nickname,
+                session_state: session_state.to_string(),
             }
         })
         .collect();
+
+    // Append registered-only projects (no matching tmux session).
+    let existing_names: std::collections::HashSet<String> =
+        summaries.iter().map(|s| s.name.clone()).collect();
+    for proj in &projects {
+        if matched_project_names.contains(&proj.name) {
+            continue;
+        }
+        let sanitized = proj.name.replace([' ', '.', '/', ':'], "-");
+        if existing_names.contains(&sanitized) {
+            continue;
+        }
+        summaries.push(SessionSummary {
+            name: proj.name.clone(),
+            pane_count: 0,
+            is_commander: false,
+            path: Some(proj.path.clone()),
+            nickname: Some(proj.name.clone()),
+            session_state: "registered".to_string(),
+        });
+    }
 
     let total = summaries.len();
     Ok(Json(SessionListResponse {
@@ -295,6 +346,12 @@ pub async fn create_session(
     tmux.create_session_in_dir(&req.name, dir)
         .map_err(|e| ApiError::Internal(format!("failed to create session: {}", e)))?;
 
+    // Set the tmux session title so terminal emulators attaching later show
+    // the project nickname (or session name if no nickname exists yet).
+    // Cheap — just two `tmux set-option -q` calls.
+    let display = resolve_session_display_name(&req.name);
+    set_tmux_session_title(&req.name, &display);
+
     // If an adapter is specified, launch it in the session
     if let Some(ref id) = adapter_id {
         if let Some(adapter) = state.adapter_registry.get(id) {
@@ -326,12 +383,21 @@ pub async fn create_session(
     ))
 }
 
-/// POST /api/sessions/:name/connect — Connect to a session (returns pane info).
+/// POST /api/sessions/:name/connect — Mark a session as actively monitored and
+/// return the full log history for client hydration.
+///
+/// Why: Web clients need the same history-on-connect UX as the GUI so users see
+/// prior summaries immediately rather than an empty chat. Tracking
+/// `connected_sessions` also gates the background SSE poller.
+/// What: Inserts `name` into `connected_sessions` and returns
+/// `{"session", "history": [{text, ts, hash}, …]}`.
+/// Test: Seed two log entries, POST this endpoint, assert the response's
+/// `history` field has two items and `connected_sessions.contains(&name)`.
 pub async fn connect_session(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(_req): Json<ConnectSessionRequest>,
-) -> Result<Json<SessionOutputResponse>> {
+) -> Result<Json<serde_json::Value>> {
     let tmux = state
         .tmux
         .as_ref()
@@ -341,22 +407,288 @@ pub async fn connect_session(
         return Err(ApiError::NotFound(format!("session not found: {}", name)));
     }
 
-    // Capture current pane output to give the web client initial state
-    let output = tmux
-        .capture_output(&name, None, Some(100))
-        .map_err(|e| ApiError::Internal(format!("failed to capture output: {}", e)))?;
+    // Track as actively monitored so the background SSE poller picks it up.
+    state
+        .connected_sessions
+        .write()
+        .unwrap()
+        .insert(name.clone());
 
-    Ok(Json(SessionOutputResponse {
-        session: name,
-        output,
-        adapter: None,
-    }))
+    // Refresh the tmux session title — the nickname may have changed since
+    // creation, or the session may have been created outside AIC and be
+    // connecting for the first time. Keeps every attached terminal in sync.
+    let display = resolve_session_display_name(&name);
+    set_tmux_session_title(&name, &display);
+
+    // Full log history for client-side hydration.
+    let history: Vec<serde_json::Value> = commander_core::read_all_log_entries(&name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "text": e.text,
+                "ts": e.ts,
+                "hash": e.hash,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "session": name,
+        "history": history,
+    })))
 }
 
-/// POST /api/sessions/disconnect — Disconnect from a session (no-op for stateless HTTP).
-pub async fn disconnect_session() -> Json<SuccessResponse> {
+/// POST /api/sessions/disconnect — Stop monitoring a session.
+///
+/// Why: The state-machine refactor needs a way for web clients to drop sessions
+/// from `connected_sessions` so they stop showing up in the SSE broadcast.
+/// What: Reads `{"session": "..."}` from the body and removes it from the set.
+/// Missing body / missing session field is tolerated (returns success) so the
+/// endpoint stays idempotent.
+/// Test: Insert "a" into connected_sessions, POST `{"session":"a"}`, assert
+/// the set no longer contains "a".
+pub async fn disconnect_session(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<SuccessResponse> {
+    if let Some(name) = body.get("session").and_then(|v| v.as_str()) {
+        state.connected_sessions.write().unwrap().remove(name);
+    }
     Json(SuccessResponse {
         message: "disconnected".to_string(),
+    })
+}
+
+/// DELETE /api/sessions/:name/unregister — Unregister a session without killing tmux.
+///
+/// Why: Web UI parity with the Tauri `unregister_session` command. Users need to
+/// dissociate a running tmux session from its AI Commander project registration
+/// (removing the JSON file) without destroying the underlying tmux session. That
+/// distinction matters because `DELETE /api/sessions/:name` destroys tmux, and
+/// `DELETE /api/sessions/:name/registration` only matches by name — neither
+/// cleanly covers "forget this session exists, but keep the tmux process alive".
+/// What: Resolves the session's tmux pane path, finds the first project JSON in
+/// `~/.ai-commander/projects/` whose `name`, sanitised name, or `path` matches,
+/// and deletes it. Clears any dangling session-override entry. Returns 404 if no
+/// matching project JSON is found.
+/// Test: Seed a project JSON whose `path` matches a running tmux session's cwd;
+/// DELETE this endpoint; assert the JSON is gone and `tmux has-session -t <name>`
+/// still exits 0.
+pub async fn unregister_session(Path(name): Path<String>) -> Response {
+    // Look up the session's pane current path for path-based matching (mirrors
+    // the match rule in `list_sessions`).
+    let pane_path = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "-t", &name, "#{pane_current_path}"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if p.is_empty() { None } else { Some(p) }
+        });
+
+    let projects_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/projects");
+
+    let mut removed = false;
+    if let Ok(entries) = std::fs::read_dir(&projects_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |x| x == "json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let proj_name = val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let proj_path = val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let sanitized = proj_name.replace([' ', '.', '/', ':'], "-");
+                        let matches = proj_name == name
+                            || sanitized == name
+                            || proj_path == name
+                            || pane_path.as_deref() == Some(proj_path);
+                        if matches {
+                            let _ = std::fs::remove_file(&path);
+                            removed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Clear any dangling display-name override regardless of whether a JSON was
+    // removed — orphaned overrides are harmless but accumulate otherwise.
+    let overrides_path = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/session-overrides.json");
+    if let Ok(content) = std::fs::read_to_string(&overrides_path) {
+        if let Ok(mut map) = serde_json::from_str::<HashMap<String, String>>(&content) {
+            if map.remove(&name).is_some() {
+                if let Ok(updated) = serde_json::to_string_pretty(&map) {
+                    let _ = std::fs::write(&overrides_path, updated);
+                }
+            }
+        }
+    }
+
+    if !removed {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("No registered project found matching session '{}'", name)
+            })),
+        )
+            .into_response();
+    }
+
+    Json(SuccessResponse {
+        message: "session unregistered".to_string(),
+    })
+    .into_response()
+}
+
+/// Resolve the preferred display name for a session — mirror of the GUI helper.
+///
+/// Why: The REST create/connect paths need the same nickname-or-project-name
+/// label so terminal emulators attaching to sessions created via the web UI
+/// see the same window title as the Tauri app does.
+/// What: Returns, in priority order: session-overrides value, project JSON `name`
+/// whose `path` matches the session's pane cwd, else the raw session name.
+/// Test: Seed a project JSON with matching path; call with session name; assert
+/// the project `name` is returned.
+fn resolve_session_display_name(session_name: &str) -> String {
+    let overrides: HashMap<String, String> = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".ai-commander/session-overrides.json"))
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    if let Some(name) = overrides.get(session_name) {
+        if !name.trim().is_empty() {
+            return name.clone();
+        }
+    }
+
+    let pane_path = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "-t", session_name, "#{pane_current_path}"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if p.is_empty() { None } else { Some(p) }
+        });
+
+    let projects_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/projects");
+
+    if let Ok(entries) = std::fs::read_dir(&projects_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |x| x == "json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let proj_name = val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let proj_path = val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let sanitized = proj_name.replace([' ', '.', '/', ':'], "-");
+                        let matches = sanitized == session_name
+                            || proj_path == session_name
+                            || pane_path.as_deref() == Some(proj_path);
+                        if matches && !proj_name.is_empty() {
+                            return proj_name.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    session_name.to_string()
+}
+
+/// Set the terminal window/tab title emitted by tmux for a session.
+///
+/// Why: Web-API-created sessions should behave identically to GUI-created ones
+/// w.r.t. terminal titling — the label follows the tmux session across
+/// attach/detach so any terminal emulator that picks up OSC 0/2 shows the
+/// project nickname.
+/// What: Session-scoped `set-option set-titles on` plus a custom
+/// `set-titles-string`. `#` in the title is escaped to `##` because tmux
+/// treats `#` as a format escape.
+/// Test: Call with ("foo", "My Project"); assert
+/// `tmux show-options -t foo -v set-titles-string` returns "My Project".
+fn set_tmux_session_title(session: &str, title: &str) {
+    let _ = std::process::Command::new("tmux")
+        .args(["set-option", "-q", "-t", session, "set-titles", "on"])
+        .output();
+    let safe_title = title.replace('#', "##");
+    let _ = std::process::Command::new("tmux")
+        .args([
+            "set-option",
+            "-q",
+            "-t",
+            session,
+            "set-titles-string",
+            &safe_title,
+        ])
+        .output();
+}
+
+/// DELETE /api/sessions/:name/registration — Remove a registered project.
+///
+/// Why: Parity with the Tauri `delete_registration` command. Registered-only
+/// sessions (no tmux running) need a removal path that doesn't involve
+/// `destroy_session`.
+/// What: Deletes the first `~/.ai-commander/projects/*.json` whose `name` (or
+/// its sanitized tmux-safe form) matches, and removes any session-override
+/// entry for that key.
+/// Test: Seed a project JSON, DELETE this endpoint, assert the file is gone.
+pub async fn delete_registration(Path(name): Path<String>) -> Json<SuccessResponse> {
+    let projects_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/projects");
+
+    if let Ok(entries) = std::fs::read_dir(&projects_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |x| x == "json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let proj_name = val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let sanitized = proj_name.replace([' ', '.', '/', ':'], "-");
+                        if proj_name == name || sanitized == name {
+                            let _ = std::fs::remove_file(&path);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Clear any display-name override attached to this key.
+    let overrides_path = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/session-overrides.json");
+    if let Ok(content) = std::fs::read_to_string(&overrides_path) {
+        if let Ok(mut map) = serde_json::from_str::<HashMap<String, String>>(&content) {
+            if map.remove(&name).is_some() {
+                if let Ok(updated) = serde_json::to_string_pretty(&map) {
+                    let _ = std::fs::write(&overrides_path, updated);
+                }
+            }
+        }
+    }
+
+    Json(SuccessResponse {
+        message: "registration deleted".to_string(),
     })
 }
 
@@ -430,19 +762,19 @@ pub async fn interpret_session(
     let cleaned = commander_core::clean_response(&raw);
     let is_idle = commander_core::is_claude_ready(&cleaned);
 
+    // When the LLM interpreter is unavailable (Ollama down, OpenRouter
+    // misconfigured, etc.), return an empty `output` string rather than a
+    // hard-coded fallback message. The frontend treats empty strings as
+    // "nothing to render" and the web `llm_unavailable` banner provides a
+    // user-visible hint, so surfacing the fallback text here produced
+    // duplicate/confusing UX. See transport.ts `get_session_summary`.
     let output = tokio::task::spawn_blocking(move || {
         commander_core::interpret_screen_context(&cleaned, is_idle)
     })
     .await
     .ok()
     .flatten()
-    .unwrap_or_else(|| {
-        if is_idle {
-            "Session is idle, waiting for input. (Interpretation unavailable \u{2014} check Ollama status)".to_string()
-        } else {
-            "Session is actively processing. (Interpretation unavailable \u{2014} check Ollama status)".to_string()
-        }
-    });
+    .unwrap_or_default();
 
     // Look up adapter nickname for this session
     let adapter = state
@@ -487,13 +819,88 @@ pub async fn get_session_summary(
 }
 
 /// POST /api/sessions/:name/capture — Capture raw output from a session pane.
+///
+/// Why: Raw mode in the web/Tauri UI needs verbatim tmux pane output so users can see the
+/// actual terminal content. The earlier implementation delegated to `interpret_session`,
+/// which ran the LLM interpretation pipeline and returned summarised text — making Raw
+/// mode indistinguishable from Interpreted mode.
+/// What: Runs `tmux capture-pane` directly (default last 500 lines) and returns the
+/// unprocessed output as `{session, output}` JSON.
+/// Test: POST to `/api/sessions/<name>/capture` with `{}` body and assert the response
+/// `output` field contains the raw pane text (ANSI/control chars preserved) and differs
+/// from `/api/sessions/<name>/interpret`.
 pub async fn capture_session_output(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(req): Json<InterpretSessionRequest>,
 ) -> Result<Json<SessionOutputResponse>> {
-    // Reuse the interpret handler logic — both just capture pane output.
-    interpret_session(State(state), Path(name), Json(req)).await
+    let tmux = state
+        .tmux
+        .as_ref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("tmux not available".to_string()))?;
+
+    if !tmux.session_exists(&name) {
+        return Err(ApiError::NotFound(format!("session not found: {}", name)));
+    }
+
+    let output = tmux
+        .capture_output(&name, req.pane.as_deref(), Some(req.lines.unwrap_or(500)))
+        .map_err(|e| ApiError::Internal(format!("failed to capture output: {}", e)))?;
+
+    Ok(Json(SessionOutputResponse {
+        session: name,
+        output,
+        adapter: None,
+    }))
+}
+
+// ==================== Session log handlers ====================
+
+/// GET /api/sessions/:name/logs — List available log dates for a session.
+///
+/// Why: The GUI (and future web UI date picker) needs to discover which days
+/// have stored summaries before loading them. Enumerating the logs directory
+/// is O(n) in the number of days (tiny) and avoids a stat-per-date probe.
+/// What: Returns a JSON array of `"YYYY-MM-DD"` strings, sorted ascending.
+/// Test: `GET /api/sessions/s1/logs` after writing two jsonl files; assert
+/// the response body equals `["2026-01-01","2026-02-01"]`.
+pub async fn list_session_logs(
+    Path(name): Path<String>,
+) -> Json<Vec<String>> {
+    Json(commander_core::list_log_dates(&name))
+}
+
+/// GET /api/sessions/:name/logs/:date — Fetch entries for a given date.
+///
+/// Why: The GUI replays summaries when a session is opened so the user sees
+/// what happened before they arrived — this is the backing call.
+/// What: Returns a JSON array of `LogEntry`. Empty if the date has no file.
+/// Test: Seed a jsonl file with two entries; `GET
+/// /api/sessions/s1/logs/<today>` returns those two entries in order.
+pub async fn get_session_log(
+    Path((name, date)): Path<(String, String)>,
+) -> Json<Vec<commander_core::LogEntry>> {
+    Json(commander_core::read_log_entries(&name, &date))
+}
+
+/// POST /api/sessions/:name/logs/archive — Zip all logs for a session.
+///
+/// Why: Users want a single exportable artifact of a session's history
+/// (ticket write-ups, sharing, pre-delete snapshot) without copying files by
+/// hand. A server-side zip is faster than streaming every entry.
+/// What: Calls the `zip` CLI to pack `~/.ai-commander/logs/<session>/` into
+/// `~/.ai-commander/logs/archive/<session>-<timestamp>.zip`. Returns
+/// `{"path": "<absolute path>"}` on success.
+/// Test: Seed a log file, POST to this endpoint, assert the response has a
+/// `path` field and the file exists with non-zero size.
+pub async fn archive_session_logs(
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let path = commander_core::archive_session_logs(&name)
+        .map_err(|e| ApiError::Internal(format!("archive failed: {}", e)))?;
+    Ok(Json(serde_json::json!({
+        "path": path.to_string_lossy().to_string(),
+    })))
 }
 
 /// POST /api/sessions/rename — Rename a tmux session.
@@ -524,6 +931,66 @@ pub async fn rename_session(
     Ok(Json(SuccessResponse {
         message: "session renamed".to_string(),
     }))
+}
+
+/// POST /api/sessions/nickname — Set (or clear) a session's display nickname.
+///
+/// Why: The web UI needs parity with the Tauri `set_session_nickname` command.
+/// Nicknames live in the same `session-overrides.json` file used by
+/// `list_sessions` (see [read_session_overrides] in the GUI crate). Writing
+/// through this endpoint keeps both UIs in sync without having to cross-call.
+/// What: Accepts `{"session_name": "...", "nickname": "..."}`. An empty (or
+/// whitespace-only) nickname removes the override. Returns 204 No Content on
+/// success, 400 if `session_name` is missing.
+/// Test: POST with a non-empty nickname and assert the overrides file on
+/// disk contains the mapping; POST again with `"nickname": ""` and assert the
+/// mapping is removed.
+pub async fn set_session_nickname(
+    State(_state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let session_name = body
+        .get("session_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let nickname = body
+        .get("nickname")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if session_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "session_name required").into_response();
+    }
+
+    // Read/write the same override file used by the Tauri commands so web
+    // and desktop UIs converge on a single source of truth.
+    let overrides_path = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/session-overrides.json");
+
+    let mut map: HashMap<String, String> = std::fs::read_to_string(&overrides_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    if nickname.trim().is_empty() {
+        map.remove(&session_name);
+    } else {
+        map.insert(session_name, nickname.trim().to_string());
+    }
+
+    if let Some(parent) = overrides_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        &overrides_path,
+        serde_json::to_string_pretty(&map).unwrap_or_default(),
+    );
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ==================== Adapter handlers ====================
@@ -610,13 +1077,19 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 }
 
 /// Default directories to scan for projects (relative to home dir).
+/// Non-existent directories are filtered later via `.is_dir()`, so listing
+/// many candidates here is cheap.
 const DEFAULT_SCAN_DIRECTORIES: &[&str] = &[
     "Projects",
+    "Developer",
+    "Code",
+    "code",
     "src",
     "projects",
-    "code",
     "work",
     "dev",
+    "workspace",
+    "Writing",
     "Duetto/repos",
 ];
 
@@ -1158,6 +1631,77 @@ pub async fn session_event_stream(
     )
 }
 
+/// Spawns a background poller keyed on `connected_sessions` (set by
+/// `connect_session`/`disconnect_session`) rather than the full tmux list.
+///
+/// Why: The state-machine refactor treats a session as "connected" only after
+/// a client explicitly opts in. Polling every tmux session would (a) waste LLM
+/// calls on background sessions nobody is watching and (b) blast SSE events
+/// for sessions no subscriber cares about. This poller iterates only the set
+/// of actively-connected names and broadcasts summaries via the existing
+/// `event_tx` channel.
+/// What: Every 5s, snapshots `connected_sessions`, captures ~500 lines from
+/// each, and spawns a blocking task that runs `interpret_screen_context` and
+/// broadcasts a `SessionEvent` with `event_type="update"` when content is
+/// non-empty.
+/// Test: Insert a name into `connected_sessions`, wait ~6s, assert at least
+/// one `SessionEvent` was broadcast to a subscribed channel.
+pub fn spawn_connected_sessions_poller(app_state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let connected: Vec<String> = app_state
+                .connected_sessions
+                .read()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect();
+
+            for session_name in connected {
+                let Some(tmux) = &app_state.tmux else { continue };
+                let output = match tmux.capture_output(&session_name, None, Some(500)) {
+                    Ok(o) if !o.is_empty() => o,
+                    _ => continue,
+                };
+
+                let session_clone = session_name.clone();
+                let tx_clone = app_state.event_tx.clone();
+                let adapter_map = app_state.session_adapters.read().await.clone();
+                let adapter = adapter_map
+                    .get(&session_name)
+                    .cloned()
+                    .unwrap_or_else(|| "claude".to_string());
+
+                tokio::task::spawn_blocking(move || {
+                    let cleaned = commander_core::clean_response(&output);
+                    let is_idle = commander_core::is_claude_ready(&cleaned);
+                    if let Some(summary) =
+                        commander_core::interpret_screen_context(&cleaned, is_idle)
+                    {
+                        if summary.trim().is_empty() {
+                            return;
+                        }
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let _ = tx_clone.send(SessionEvent {
+                            session_name: session_clone,
+                            event_type: "update".to_string(),
+                            content: summary,
+                            timestamp: ts,
+                            adapter,
+                            is_update: true,
+                        });
+                    }
+                });
+            }
+        }
+    });
+}
+
 /// Spawns a background poller that captures tmux pane output, interprets
 /// changes via `interpret_screen_context`, and broadcasts `SessionEvent`s.
 ///
@@ -1265,6 +1809,22 @@ pub fn spawn_session_poller(
                                         adapter,
                                         is_update: has_prev,
                                     });
+                                    // Persist to the session's summary log.
+                                    // Hash the cleaned content (not the
+                                    // interpretation) so dedup tracks the
+                                    // underlying screen state.
+                                    let content_hash = format!("{:x}", {
+                                        use std::collections::hash_map::DefaultHasher;
+                                        use std::hash::{Hash, Hasher};
+                                        let mut h = DefaultHasher::new();
+                                        cleaned.hash(&mut h);
+                                        h.finish()
+                                    });
+                                    let _ = commander_core::append_log_entry(
+                                        &session,
+                                        &interpretation,
+                                        &content_hash,
+                                    );
                                     interps
                                         .lock()
                                         .unwrap()
@@ -1351,9 +1911,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_disconnect_session() {
-        // disconnect is a no-op — always succeeds
-        let response = disconnect_session().await;
+        // disconnect with a body removes the named session from the set.
+        let state = make_test_state();
+        // Seed a connected session so we can verify removal.
+        state
+            .connected_sessions
+            .write()
+            .unwrap()
+            .insert("foo".to_string());
+        let body = serde_json::json!({ "session": "foo" });
+        let response = disconnect_session(State(state.clone()), Json(body)).await;
         assert_eq!(response.message, "disconnected");
+        assert!(!state.connected_sessions.read().unwrap().contains("foo"));
     }
 
     #[tokio::test]

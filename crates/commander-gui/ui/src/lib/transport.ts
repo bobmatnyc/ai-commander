@@ -3,7 +3,13 @@
 import { get } from 'svelte/store';
 import { currentSession } from './stores/app';
 
-const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+// Tauri v2 exposes `window.__TAURI_INTERNALS__`; v1 used `window.__TAURI__`.
+// We check both so the same transport works whichever ships in the desktop bundle.
+// Without this, the desktop app falls through to REST and tries to hit relative
+// `/api/...` URLs against the `tauri://` origin, which silently fails — leaving
+// modals (e.g. CreateSessionModal) with empty data and no error surfaced.
+const isTauri = typeof window !== 'undefined' &&
+  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
 async function tauriInvoke(command: string, args?: Record<string, unknown>): Promise<unknown> {
   const { invoke } = await import('@tauri-apps/api/core');
@@ -22,14 +28,20 @@ const API_MAP: Record<string, { method: string; path: string | ((args: Record<st
   list_adapters: { method: 'GET', path: '/api/adapters' },
   interpret_session: { method: 'POST', path: (args) => `/api/sessions/${args.name}/interpret` },
   get_session_summary: { method: 'POST', path: (args) => `/api/sessions/${args.name}/summary` },
-  capture_session_output: { method: 'POST', path: (args) => `/api/sessions/${args.name}/capture` },
+  capture_session_output: { method: 'POST', path: (args) => `/api/sessions/${encodeURIComponent(args.name as string)}/capture` },
   get_bot_status: { method: 'GET', path: '/api/bot/status' },
   list_processes: { method: 'GET', path: '/api/processes' },
   kill_stale_processes: { method: 'POST', path: '/api/processes/clean' },
   rename_session: { method: 'POST', path: '/api/sessions/rename' },
+  set_session_nickname: { method: 'POST', path: '/api/sessions/nickname' },
   get_config: { method: 'GET', path: '/api/config' },
   save_config: { method: 'POST', path: '/api/config' },
   get_github_stats: { method: 'GET', path: '/api/github-stats' },
+  list_session_log_dates: { method: 'GET', path: (args) => `/api/sessions/${args.name}/logs` },
+  get_session_log: { method: 'GET', path: (args) => `/api/sessions/${args.name}/logs/${args.date}` },
+  archive_session_logs: { method: 'POST', path: (args) => `/api/sessions/${args.name}/logs/archive` },
+  delete_registration: { method: 'DELETE', path: (args) => `/api/sessions/${encodeURIComponent(args.name as string)}/registration` },
+  unregister_session: { method: 'DELETE', path: (args) => `/api/sessions/${encodeURIComponent((args.session_name ?? args.name) as string)}/unregister` },
 };
 
 // Request transformers — remap frontend args to REST API format
@@ -42,6 +54,11 @@ const REQUEST_TRANSFORMS: Record<string, (args: Record<string, unknown>) => Reco
     old_name: args.oldName || args.old_name || '',
     new_name: args.newName || args.new_name || '',
   }),
+  set_session_nickname: (args) => ({
+    session_name: args.session_name || args.sessionName || '',
+    nickname: args.nickname ?? '',
+  }),
+  disconnect_session: (args) => ({ session: args.name ?? args.session ?? '' }),
 };
 
 async function fetchApi(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -88,13 +105,18 @@ async function fetchApi(command: string, args?: Record<string, unknown>): Promis
 // Response transformers — normalize REST API responses to match Tauri command format
 const RESPONSE_TRANSFORMS: Record<string, (data: any) => any> = {
   list_sessions: (data) => {
-    // REST returns {sessions: [{name, pane_count, ...}]}
-    // Tauri returns [{name, created_at, is_connected}]
+    // REST returns {sessions: [{name, pane_count, session_state, ...}]}
+    // Tauri returns [{name, created_at, is_connected, session_state}]
+    // Preserve session_state / nickname / path so the UI can render the
+    // tri-state (connected / disconnected / registered) visuals in both modes.
     if (data?.sessions) {
       return data.sessions.map((s: any) => ({
         name: s.name,
         created_at: s.created_at || new Date().toISOString(),
-        is_connected: false,
+        is_connected: s.session_state === 'connected',
+        path: s.path,
+        nickname: s.nickname,
+        session_state: s.session_state || 'disconnected',
       }));
     }
     return data;
@@ -111,6 +133,19 @@ const RESPONSE_TRANSFORMS: Record<string, (data: any) => any> = {
   },
   interpret_session: (data: Record<string, unknown>) => {
     // REST returns {session, output}; frontend expects the output string
+    if (typeof data === 'object' && data?.output) return data.output;
+    return data;
+  },
+  capture_session_output: (data: any) => {
+    // REST returns {session, output, adapter}; ChatView expects a plain string for
+    // Raw mode. Without this transform, `rawContent.replace(...)` fails on the
+    // object and Raw mode silently shows nothing (or falls through to index.html
+    // if the route is wrong). See ChatView.refreshRawContent().
+    if (typeof data === 'object' && data?.output) return data.output;
+    return typeof data === 'string' ? data : '';
+  },
+  get_session_summary: (data: any) => {
+    // REST returns {session, output}; callers that want the string get it here.
     if (typeof data === 'object' && data?.output) return data.output;
     return data;
   },

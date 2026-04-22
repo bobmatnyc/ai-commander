@@ -57,12 +57,19 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/sessions/disconnect", post(handlers::web::disconnect_session))
         .route("/api/sessions/message", post(handlers::web::send_message))
         .route("/api/sessions/rename", post(handlers::web::rename_session))
+        .route("/api/sessions/nickname", post(handlers::web::set_session_nickname))
         .route("/api/sessions/{name}/connect", post(handlers::web::connect_session))
+        .route("/api/sessions/{name}/registration", delete(handlers::web::delete_registration))
+        .route("/api/sessions/{name}/unregister", delete(handlers::web::unregister_session))
         .route("/api/sessions/{name}", delete(handlers::web::stop_session))
         .route("/api/sessions/{name}/interpret", post(handlers::web::interpret_session))
         .route("/api/sessions/{name}/summary", post(handlers::web::get_session_summary))
         .route("/api/sessions/{name}/capture", post(handlers::web::capture_session_output))
         .route("/api/sessions/{name}/events", get(handlers::web::session_event_stream))
+        // Session summary logs
+        .route("/api/sessions/{name}/logs", get(handlers::web::list_session_logs))
+        .route("/api/sessions/{name}/logs/archive", post(handlers::web::archive_session_logs))
+        .route("/api/sessions/{name}/logs/{date}", get(handlers::web::get_session_log))
         // Web UI — Process monitoring
         .route("/api/processes", get(handlers::web::list_processes))
         .route("/api/processes/clean", post(handlers::web::kill_stale_processes))
@@ -109,6 +116,11 @@ pub async fn serve(config: ApiConfig, state: AppState) -> Result<(), std::io::Er
 
     // Start the SSE session poller that broadcasts interpreted output.
     handlers::web::spawn_session_poller(state.event_tx.clone(), state.session_adapters.clone());
+
+    // Start the connected-sessions poller. Only sessions that a web client has
+    // explicitly connected to (via POST /api/sessions/:name/connect) will be
+    // polled and broadcast.
+    handlers::web::spawn_connected_sessions_poller(state.clone());
 
     // Start the GitHub stats poller (hourly).
     handlers::web::spawn_github_stats_poller(state.github_stats.clone());

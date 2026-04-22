@@ -98,6 +98,8 @@ fn main() {
             commands::list_sessions,
             commands::connect_session,
             commands::disconnect_session,
+            commands::delete_registration,
+            commands::unregister_session,
             commands::stop_session,
             commands::send_message,
             commands::send_message_streaming,
@@ -114,11 +116,16 @@ fn main() {
             commands::open_in_iterm,
             commands::capture_session_output,
             commands::rename_session,
+            commands::set_session_nickname,
             commands::open_in_terminal_app,
             commands::list_processes,
             commands::kill_stale_processes,
             commands::interpret_session,
             commands::get_session_summary,
+            commands::get_github_stats,
+            commands::list_session_log_dates,
+            commands::get_session_log,
+            commands::archive_session_logs,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

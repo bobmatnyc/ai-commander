@@ -41,10 +41,19 @@
   });
 
   async function loadDirectories() {
+    // Why: A failure here must never block close/cancel — the user can still
+    // type a path manually or just dismiss the modal. We swallow the error into
+    // local state instead of letting it propagate as an unhandled rejection.
+    // What: Calls the Tauri/REST command and assigns the result; on failure
+    // sets `directories = []` + an inline error message.
+    // Test: Stub `invoke` to throw; assert `directories === []`, `error` is set,
+    // and the modal can still be closed via ESC, Cancel, or overlay click.
     try {
-      directories = await invoke('list_project_directories');
+      const result = await invoke('list_project_directories');
+      directories = Array.isArray(result) ? result : [];
       error = '';
     } catch (err) {
+      directories = [];
       error = `Failed to load directories: ${err}`;
     }
   }
@@ -79,12 +88,20 @@
   }
 
   function close() {
+    // Why: Two-channel close — `bind:show` is the primary path, but if the
+    // parent isn't using `bind:` (or the binding is somehow desynced), the
+    // dispatched `close` event lets it react explicitly. Belt and braces so
+    // the modal cannot get stuck open.
+    // What: Resets local form state, sets `show = false`, and emits `close`.
+    // Test: Mount with `bind:show`, call close(), assert `show` is false AND a
+    // `close` event listener was invoked.
     show = false;
     sessionName = '';
     selectedAdapter = 'mpm';
     selectedDirectory = null;
     error = '';
     filterText = '';
+    dispatch('close');
   }
 
   function handleOverlayClick(event: MouseEvent) {
@@ -94,9 +111,11 @@
   }
 </script>
 
+<svelte:window on:keydown={(e) => { if (show && e.key === 'Escape') close(); }} />
+
 {#if show}
-  <div class="modal-overlay" on:click={handleOverlayClick} on:keydown={(e) => e.key === 'Escape' && close()} role="presentation">
-    <div class="modal-content" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-overlay" on:click={handleOverlayClick} role="presentation">
+    <div class="modal-content" on:click|stopPropagation role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div class="modal-header">
         <h2 id="modal-title">Create New Session</h2>
         <button class="close-btn" on:click={close}>
@@ -177,7 +196,7 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" on:click={close} disabled={loading}>
+        <button class="btn btn-secondary" on:click={close}>
           Cancel
         </button>
         <button

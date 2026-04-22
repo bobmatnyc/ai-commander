@@ -1,6 +1,6 @@
 //! Application state shared across handlers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -73,6 +73,11 @@ pub struct AppState {
     pub session_adapters: Arc<RwLock<HashMap<String, String>>>,
     /// Cached GitHub stats per project directory name.
     pub github_stats: Arc<RwLock<HashMap<String, GitHubStats>>>,
+    /// Sessions explicitly connected by a web client (actively polled and
+    /// broadcast over SSE). Mirrors the GUI's `connected_sessions` set — a
+    /// session is "connected" only after the client POSTs `/api/sessions/:name
+    /// /connect`, regardless of whether the tmux session exists.
+    pub connected_sessions: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 impl AppState {
@@ -113,6 +118,7 @@ impl AppState {
             event_tx,
             session_adapters: Arc::new(RwLock::new(HashMap::new())),
             github_stats: Arc::new(RwLock::new(HashMap::new())),
+            connected_sessions: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
