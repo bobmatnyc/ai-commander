@@ -647,7 +647,39 @@ fn is_copied_from_input(summary: &str, input: &str) -> bool {
 /// `Bash(ls)` and one content line → assert result contains only the content
 /// line. Pass only-noise input → assert `None`.
 fn prepare_for_llm(raw: &str) -> Option<String> {
-    let filtered: Vec<&str> = raw.lines().filter(|line| !is_llm_noise(line)).collect();
+    let filtered: Vec<String> = raw.lines()
+        .filter_map(|line| {
+            let t = line.trim();
+            // Strip tool-call/result prefix but keep content.
+            // ⏺ marks a tool call (e.g. "⏺ Bash(npm test)"), ⎿ marks a result
+            // (e.g. "⎿ Tests passed: 5, failed: 0"). The result lines are valuable
+            // signal for the LLM; the call-signature lines are noise.
+            if t.starts_with('⏺') || t.starts_with('⎿') {
+                let content = t.trim_start_matches('⏺')
+                    .trim_start_matches('⎿')
+                    .trim();
+                if content.is_empty() {
+                    return None;
+                }
+                // Skip bare tool-call signatures — the call name adds no information.
+                // Keep everything else (results, error messages, output).
+                if content.starts_with("Bash(")
+                    || content.starts_with("Python(")
+                    || content.starts_with("Read(")
+                    || content.starts_with("Write(")
+                    || content.starts_with("Edit(")
+                {
+                    return None;
+                }
+                return Some(content.to_string());
+            }
+            // Standard noise filter for all other lines.
+            if is_llm_noise(line) {
+                return None;
+            }
+            Some(line.to_string())
+        })
+        .collect();
     if filtered.is_empty() {
         return None;
     }
@@ -673,12 +705,6 @@ fn is_llm_noise(line: &str) -> bool {
     if t.is_empty() {
         return true;
     }
-    // Claude Code tool call/result markers. These are "⏺ ToolName(...)" and
-    // "⎿ result..." — pure terminal chrome that the LLM latches onto if we
-    // don't strip them here.
-    if t.starts_with('⏺') || t.starts_with('⎿') {
-        return true;
-    }
     // Status bar with model info
     if t.contains('│')
         && (t.contains("Sonnet")
@@ -689,8 +715,10 @@ fn is_llm_noise(line: &str) -> bool {
     {
         return true;
     }
-    // Spinner / progress / mode glyphs at line start
-    if t.starts_with('✢') || t.starts_with('⎿') || t.starts_with('⏵') || t.starts_with('◆') {
+    // Spinner / progress / mode glyphs at line start.
+    // Note: ⎿ is intentionally excluded here — lines starting with ⎿ are
+    // tool-result lines handled as content transforms in prepare_for_llm.
+    if t.starts_with('✢') || t.starts_with('⏵') || t.starts_with('◆') {
         return true;
     }
     // Box-drawing separator lines (mostly ─)
@@ -716,7 +744,9 @@ fn is_llm_noise(line: &str) -> bool {
     if t.starts_with("Done (") && t.contains("tool use") {
         return true;
     }
-    // Tool-call display prefixes
+    // Bare tool-call display lines (without a leading glyph prefix).
+    // Lines with ⏺/⎿ prefix are transformed in prepare_for_llm; these are
+    // the rare cases where the bare call text appears without a prefix.
     if t.starts_with("Bash(")
         || t.starts_with("Python(")
         || t.starts_with("Read(")
@@ -779,6 +809,12 @@ pub fn is_actively_working(content: &str) -> bool {
 fn is_startup_sequence(content: &str) -> bool {
     let lower = content.to_lowercase();
     let line_count = content.lines().count();
+
+    // If content has tool-call or tool-result markers, it's an active session —
+    // definitely not a startup banner regardless of line count or banner text.
+    if content.contains('⏺') || content.contains('⎿') {
+        return false;
+    }
 
     // Must be short (startup banners are brief)
     if line_count > 25 { return false; }
