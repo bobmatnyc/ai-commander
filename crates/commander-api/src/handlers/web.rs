@@ -459,6 +459,84 @@ pub async fn connect_session(
     })))
 }
 
+/// Try to auto-create a tmux session for a registered project matching `input`.
+///
+/// Why: When a web client POSTs `/api/sessions/<name>/connect` with a name that
+/// only matches a registered-only project (project JSON exists, no live tmux
+/// session), the old flow returned 404. Users expect a click on a registered
+/// row to *start* the session — we know its working directory from the JSON,
+/// so starting tmux automatically is strictly more useful than failing.
+/// Mirror of the Tauri helper in `commander-gui/src/commands.rs` so both UIs
+/// behave identically.
+/// What: Searches `~/.ai-commander/projects/*.json` for a project whose `name`
+/// or sanitized name equals `input`. If found, runs `tmux new-session -d -s
+/// <sanitized> -c <path>` and returns the sanitized session name. Returns
+/// `None` if no project matched or if tmux creation failed (name collision,
+/// tmux missing, etc.) so the caller can fall back to the normal 404 path.
+/// Test: Seed a project JSON with name "dci" and path "/tmp/dci"; call with
+/// "dci"; assert a tmux session "dci" exists and the helper returned
+/// `Some("dci")`. Call again with "nonexistent"; assert `None`.
+fn try_auto_create_registered_session(input: &str) -> Option<String> {
+    // Same sanitization as `list_sessions` and `delete_registration`.
+    let sanitize = |s: &str| -> String { s.replace([' ', '.', '/', ':'], "-") };
+
+    let projects_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/projects");
+
+    let mut match_info: Option<(String, String)> = None; // (project_name, project_path)
+    if let Ok(entries) = std::fs::read_dir(&projects_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |x| x == "json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let proj_name = val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let proj_path = val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let sanitized = sanitize(proj_name);
+                        if (proj_name == input || sanitized == input) && !proj_path.is_empty() {
+                            match_info = Some((proj_name.to_string(), proj_path.to_string()));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let (proj_name, proj_path) = match_info?;
+    let session_name = sanitize(&proj_name);
+
+    let output = std::process::Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            &session_name,
+            "-c",
+            &proj_path,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        warn!(
+            session = %session_name,
+            path = %proj_path,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "auto-create tmux session failed"
+        );
+        return None;
+    }
+
+    tracing::info!(
+        session = %session_name,
+        path = %proj_path,
+        "Auto-created tmux session for registered project"
+    );
+    Some(session_name)
+}
+
 /// Resolve a user-supplied session identifier to a live tmux session name.
 ///
 /// Why: Mirror of the Tauri `resolve_to_tmux_session` helper in
@@ -469,12 +547,14 @@ pub async fn connect_session(
 /// from commander-core) avoids a new cross-crate public surface for what is
 /// ultimately a handler-layer concern.
 /// What: Tries exact → case-insensitive → bracket-strip → override-value →
-/// project-path matching, in that order. On no match, returns an error
-/// message listing the available tmux sessions so the failure is diagnosable.
+/// project-path matching, in that order. If nothing matches but `input`
+/// identifies a registered project, auto-creates a tmux session at the
+/// project's stored path. Only returns an error when no fuzzy match succeeded
+/// AND no registered project could be started.
 /// Test: Given live_sessions=["cto [cto3]", "hyperdev"] and an override
 /// "cto [cto3]" -> "cto", assert that resolve("cto") returns "cto [cto3]".
-/// Given the same live_sessions and no matching project JSON, assert that
-/// resolve("izzie") returns an Err whose message contains "available:".
+/// Given live_sessions=[] and a project JSON named "dci", assert that
+/// resolve("dci") auto-creates a tmux session and returns Ok("dci").
 fn resolve_to_tmux_session(input: &str, live_sessions: &[String]) -> std::result::Result<String, String> {
     // 1. Exact match — fast path for the common case.
     if live_sessions.iter().any(|s| s == input) {
@@ -564,6 +644,13 @@ fn resolve_to_tmux_session(input: &str, live_sessions: &[String]) -> std::result
                 return Ok(live.clone());
             }
         }
+    }
+
+    // 6. No live tmux session matched. If the input identifies a registered
+    //    project, auto-create a tmux session at its stored path so the connect
+    //    call "just works" rather than 404-ing with a list of unrelated names.
+    if let Some(created) = try_auto_create_registered_session(input) {
+        return Ok(created);
     }
 
     // No match — return a helpful error listing what IS available so the user

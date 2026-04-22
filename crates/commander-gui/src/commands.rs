@@ -295,6 +295,91 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
 /// Test: Seed two log entries under a fake HOME, invoke this command, assert
 /// `connected_sessions.contains(&name)` and the returned `history` array has
 /// two items with matching `text` values.
+/// Try to auto-create a tmux session for a registered project matching `input`.
+///
+/// Why: When a user clicks a "registered-only" project (no live tmux session),
+/// the old flow returned a bare "session not found" error. Users expect the
+/// click to *start* the session — we already know the project's working
+/// directory from the stored JSON, so creating it automatically is strictly
+/// more useful than failing. Matches the same lookup rule used elsewhere
+/// (`name` OR sanitized `name`). Keeping this separate from
+/// `resolve_to_tmux_session` keeps the resolver a pure lookup; this helper
+/// owns the side-effect.
+/// What: Searches `~/.ai-commander/projects/*.json` for a project whose `name`
+/// or sanitized name equals `input`. If found, shells out to `tmux new-session
+/// -d -s <sanitized> -c <path>` and returns the sanitized name. If no project
+/// matches, returns `None`. If tmux creation fails (name collision, tmux not
+/// installed, etc.), returns `None` so the caller falls back to the normal
+/// not-found error.
+/// Test: Seed a project JSON with name "dci" and path "/tmp/dci"; call with
+/// "dci"; assert a tmux session named "dci" exists afterwards and the helper
+/// returned `Some("dci")`. Call again with "nonexistent"; assert `None`.
+fn try_auto_create_registered_session(input: &str) -> Option<String> {
+    // Same sanitization as `list_sessions` and `delete_registration`.
+    let sanitize = |s: &str| -> String { s.replace([' ', '.', '/', ':'], "-") };
+
+    // Find a project JSON whose name (or sanitized name) matches `input`.
+    let projects_dir = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".ai-commander/projects");
+
+    let mut match_info: Option<(String, String)> = None; // (project_name, project_path)
+    if let Ok(entries) = std::fs::read_dir(&projects_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |x| x == "json") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        let proj_name = val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let proj_path = val.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let sanitized = sanitize(proj_name);
+                        if (proj_name == input || sanitized == input) && !proj_path.is_empty() {
+                            match_info = Some((proj_name.to_string(), proj_path.to_string()));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let (proj_name, proj_path) = match_info?;
+    let session_name = sanitize(&proj_name);
+
+    // `tmux new-session -d -s <name> -c <path>`: detached so we don't attach
+    // from a background thread. If the name already exists tmux exits with a
+    // "duplicate session" error — we treat that as failure and bail so the
+    // caller can surface the normal not-found error (the exact session IS
+    // there, but we apparently didn't find it in live_sessions due to a race).
+    let output = std::process::Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            &session_name,
+            "-c",
+            &proj_path,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "[GUI] Auto-create failed for '{}' at '{}': {}",
+            session_name,
+            proj_path,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return None;
+    }
+
+    eprintln!(
+        "[GUI] Auto-created tmux session '{}' for project at {}",
+        session_name, proj_path
+    );
+    Some(session_name)
+}
+
 /// Resolve a user-supplied session identifier to a live tmux session name.
 ///
 /// Why: The UI shows a mix of raw tmux names, user-chosen nicknames (via
@@ -312,12 +397,15 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
 ///   4. Override map: any tmux session whose override value equals `input`.
 ///   5. Project JSON: if a project's `name` or sanitized name equals `input`,
 ///      find a tmux session whose pane cwd matches that project's `path`.
-/// Returns `Ok(tmux_name)` on a match, or `Err(message)` with a friendly list
-/// of available sessions when nothing matched.
+///   6. Registered-project auto-create: if `input` matches a project JSON but
+///      no tmux session exists, create one at the project's stored path.
+/// Returns `Ok(tmux_name)` on a match (including after auto-create), or
+/// `Err(message)` with a friendly list of available sessions when nothing
+/// matched and no registered project could be auto-started.
 /// Test: With tmux sessions ["cto [cto3]", "hyperdev"], call with "cto" (an
-/// override target) and assert it returns "cto [cto3]". Call with "izzie" (no
-/// matching tmux session, but a project JSON with that name) and assert the
-/// error message enumerates the available session names.
+/// override target) and assert it returns "cto [cto3]". Call with "dci" (no
+/// matching tmux session, but a project JSON with that name) and assert a
+/// new tmux session "dci" exists and the helper returned Ok("dci").
 fn resolve_to_tmux_session(input: &str, live_sessions: &[String]) -> Result<String, String> {
     // 1. Exact match — fast path for the common case.
     if live_sessions.iter().any(|s| s == input) {
@@ -401,6 +489,14 @@ fn resolve_to_tmux_session(input: &str, live_sessions: &[String]) -> Result<Stri
                 return Ok(live.clone());
             }
         }
+    }
+
+    // 6. No live tmux session matched. If the input identifies a registered
+    //    project, auto-create a tmux session at its stored path and return the
+    //    new session name. This turns a click on a "registered-only" row into
+    //    a one-step connect rather than a confusing "not found" error.
+    if let Some(created) = try_auto_create_registered_session(input) {
+        return Ok(created);
     }
 
     // No match — return a helpful error listing what IS available so the user
