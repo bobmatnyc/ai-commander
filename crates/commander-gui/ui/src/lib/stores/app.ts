@@ -69,6 +69,73 @@ function extractMessageBody(content: string): string {
   return idx >= 0 ? content.substring(idx + 2) : content;
 }
 
+const CONSOLIDATION_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Why: System/history messages that arrive within 5 minutes of each other
+ * should be grouped into a single bullet-block rather than cluttering the
+ * chat with many small system bubbles. This covers both rapid-succession
+ * messages and messages that arrive a few minutes apart.
+ * What: Scans back through the message list for the most recent system
+ * message from the same sender that is within the 5-minute window. If found,
+ * appends the new body as a bullet line. If the existing block does not yet
+ * use bullet format it is normalised first.
+ * Test: Add two 'system' messages 2 minutes apart with the same sender prefix
+ * — assert only one Message exists in the store and its content contains two
+ * bullet lines. Add a third message 6 minutes later — assert a second Message
+ * is created.
+ *
+ * @param msgs   Mutable array of messages for the session (will be mutated in-place).
+ * @param message The incoming system message to consolidate or append.
+ * @returns true if the message was consolidated into an existing block; false
+ *          if a new message should be pushed.
+ */
+function tryConsolidateSystemMessage(msgs: Message[], message: Message): boolean {
+  const newSender = extractSenderPrefix(message.content);
+  if (!newSender) return false;
+
+  const now = message.timestamp instanceof Date ? message.timestamp.getTime() : Date.now();
+  const newBody = extractMessageBody(message.content).trim();
+
+  // Walk backwards to find the most recent system message from the same sender
+  // within the consolidation window.
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const candidate = msgs[i];
+    if (candidate.direction !== 'system') continue;
+
+    const candidateSender = extractSenderPrefix(candidate.content);
+    if (candidateSender !== newSender) continue;
+
+    const candidateTime = candidate.timestamp instanceof Date
+      ? candidate.timestamp.getTime()
+      : 0;
+    if (now - candidateTime > CONSOLIDATION_WINDOW_MS) break; // too old
+
+    // Found a match within the window. Normalise the existing block to bullet
+    // format if it isn't already, then append the new body.
+    const existingBody = extractMessageBody(candidate.content);
+    const existingLines = existingBody
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 0);
+
+    // Dedup: skip if exact body already present in the block.
+    const plainLines = existingLines.map(l => l.replace(/^• /, ''));
+    if (plainLines.includes(newBody)) return true;
+
+    // Normalise existing lines to bullet format.
+    const normalisedLines = existingLines.map(l => l.startsWith('• ') ? l : `• ${l}`);
+    const newBullet = `• ${newBody}`;
+    const updatedBody = [...normalisedLines, newBullet].join('\n');
+    const updatedContent = `${newSender}: ${updatedBody}`;
+
+    msgs[i] = { ...candidate, content: updatedContent, timestamp: message.timestamp };
+    return true;
+  }
+
+  return false;
+}
+
 // Helper to add message to specific session.
 // Consolidates consecutive messages from the same sender into one block.
 // Skips system messages that echo recent user input.
@@ -92,34 +159,27 @@ export function addMessageToSession(sessionName: string, message: Message) {
       }
     }
 
-    const lastMsg = msgs[msgs.length - 1];
-
-    // Try to consolidate with previous message from same sender + direction
-    if (lastMsg && lastMsg.direction === message.direction && message.direction === 'system') {
-      const lastSender = extractSenderPrefix(lastMsg.content);
-      const newSender = extractSenderPrefix(message.content);
-
-      if (lastSender && newSender && lastSender === newSender) {
-        const newBody = extractMessageBody(message.content).trim();
-        const existingBodies = extractMessageBody(lastMsg.content)
-          .split('\n')
-          .map(l => l.trim())
-          .filter(l => l.length > 0);
-
-        // Skip if this exact line already exists (dedup)
-        if (existingBodies.includes(newBody)) {
-          return map; // No change needed
-        }
-
-        // Append new line to existing block
-        const updatedContent = lastMsg.content + '\n' + newBody;
-        msgs[msgs.length - 1] = { ...lastMsg, content: updatedContent, timestamp: message.timestamp };
-        map.set(sessionName, [...msgs]);
+    // Try 5-minute window consolidation for system messages.
+    if (message.direction === 'system') {
+      const mutableMsgs = [...msgs];
+      if (tryConsolidateSystemMessage(mutableMsgs, message)) {
+        map.set(sessionName, mutableMsgs);
         return new Map(map);
       }
+      // No match in window — push new message (bullet-prefixed body).
+      const newSender = extractSenderPrefix(message.content);
+      const newBody = extractMessageBody(message.content).trim();
+      const formatted: Message = newSender
+        ? { ...message, content: `${newSender}: • ${newBody}` }
+        : message;
+      const updated = [...mutableMsgs, formatted];
+      map.set(sessionName, updated.length > MAX_MESSAGES_PER_SESSION
+        ? updated.slice(updated.length - MAX_MESSAGES_PER_SESSION)
+        : updated);
+      return new Map(map);
     }
 
-    // Otherwise add as new message
+    // Non-system messages: push directly.
     const updated = [...msgs, message];
     map.set(sessionName, updated.length > MAX_MESSAGES_PER_SESSION
       ? updated.slice(updated.length - MAX_MESSAGES_PER_SESSION)

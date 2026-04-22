@@ -1,7 +1,7 @@
 <script lang="ts">
   import { get } from 'svelte/store';
   import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive } from '../stores/app';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, afterUpdate, tick } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke, subscribeSessionEvents, isDesktop, type SessionEventData } from '../transport';
   import { ArrowDown, Archive } from 'lucide-svelte';
@@ -63,9 +63,13 @@
     return !!(last && last.direction === 'system' && last.content === content);
   }
 
-  function scrollToBottom() {
+  function scrollToBottom(smooth = false) {
     if (terminalEl) {
-      terminalEl.scrollTop = terminalEl.scrollHeight;
+      if (smooth) {
+        terminalEl.scrollTo({ top: terminalEl.scrollHeight, behavior: 'smooth' });
+      } else {
+        terminalEl.scrollTop = terminalEl.scrollHeight;
+      }
       autoScroll = true;
       showScrollButton = false;
     }
@@ -566,8 +570,23 @@
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────────
 
+  // Why: After any DOM update that adds messages we scroll to the bottom when
+  // the user hasn't manually scrolled up, using smooth scrolling to avoid a
+  // jarring jump on new messages (initial load uses instant scroll below).
+  // What: Fires after every Svelte DOM patch; checks autoScroll flag before
+  // scrolling so the user can scroll up to read history without being yanked.
+  // Test: Add a message while scrolled to bottom — assert smooth scroll fires.
+  // Add a message while scrolled up — assert scroll position does NOT change.
+  afterUpdate(() => {
+    if (autoScroll && viewMode === 'summary') {
+      tick().then(() => scrollToBottom(true));
+    }
+  });
+
   onMount(() => {
     connecting = true;
+    // Instant scroll on initial mount — history may already be populated.
+    tick().then(() => scrollToBottom(false));
 
     const unlistenSessionOutput = listen('session-output', (event: any) => {
       connecting = false;
@@ -761,9 +780,7 @@
     stopSseSubscription();
   }
 
-  $: if ($messages.length && autoScroll && viewMode === 'summary') {
-    setTimeout(scrollToBottom, 10);
-  }
+
 </script>
 
 <div class="chat-view">
@@ -927,7 +944,7 @@
       </div>
 
       {#if showScrollButton}
-        <button class="scroll-button" on:click={scrollToBottom} aria-label="Scroll to bottom">
+        <button class="scroll-button" on:click={() => scrollToBottom(false)} aria-label="Scroll to bottom">
           <ArrowDown size={20} />
         </button>
       {/if}
