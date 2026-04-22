@@ -497,6 +497,17 @@
   // Test: Seed a log file under a fake HOME, connect to the session, assert
   // the chat contains one system message per log entry before the connect
   // marker.
+  /**
+   * Why: Replaying N log entries as N separate bubbles clutters the chat with
+   * identical-looking system blocks that each carry a timestamp in their body,
+   * making the sender column meaningless and the history hard to scan.
+   * What: Fetches today's log entries and emits a single consolidated system
+   * message with sender "history" and one bullet per entry, mirroring the
+   * live consolidation behaviour in addMessageToSession.
+   * Test: Seed a log with 3 entries, open the session — assert exactly one
+   * system message appears, its content starts with "history: ", and it
+   * contains three "• " bullet lines.
+   */
   async function loadLogHistory(sessionName: string) {
     if (loadedHistorySessions.has(sessionName)) return;
     loadedHistorySessions.add(sessionName);
@@ -507,14 +518,23 @@
         date: today,
       })) as LogEntry[];
       if (!entries || entries.length === 0) return;
+
+      // Deduplicate consecutive entries with identical text before rendering
+      const deduped: LogEntry[] = [];
       for (const entry of entries) {
-        const ts = new Date(entry.ts * 1000);
-        addMessageToSession(sessionName, {
-          direction: 'system',
-          content: `history ${ts.toLocaleTimeString()}: ${entry.text}`,
-          timestamp: ts,
-        });
+        if (deduped.length === 0 || deduped[deduped.length - 1].text !== entry.text) {
+          deduped.push(entry);
+        }
       }
+
+      // Emit a single consolidated bubble: "history: • line1\n• line2\n..."
+      const bullets = deduped.map(e => `• ${e.text}`).join('\n');
+      const oldestTs = new Date(deduped[0].ts * 1000);
+      addMessageToSession(sessionName, {
+        direction: 'system',
+        content: `history: ${bullets}`,
+        timestamp: oldestTs,
+      });
     } catch (err) {
       // Non-fatal — absence of logs is normal.
       console.debug('loadLogHistory failed:', err);
