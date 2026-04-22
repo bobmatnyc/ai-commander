@@ -988,6 +988,12 @@
     user-select: none;
   }
 
+  @media (max-width: 768px) {
+    .activity-counter {
+      display: none;
+    }
+  }
+
   .tab {
     padding: 0.3rem 0.75rem;
     border: 1px solid var(--border);

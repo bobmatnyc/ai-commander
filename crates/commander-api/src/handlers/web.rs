@@ -2227,7 +2227,7 @@ pub fn spawn_session_poller(
             std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         loop {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
 
             // List tmux sessions
             let sessions = match tokio::process::Command::new("tmux")
@@ -2271,8 +2271,8 @@ pub fn spawn_session_poller(
                     .filter(|line| !line.trim().is_empty() && !prev_lines.contains(line))
                     .collect();
 
-                // Only interpret if there are meaningful new lines (>3 new lines)
-                if !new_lines.is_empty() && new_lines.len() > 3 {
+                // Interpret whenever at least one meaningful new line appears.
+                if !new_lines.is_empty() {
                     let session = session_name.to_string();
                     let tx = event_tx.clone();
                     let content = trimmed.clone();
