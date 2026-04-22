@@ -6,6 +6,7 @@
   import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor, X } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import CreateSessionModal from './CreateSessionModal.svelte';
+  import ProcessMonitorPanel from './ProcessMonitorPanel.svelte';
 
   let interval: number;
   let showCreateModal = false;
@@ -187,20 +188,18 @@
           }
         }
 
-        if (!hasCachedHistory) {
-          try {
-            const output = await invoke<string>('capture_session_output', { name });
-            if (output && output.trim().length > 0) {
-              addMessageToSession(name, {
-                direction: 'received',
-                content: output,
-                timestamp: new Date(),
-              });
-            }
-          } catch (_captureErr) {
-            // Non-fatal: polling will deliver output within 500 ms.
-          }
-        }
+        // Why: Previously we called `capture_session_output` here and injected
+        // the raw 500-line tmux dump as a `direction: 'received'` ("claude")
+        // message. That dumped raw terminal content into Summary view
+        // immediately, BEFORE any LLM summarization ran. The polling loop
+        // delivers output within 500 ms and always routes through the LLM
+        // summarizer first, so the raw capture here was both redundant and
+        // actively harmful to Summary view's contract ("only LLM-interpreted
+        // messages, never raw terminal output"). Connect marker + log history
+        // replay remain intact above.
+        // Test: Connect to a fresh session, assert Summary view does NOT
+        // contain a "claude" message with raw tmux content before the first
+        // LLM interpretation arrives.
       }
       await loadSessions();
     } catch (err) {
@@ -721,6 +720,14 @@
       </div>
     {/each}
   </div>
+
+  <!--
+    Process monitor collapsible panel — pinned to the bottom of the session
+    list. Bug 2 fix: surfaces process info in the main window instead of a
+    separate Monitor tab, so users can spot stale children without a tab switch.
+    Collapsed by default to preserve visual calm on the default view.
+  -->
+  <ProcessMonitorPanel defaultExpanded={false} />
 
   <CreateSessionModal
     bind:show={showCreateModal}

@@ -404,8 +404,6 @@
       const s = summary as any;
       status += `Adapter: ${s.adapter}\n`;
       status += `State: ${s.is_idle ? '⏸ Idle' : '🔄 Active'}\n`;
-      status += `Lines tracked: ${lineCount}\n`;
-
       addMessageToSession(sessionName, {
         direction: 'system',
         content: status,
@@ -782,11 +780,7 @@
       {#if isActive}
         <span class="status-badge active">
           <span class="activity-dot"></span>
-          Active · {lineCount} lines
-        </span>
-      {:else if lineCount > 0}
-        <span class="status-badge idle-count">
-          {lineCount} lines
+          Active
         </span>
       {/if}
 
@@ -1116,7 +1110,12 @@
     font-style: normal;
     font-size: 0.8rem;
     color: var(--text-secondary);
-    opacity: 0.8;
+    animation: waiting-pulse 2.5s ease-in-out infinite;
+  }
+
+  @keyframes waiting-pulse {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 0.45; }
   }
 
   .empty-state {
@@ -1246,11 +1245,6 @@
   .status-badge.active {
     color: #10b981;
     background: rgba(16, 185, 129, 0.1);
-  }
-
-  .status-badge.idle-count {
-    color: var(--text-secondary);
-    background: var(--bg-surface);
   }
 
   .llm-banner {
