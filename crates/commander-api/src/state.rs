@@ -34,7 +34,7 @@ pub struct GitHubStats {
 pub struct SessionEvent {
     /// Name of the tmux session.
     pub session_name: String,
-    /// Event type: "interpretation", "status_change", or "error".
+    /// Event type: "interpretation", "raw", "llm_unavailable", "status_change", or "error".
     pub event_type: String,
     /// The event content (interpreted output, status message, etc.).
     pub content: String,
@@ -46,6 +46,12 @@ pub struct SessionEvent {
     /// appending a new message (prevents repeated "Processing..." bubbles).
     #[serde(default)]
     pub is_update: bool,
+    /// Character count of raw new content (present on "raw" events only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub char_count: Option<usize>,
+    /// Line count of raw new content (present on "raw" events only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<usize>,
 }
 
 /// Application state shared across all handlers.

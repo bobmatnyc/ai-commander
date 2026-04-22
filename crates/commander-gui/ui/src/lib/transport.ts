@@ -178,6 +178,10 @@ export interface SessionEventData {
   timestamp: number;
   adapter?: string;
   is_update?: boolean;
+  /** Present on "raw" events: character count of new content. */
+  char_count?: number;
+  /** Present on "raw" events: line count of new content. */
+  line_count?: number;
 }
 
 /**

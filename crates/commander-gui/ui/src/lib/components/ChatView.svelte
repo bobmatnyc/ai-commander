@@ -1,6 +1,6 @@
 <script lang="ts">
   import { get } from 'svelte/store';
-  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive } from '../stores/app';
+  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive, markSessionDataReceived } from '../stores/app';
   import { onMount, onDestroy, afterUpdate, tick } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke, subscribeSessionEvents, isDesktop, type SessionEventData } from '../transport';
@@ -371,6 +371,22 @@
     // Unknown event_types are still ignored.
     // Test: Send an SSE event with event_type="update" and content="Hello",
     // assert a received message containing "Hello" appears in $messages.
+    // Handle lightweight raw-data events: update activity counters only,
+    // no content to render. This fires even when the LLM filter strips
+    // everything (pure tool-use chrome), keeping the counter alive.
+    if (data.event_type === 'raw') {
+      charsReceived += data.char_count ?? 0;
+      linesReceived += data.line_count ?? 0;
+      markSessionDataReceived(data.session_name);
+      return;
+    }
+
+    // Both LLM backends (Ollama + OpenRouter) returned nothing — surface banner.
+    if (data.event_type === 'llm_unavailable') {
+      llmUnavailable = true;
+      return;
+    }
+
     if (data.event_type === 'interpretation' || data.event_type === 'update') {
       if (data.is_update && streamingMessageId) {
         // Replace the in-progress message with the newer interpretation
@@ -597,6 +613,7 @@
 
       const sessionName = $currentSession.name;
       markSessionActive(sessionName);
+      markSessionDataReceived(sessionName);
       const raw = content && content.length > 0 ? content : full_content;
       if (!raw) return;
 

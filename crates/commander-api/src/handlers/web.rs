@@ -2203,6 +2203,8 @@ pub fn spawn_connected_sessions_poller(app_state: AppState) {
                             timestamp: ts,
                             adapter,
                             is_update: true,
+                            char_count: None,
+                            line_count: None,
                         });
                     }
                 });
@@ -2271,8 +2273,36 @@ pub fn spawn_session_poller(
                     .filter(|line| !line.trim().is_empty() && !prev_lines.contains(line))
                     .collect();
 
-                // Interpret whenever at least one meaningful new line appears.
+                // Always emit a lightweight "raw" event whenever new lines arrive so
+                // the frontend activity counter updates even when the LLM filter
+                // strips all content and returns None. This decouples "is data
+                // flowing?" from "did the LLM produce a summary?".
                 if !new_lines.is_empty() {
+                    let raw_char_count: usize = new_lines.iter().map(|l| l.len()).sum();
+                    let raw_line_count = new_lines.len();
+                    let ts_raw = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let adapter_for_raw = adapter_map
+                        .get(session_name)
+                        .cloned()
+                        .unwrap_or_else(|| "claude".to_string());
+                    let _ = event_tx.send(SessionEvent {
+                        session_name: session_name.to_string(),
+                        event_type: "raw".to_string(),
+                        content: String::new(),
+                        timestamp: ts_raw,
+                        adapter: adapter_for_raw,
+                        is_update: false,
+                        char_count: Some(raw_char_count),
+                        line_count: Some(raw_line_count),
+                    });
+
+                    // Now attempt LLM interpretation. We only emit an
+                    // "interpretation" event when the LLM actually returns
+                    // something useful. When both Ollama and OpenRouter fail,
+                    // emit "llm_unavailable" so the frontend can surface a banner.
                     let session = session_name.to_string();
                     let tx = event_tx.clone();
                     let content = trimmed.clone();
@@ -2286,9 +2316,9 @@ pub fn spawn_session_poller(
                         let cleaned = commander_core::clean_response(&content);
                         let is_idle = commander_core::is_claude_ready(&cleaned);
 
-                        if let Some(interpretation) =
-                            commander_core::interpret_screen_context(&cleaned, is_idle)
-                        {
+                        let maybe_interp = commander_core::interpret_screen_context(&cleaned, is_idle);
+
+                        if let Some(interpretation) = maybe_interp {
                             let prev_interp = interps
                                 .lock()
                                 .unwrap()
@@ -2317,6 +2347,8 @@ pub fn spawn_session_poller(
                                             .as_secs(),
                                         adapter,
                                         is_update: has_prev,
+                                        char_count: None,
+                                        line_count: None,
                                     });
                                     // Persist to the session's summary log.
                                     // Hash the cleaned content (not the
@@ -2339,6 +2371,28 @@ pub fn spawn_session_poller(
                                         .unwrap()
                                         .insert(session, interpretation);
                                 }
+                            }
+                        } else {
+                            // interpret_screen_context returned None — both Ollama
+                            // and OpenRouter failed (or content was all chrome).
+                            // Emit llm_unavailable so the frontend can surface a
+                            // banner. Only emit when prepare_for_llm would have
+                            // had content — don't spam on pure-chrome screens.
+                            let has_meaningful = !cleaned.trim().is_empty();
+                            if has_meaningful {
+                                let _ = tx.send(SessionEvent {
+                                    session_name: session.clone(),
+                                    event_type: "llm_unavailable".to_string(),
+                                    content: String::new(),
+                                    timestamp: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs(),
+                                    adapter,
+                                    is_update: false,
+                                    char_count: None,
+                                    line_count: None,
+                                });
                             }
                         }
                     });
