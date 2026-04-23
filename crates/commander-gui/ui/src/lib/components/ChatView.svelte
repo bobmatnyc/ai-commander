@@ -867,6 +867,9 @@
       session. Replaces the old "Connected to session" chat bubble.
     -->
     <div class="session-actions" class:connected={$currentSession?.is_connected}>
+      <span class="session-title" title={$currentSession.nickname ?? $currentSession.name}>
+        {$currentSession.nickname ?? $currentSession.name}
+      </span>
       <button
         class="tab"
         on:click={handleStatus}
@@ -1061,6 +1064,23 @@
     /* Transition both tint and border so connect/disconnect is a smooth fade */
     border-left: 4px solid transparent;
     transition: background-color 0.3s ease, border-left-color 0.3s ease;
+  }
+
+  /*
+   * Session identifier shown on the left of the toolbar. Compact, semi-bold,
+   * truncated with ellipsis so it never pushes buttons off screen.
+   */
+  .session-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    max-width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 0;
+    margin-right: 0.25rem;
+    letter-spacing: 0.01em;
   }
 
   /*

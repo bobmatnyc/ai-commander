@@ -12,10 +12,11 @@ const DEFAULT_MODEL: &str = "qwen2.5-coder:7b-instruct";
 
 /// Preferred models to try in order when selecting the best available model.
 const PREFERRED_MODELS: &[&str] = &[
-    "qwen2.5-coder:7b-instruct",
     "gemma3:4b",
-    "mistral:latest",
+    "gemma4:e4b",
     "mistral-small3.2:latest",
+    "mistral:latest",
+    "qwen2.5-coder:7b-instruct",
 ];
 
 /// System prompt used when summarizing output through Ollama.

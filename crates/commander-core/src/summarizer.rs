@@ -597,9 +597,13 @@ fn is_valid_summary(s: &str) -> bool {
 /// returns `"Hello"`; assert `strip_think_tags("plain text")` returns
 /// `"plain text"`; assert `strip_think_tags("  spaced  ")` returns `"spaced"`.
 fn strip_think_tags(s: &str) -> &str {
-    // Strip <think>...</think> block (qwen3 reasoning models)
     if let Some(end) = s.find("</think>") {
         return s[end + 8..].trim();
+    }
+    // If <think> is present but </think> is not, the model ran out of tokens
+    // mid-reasoning. Return empty string so is_valid_summary rejects it cleanly.
+    if s.contains("<think>") {
+        return "";
     }
     s.trim()
 }
@@ -1077,12 +1081,13 @@ pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<
 /// installed. Larger models (70b+) are deliberately excluded from this list
 /// because they are too slow for interactive interpretation.
 const OLLAMA_INTERPRET_PREFERENCES: &[&str] = &[
-    "qwen3:8b",
-    "mistral:latest",
+    "gemma3:4b",           // fast, non-reasoning, ideal for one-sentence summaries
+    "gemma4:e4b",          // better quality, still reasonable speed
     "mistral-small3.2:latest",
-    "gemma3:4b",
+    "mistral:latest",
     "qwen2.5-coder:7b-instruct",
     "qwen2.5:7b",
+    "qwen3:8b",            // reasoning model — last resort, needs more token budget
 ];
 
 /// Ollama base URL.
@@ -1172,7 +1177,7 @@ fn interpret_via_ollama(user_prompt: &str) -> Option<String> {
             {"role": "user", "content": user_prompt}
         ],
         "stream": false,
-        "options": { "num_predict": 600 }
+        "options": { "num_predict": 1500 }
     });
 
     let response = client
