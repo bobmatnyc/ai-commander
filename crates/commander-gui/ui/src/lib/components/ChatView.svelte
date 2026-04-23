@@ -2,6 +2,18 @@
   import { get } from 'svelte/store';
   import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive, markSessionDataReceived } from '../stores/app';
   import { onMount, onDestroy, afterUpdate, tick } from 'svelte';
+
+  // ─── Pagination ────────────────────────────────────────────────────────────
+  // Why: Long sessions accumulate hundreds of messages; rendering all of them
+  // at once causes noticeable jank on scroll. Pagination shows only the most
+  // recent PAGE_SIZE entries and prepends older ones as the user scrolls up.
+  // What: visibleCount tracks how many messages to show from the END of the
+  // full list. loadMore() increments it and restores scroll position so the
+  // viewport doesn't jump.
+  // Test: With >10 messages, assert only 10 render initially. Scroll to top,
+  // assert 10 more are prepended and viewport position is preserved.
+  const PAGE_SIZE = 10;
+  let visibleCount = PAGE_SIZE;
   import { listen } from '@tauri-apps/api/event';
   import { invoke, subscribeSessionEvents, isDesktop, type SessionEventData } from '../transport';
   import { ArrowDown, Archive } from 'lucide-svelte';
@@ -85,6 +97,27 @@
     const atBottom = scrollHeight - scrollTop - clientHeight < 50;
     autoScroll = atBottom;
     showScrollButton = !atBottom;
+    // Load older messages when user scrolls near the top
+    if (scrollTop < 50 && hasMore) {
+      loadMore(terminalEl);
+    }
+  }
+
+  // Why: Prepending older messages shifts content down; saving/restoring the
+  // scroll offset relative to the bottom of the previous content keeps the
+  // viewport anchored to the message the user was reading.
+  // What: Captures scrollHeight before visibleCount grows, then after the DOM
+  // updates sets scrollTop to the delta so content appears stationary.
+  // Test: With 25 messages and visibleCount=10, trigger loadMore; assert
+  // scrollTop after tick equals newScrollHeight - prevScrollHeight.
+  function loadMore(el?: HTMLElement) {
+    const prevScrollHeight = el?.scrollHeight ?? 0;
+    visibleCount = Math.min(visibleCount + PAGE_SIZE, allMessages.length);
+    tick().then(() => {
+      if (el) {
+        el.scrollTop = el.scrollHeight - prevScrollHeight;
+      }
+    });
   }
 
   function markActivity() {
@@ -439,6 +472,13 @@
     }
   }
 
+  // Pagination-derived values — recomputed whenever the message store or
+  // visibleCount changes. allMessages follows $messages (the store already
+  // scoped to the current session by the app store's derived logic).
+  $: allMessages = $messages ?? [];
+  $: visibleMessages = allMessages.slice(Math.max(0, allMessages.length - visibleCount));
+  $: hasMore = allMessages.length > visibleCount;
+
   // ─── Session actions ───────────────────────────────────────────────────────
 
   async function handleStatus() {
@@ -771,6 +811,10 @@
     isActive = false;
     streamingMessageId = null;
     llmUnavailable = false;
+    // Reset pagination so the new session starts at the bottom showing the
+    // most recent PAGE_SIZE messages rather than carrying over the previous
+    // session's expanded count.
+    visibleCount = PAGE_SIZE;
 
     // Web mode: (re)subscribe to the REST SSE event stream for this session.
     // No-op in Tauri mode (handled by native events).
@@ -923,7 +967,19 @@
         on:scroll={handleScroll}
         class="terminal-output"
       >
-        {#each $messages as message}
+        {#if hasMore}
+          <div
+            class="load-more-indicator"
+            on:click={() => loadMore(terminalEl)}
+            role="button"
+            tabindex="0"
+            on:keydown={(e) => e.key === 'Enter' && loadMore(terminalEl)}
+            aria-label="Load {allMessages.length - visibleCount} older messages"
+          >
+            ↑ {allMessages.length - visibleCount} older messages
+          </div>
+        {/if}
+        {#each visibleMessages as message}
           {#if message.direction === 'sent'}
             <div class="message sent">
               <span class="message-sender">you</span>
@@ -1240,6 +1296,23 @@
     background-color: var(--accent);
     border-color: var(--accent);
     opacity: 0.9;
+  }
+
+  .load-more-indicator {
+    text-align: center;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    opacity: 0.6;
+    padding: 0.4rem 0;
+    margin-bottom: 0.5rem;
+    cursor: pointer;
+    user-select: none;
+    letter-spacing: 0.02em;
+    transition: opacity 0.15s;
+  }
+
+  .load-more-indicator:hover {
+    opacity: 1;
   }
 
   .terminal-empty {
