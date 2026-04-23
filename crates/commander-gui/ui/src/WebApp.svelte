@@ -116,6 +116,45 @@
     mobileView = 'list';
   }
 
+  async function handleSessionCreated(e: CustomEvent<{ name: string }>) {
+    // Auto-connect to the newly created session so the user lands directly
+    // in ChatView rather than having to click the session row manually.
+    try {
+      const name = e.detail?.name;
+      if (name) {
+        const result = (await invoke('connect_session', { name })) as {
+          session?: string;
+          history?: Array<{ text: string; ts: number; hash: string }>;
+        } | null;
+        // Find the session object from the store after connect (SessionList
+        // will refresh on its own poll, but we need a minimal object now).
+        const sessionList = get(sessions);
+        const session = sessionList.find(s => s.name === name) ?? {
+          name,
+          created_at: new Date().toISOString(),
+          is_connected: true,
+          session_state: 'connected' as const,
+        };
+        currentSession.set({ ...session, is_connected: true });
+        markSessionConnected(name);
+        // Hydrate history returned by connect, if any.
+        if (result?.history?.length) {
+          for (const entry of result.history) {
+            const ts = new Date(entry.ts * 1000);
+            addMessageToSession(name, {
+              direction: 'system',
+              content: `history ${ts.toLocaleTimeString()}: ${entry.text}`,
+              timestamp: ts,
+            });
+          }
+        }
+      }
+    } catch {
+      // Auto-connect is best-effort — session creation already succeeded.
+      // The user can manually click the row in SessionList.
+    }
+  }
+
 </script>
 
 <main class="app">
@@ -188,45 +227,7 @@
   {#if $showCreateSessionModal}
     <CreateSessionModal
       bind:show={$showCreateSessionModal}
-      on:created={async (e) => {
-        $showCreateSessionModal = false;
-        // Auto-connect to the newly created session so the user lands directly
-        // in ChatView rather than having to click the session row manually.
-        try {
-          const name: string = e.detail?.name;
-          if (name) {
-            const result = (await invoke('connect_session', { name })) as {
-              session?: string;
-              history?: Array<{ text: string; ts: number; hash: string }>;
-            } | null;
-            // Find the session object from the store after connect (SessionList
-            // will refresh on its own poll, but we need a minimal object now).
-            const sessionList = get(sessions);
-            const session = sessionList.find(s => s.name === name) ?? {
-              name,
-              created_at: new Date().toISOString(),
-              is_connected: true,
-              session_state: 'connected' as const,
-            };
-            currentSession.set({ ...session, is_connected: true });
-            markSessionConnected(name);
-            // Hydrate history returned by connect, if any.
-            if (result?.history?.length) {
-              for (const entry of result.history) {
-                const ts = new Date(entry.ts * 1000);
-                addMessageToSession(name, {
-                  direction: 'system',
-                  content: `history ${ts.toLocaleTimeString()}: ${entry.text}`,
-                  timestamp: ts,
-                });
-              }
-            }
-          }
-        } catch {
-          // Auto-connect is best-effort — session creation already succeeded.
-          // The user can manually click the row in SessionList.
-        }
-      }}
+      on:created={handleSessionCreated}
       on:close={() => { $showCreateSessionModal = false; }}
     />
   {/if}
