@@ -179,7 +179,53 @@ export function addMessageToSession(sessionName: string, message: Message) {
       return new Map(map);
     }
 
-    // Non-system messages: push directly.
+    // For 'received' messages (LLM summaries): consolidate rapid-fire updates
+    // into the existing bubble rather than appending a new one every 2s.
+    // Why: The poller fires every ~2s and each poll may emit a new interpretation
+    // event with is_update=false (first message of a new poll cycle). Without
+    // consolidation each cycle adds a fresh bubble, producing a wall of near-
+    // identical 'received' bubbles. We update in-place when the last received
+    // message is within a 30-second window.
+    // What: Scans back for the most recent 'received' message; if within 30s,
+    // calls updateMessageContent on its id (or mutates in-place). Otherwise
+    // pushes a new message.
+    // Test: Add two 'received' messages 5s apart — assert only one Message entry
+    // exists in the store. Add a third 40s later — assert a second entry is created.
+    if (message.direction === 'received') {
+      const RECEIVED_WINDOW_MS = 30_000;
+      const now = message.timestamp instanceof Date ? message.timestamp.getTime() : Date.now();
+
+      // Walk backwards for the most recent 'received' message.
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const candidate = msgs[i];
+        if (candidate.direction !== 'received') continue;
+
+        const candidateTime = candidate.timestamp instanceof Date
+          ? candidate.timestamp.getTime()
+          : 0;
+
+        if (now - candidateTime > RECEIVED_WINDOW_MS) break; // too old — stop looking
+
+        // Found a recent received message — update in place.
+        if (candidate.id) {
+          // Mutate a copy so the store update triggers reactivity.
+          const mutableMsgs = [...msgs];
+          mutableMsgs[i] = { ...candidate, content: message.content, timestamp: message.timestamp };
+          map.set(sessionName, mutableMsgs);
+          return new Map(map);
+        }
+        break; // found but no id — fall through to push
+      }
+
+      // No recent received message found — push as new.
+      const updated = [...msgs, message];
+      map.set(sessionName, updated.length > MAX_MESSAGES_PER_SESSION
+        ? updated.slice(updated.length - MAX_MESSAGES_PER_SESSION)
+        : updated);
+      return new Map(map);
+    }
+
+    // All other non-system directions: push directly.
     const updated = [...msgs, message];
     map.set(sessionName, updated.length > MAX_MESSAGES_PER_SESSION
       ? updated.slice(updated.length - MAX_MESSAGES_PER_SESSION)

@@ -900,7 +900,7 @@
         Test: Connect to a session, assert this span renders; disconnect,
         assert it disappears.
       -->
-      {#if $currentSession?.is_connected}
+      {#if $currentSession && (charsReceived > 0 || linesReceived > 0)}
         <span class="activity-counter" title="Bytes / lines received since connect">
           ↓ {charsReceived.toLocaleString()} chars · {linesReceived.toLocaleString()} lines
         </span>
