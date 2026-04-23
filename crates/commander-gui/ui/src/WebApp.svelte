@@ -4,9 +4,10 @@
   import ChatView from './lib/components/ChatView.svelte';
   import InputArea from './lib/components/InputArea.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
+  import CreateSessionModal from './lib/components/CreateSessionModal.svelte';
   import { Sun, Moon, Settings } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
-  import { currentSession, serverRebuilding, githubStats } from './lib/stores/app';
+  import { currentSession, serverRebuilding, githubStats, showCreateSessionModal } from './lib/stores/app';
   import { invoke } from './lib/transport';
 
   // No auth needed — Tailscale handles network security
@@ -181,6 +182,14 @@
 
   {#if showSettings}
     <SettingsModal on:close={() => showSettings = false} />
+  {/if}
+
+  {#if $showCreateSessionModal}
+    <CreateSessionModal
+      bind:show={$showCreateSessionModal}
+      on:created={() => { $showCreateSessionModal = false; }}
+      on:close={() => { $showCreateSessionModal = false; }}
+    />
   {/if}
 
 <style>

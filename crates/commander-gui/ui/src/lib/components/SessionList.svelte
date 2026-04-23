@@ -2,11 +2,10 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats, lastActivityAt, markSessionDataReceived } from '../stores/app';
+  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats, lastActivityAt, markSessionDataReceived, showCreateSessionModal } from '../stores/app';
   import { subscribeSessionEvents, isDesktop, type SessionEventData } from '../transport';
   import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor, X } from 'lucide-svelte';
   import type { Session } from '../stores/app';
-  import CreateSessionModal from './CreateSessionModal.svelte';
   import ProcessMonitorPanel from './ProcessMonitorPanel.svelte';
 
   // Sort mode: 'alpha' (A→Z by display name) or 'recent' (last active first,
@@ -79,7 +78,6 @@
   $: sortedSessions = sortSessions($sessions, sessionSort, $lastActivityAt);
 
   let interval: number;
-  let showCreateModal = false;
   let lastError: string | null = null;
   let errorTimeout: number | null = null;
   let loadingSessionsInProgress = false;
@@ -540,11 +538,6 @@
     closeDropdown();
   }
 
-  function handleSessionCreated() {
-    showCreateModal = false;
-    loadSessions();
-  }
-
   // Tauri unlistener for the `session-auto-connected` backend event. Stored so
   // we can drop the subscription on component destroy.
   let unlistenAutoConnected: (() => void) | null = null;
@@ -670,7 +663,7 @@
       >
         {sessionSort === 'alpha' ? 'A↓' : '↓t'}
       </button>
-      <button class="create-btn" on:click={() => showCreateModal = true} title="Create new session">
+      <button class="create-btn" on:click={() => $showCreateSessionModal = true} title="Create new session">
         <Plus size={16} />
         <span>New</span>
       </button>
@@ -909,12 +902,6 @@
     Collapsed by default to preserve visual calm on the default view.
   -->
   <ProcessMonitorPanel defaultExpanded={false} />
-
-  <CreateSessionModal
-    bind:show={showCreateModal}
-    on:created={handleSessionCreated}
-    on:close={() => (showCreateModal = false)}
-  />
 </div>
 
 <style>

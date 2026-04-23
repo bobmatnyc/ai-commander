@@ -285,6 +285,15 @@ export function markSessionDataReceived(sessionName: string) {
 // Current view for navigation (e.g. 'sessions', 'chat', 'dashboard')
 export const currentView = writable<string>('sessions');
 
+// Why: CreateSessionModal is rendered at the top level of WebApp.svelte to
+// avoid stacking-context clipping by the <aside> element in web mode.
+// SessionList sets this to true when the user clicks the New button.
+// What: Shared boolean that controls CreateSessionModal visibility from
+// SessionList (writer) and WebApp (renderer).
+// Test: Click New in SessionList, assert $showCreateSessionModal === true;
+// close the modal, assert it resets to false.
+export const showCreateSessionModal = writable(false);
+
 // Sessions explicitly hidden from the dashboard
 export const hiddenSessions = writable<Set<string>>(new Set());
 
