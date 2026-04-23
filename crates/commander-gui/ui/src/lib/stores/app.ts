@@ -234,6 +234,80 @@ export function addMessageToSession(sessionName: string, message: Message) {
   });
 }
 
+/** Per-session stable ID for the summary block. */
+const _sessionSummaryIds = new Map<string, string>();
+
+/**
+ * Why: All summaries (history replay + live LLM updates) should accumulate in
+ * one updatable bubble per session instead of creating N separate bubbles that
+ * clutter the chat and fragment the conversation timeline.
+ * What: Appends one `• HH:MM text` bullet to the session's single summary
+ * block. Creates the block on first call; reuses the same message ID on
+ * subsequent calls so the bubble grows in-place. Caps at 30 bullets (drops
+ * oldest). Dedups exact bullet matches.
+ * Test: Call three times for session "foo" with texts A, B, C — assert
+ * exactly one Message exists in $sessionMessages.get('foo') with
+ * direction='received' and content containing three "• HH:MM " lines.
+ * Call 31 times — assert only the last 30 bullets are retained.
+ */
+export function appendSummaryBullet(
+  sessionName: string,
+  text: string,
+  timestamp?: Date,
+): void {
+  const ts = timestamp ?? new Date();
+  const hhmm = ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const bullet = `• ${hhmm} ${text.trim()}`;
+
+  sessionMessages.update(map => {
+    const msgs = map.get(sessionName) ?? [];
+    const existingId = _sessionSummaryIds.get(sessionName);
+    const MAX_BULLETS = 30;
+
+    if (existingId) {
+      const idx = msgs.findIndex(m => m.id === existingId);
+      if (idx >= 0) {
+        const existing = msgs[idx];
+        const lines = existing.content.split('\n').filter(l => l.trim());
+        // Dedup: skip if this exact bullet already present
+        if (lines.includes(bullet)) return map;
+        const newLines = [...lines, bullet];
+        // Cap at MAX_BULLETS
+        const capped = newLines.length > MAX_BULLETS
+          ? newLines.slice(newLines.length - MAX_BULLETS)
+          : newLines;
+        const mutableMsgs = [...msgs];
+        mutableMsgs[idx] = { ...existing, content: capped.join('\n'), timestamp: ts };
+        map.set(sessionName, mutableMsgs);
+        return new Map(map);
+      }
+    }
+
+    // First summary for this session — create the block
+    const id = crypto.randomUUID();
+    _sessionSummaryIds.set(sessionName, id);
+    const newMsgs = [...msgs, { id, direction: 'received' as const, content: bullet, timestamp: ts }];
+    map.set(sessionName, newMsgs.length > MAX_MESSAGES_PER_SESSION
+      ? newMsgs.slice(newMsgs.length - MAX_MESSAGES_PER_SESSION)
+      : newMsgs);
+    return new Map(map);
+  });
+}
+
+/**
+ * Why: On session switch / disconnect the next summary should start a fresh
+ * block rather than appending to a stale ID that may no longer exist in the
+ * new session's message list.
+ * What: Clears the tracked summary-block ID for the given session. The next
+ * appendSummaryBullet call for that session will create a new block.
+ * Test: Call appendSummaryBullet('foo', 'a'), then clearSessionSummary('foo'),
+ * then appendSummaryBullet('foo', 'b') — assert two separate Messages exist
+ * in $sessionMessages.get('foo').
+ */
+export function clearSessionSummary(sessionName: string): void {
+  _sessionSummaryIds.delete(sessionName);
+}
+
 // Helper to update the content of a specific message by id
 export function updateMessageContent(sessionName: string, messageId: string, content: string) {
   sessionMessages.update(map => {

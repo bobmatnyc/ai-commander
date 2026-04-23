@@ -1,6 +1,6 @@
 <script lang="ts">
   import { get } from 'svelte/store';
-  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive, markSessionDataReceived } from '../stores/app';
+  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive, markSessionDataReceived, appendSummaryBullet, clearSessionSummary } from '../stores/app';
   import { onMount, onDestroy, afterUpdate, tick } from 'svelte';
 
   // ─── Pagination ────────────────────────────────────────────────────────────
@@ -51,6 +51,12 @@
   // becomes 7 and linesReceived becomes 2.
   let charsReceived = 0;
   let linesReceived = 0;
+
+  // Previous session name — used to clear the prior session's summary-block ID
+  // when navigating between sessions so each session gets a fresh appendable
+  // bubble on re-entry rather than continuing to append to a stale in-memory
+  // block from the last view.
+  let previousSessionName: string | null = null;
 
   // True when the polling loop has reported that both LLM backends (Ollama
   // and OpenRouter) have failed multiple times in a row. Surfaces a banner
@@ -422,18 +428,11 @@
     }
 
     if (data.event_type === 'interpretation' || data.event_type === 'update') {
-      // Always go through addMessageToSession — its 30s consolidation window
-      // merges rapid-fire updates into a single bubble. Using streamingMessageId
-      // here causes a stale-ID bug: addMessageToSession keeps the old message's
-      // id when it consolidates, leaving streamingMessageId pointing to an
-      // orphaned UUID that updateMessageContent can never find.
-      addMessageToSession(data.session_name, {
-        id: crypto.randomUUID(),
-        direction: 'received',
-        content,
-        timestamp: new Date(),
-      });
-      lineCount += content.split('\n').length;
+      // Append to the single per-session summary block so history replay and
+      // live updates share one bubble rather than creating new bubbles per
+      // event. appendSummaryBullet handles ID reuse, dedup, and 30-bullet cap.
+      appendSummaryBullet(data.session_name, content);
+      lineCount += 1;
       if (autoScroll) setTimeout(scrollToBottom, 10);
     }
   }
@@ -529,6 +528,7 @@
 
     try {
       await invoke('disconnect_session');
+      clearSessionSummary(sessionName);
       addMessageToSession(sessionName, {
         direction: 'system',
         content: `Disconnected from session "${sessionName}".`,
@@ -586,14 +586,13 @@
         }
       }
 
-      // Emit a single consolidated bubble: "history: • line1\n• line2\n..."
-      const bullets = deduped.map(e => `• ${e.text}`).join('\n');
-      const oldestTs = new Date(deduped[0].ts * 1000);
-      addMessageToSession(sessionName, {
-        direction: 'system',
-        content: `history: ${bullets}`,
-        timestamp: oldestTs,
-      });
+      // Feed each deduped entry into the single summary block via
+      // appendSummaryBullet. This unifies history replay with live LLM
+      // updates — both paths write into the same `direction: 'received'`
+      // bubble keyed by session name, using each entry's original timestamp.
+      for (const entry of deduped) {
+        appendSummaryBullet(sessionName, entry.text, new Date(entry.ts * 1000));
+      }
     } catch (err) {
       // Non-fatal — absence of logs is normal.
       console.debug('loadLogHistory failed:', err);
@@ -793,6 +792,15 @@
   // clear anything and do NOT invoke the LLM summarizer.
   $: if ($currentSession) {
     const sessionName = $currentSession.name;
+    // Reset the summary-block tracking when the user navigates to a different
+    // session so the next appendSummaryBullet for the incoming session starts
+    // fresh. Without this the new session would try to append to the previous
+    // session's stale block ID.
+    if (previousSessionName && previousSessionName !== sessionName) {
+      clearSessionSummary(previousSessionName);
+    }
+    clearSessionSummary(sessionName);
+    previousSessionName = sessionName;
     connecting = true;
     waitingForResponse = false;
     lineCount = 0;
@@ -834,6 +842,12 @@
       setTimeout(() => { connecting = false; }, 500);
     }
   } else {
+    // No current session — clear any lingering summary-block ID for the
+    // session we just left so re-entering it later starts a fresh block.
+    if (previousSessionName) {
+      clearSessionSummary(previousSessionName);
+      previousSessionName = null;
+    }
     connecting = false;
     waitingForResponse = false;
     streamingMessageId = null;
