@@ -260,6 +260,10 @@
     background-color: var(--header-bg);
     gap: 0.75rem;
     min-height: 3rem;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    flex-shrink: 0;
   }
 
   .header-left {

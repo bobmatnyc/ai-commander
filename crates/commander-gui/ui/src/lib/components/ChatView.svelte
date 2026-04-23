@@ -657,8 +657,10 @@
       connecting = false;
       markActivity();
 
-      const { content, full_content } = event.payload;
+      const { session, content, full_content } = event.payload;
       if (!$currentSession) return;
+      // Only count events for the currently viewed session
+      if (session && session !== $currentSession.name) return;
 
       const sessionName = $currentSession.name;
       markSessionActive(sessionName);
@@ -944,7 +946,7 @@
         Test: Connect to a session, assert this span renders; disconnect,
         assert it disappears.
       -->
-      {#if $currentSession && (charsReceived > 0 || linesReceived > 0)}
+      {#if $currentSession}
         <span class="activity-counter" title="Bytes / lines received since connect">
           ↓ {charsReceived.toLocaleString()} chars · {linesReceived.toLocaleString()} lines
         </span>
