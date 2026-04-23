@@ -7,7 +7,8 @@
   import CreateSessionModal from './lib/components/CreateSessionModal.svelte';
   import { Sun, Moon, Settings } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
-  import { currentSession, serverRebuilding, githubStats, showCreateSessionModal } from './lib/stores/app';
+  import { currentSession, sessions, serverRebuilding, githubStats, showCreateSessionModal, markSessionConnected, addMessageToSession } from './lib/stores/app';
+  import { get } from 'svelte/store';
   import { invoke } from './lib/transport';
 
   // No auth needed — Tailscale handles network security
@@ -187,7 +188,45 @@
   {#if $showCreateSessionModal}
     <CreateSessionModal
       bind:show={$showCreateSessionModal}
-      on:created={() => { $showCreateSessionModal = false; }}
+      on:created={async (e) => {
+        $showCreateSessionModal = false;
+        // Auto-connect to the newly created session so the user lands directly
+        // in ChatView rather than having to click the session row manually.
+        try {
+          const name: string = e.detail?.name;
+          if (name) {
+            const result = (await invoke('connect_session', { name })) as {
+              session?: string;
+              history?: Array<{ text: string; ts: number; hash: string }>;
+            } | null;
+            // Find the session object from the store after connect (SessionList
+            // will refresh on its own poll, but we need a minimal object now).
+            const sessionList = get(sessions);
+            const session = sessionList.find(s => s.name === name) ?? {
+              name,
+              created_at: new Date().toISOString(),
+              is_connected: true,
+              session_state: 'connected' as const,
+            };
+            currentSession.set({ ...session, is_connected: true });
+            markSessionConnected(name);
+            // Hydrate history returned by connect, if any.
+            if (result?.history?.length) {
+              for (const entry of result.history) {
+                const ts = new Date(entry.ts * 1000);
+                addMessageToSession(name, {
+                  direction: 'system',
+                  content: `history ${ts.toLocaleTimeString()}: ${entry.text}`,
+                  timestamp: ts,
+                });
+              }
+            }
+          }
+        } catch {
+          // Auto-connect is best-effort — session creation already succeeded.
+          // The user can manually click the row in SessionList.
+        }
+      }}
       on:close={() => { $showCreateSessionModal = false; }}
     />
   {/if}

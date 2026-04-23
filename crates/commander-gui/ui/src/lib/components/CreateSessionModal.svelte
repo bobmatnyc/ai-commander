@@ -78,7 +78,7 @@
         adapter: selectedAdapter,
       });
 
-      dispatch('created');
+      dispatch('created', { name: sessionName });
       close();
     } catch (err) {
       error = `Failed to create session: ${err}`;
