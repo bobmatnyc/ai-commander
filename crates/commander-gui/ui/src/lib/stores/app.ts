@@ -328,6 +328,42 @@ export function markSessionDataReceived(sessionName: string) {
   });
 }
 
+// Map of sessionName -> timestamp (ms) of last connection. Used by the
+// 'recent' sort mode so order reflects when the user last connected, not when
+// random tmux output last arrived.
+export const lastConnectedAt = writable<Map<string, number>>(new Map());
+
+// Hydrate from localStorage so order survives page refresh.
+try {
+  const stored = JSON.parse(localStorage.getItem('aic-last-connected') ?? '{}');
+  if (typeof stored === 'object' && stored !== null) {
+    lastConnectedAt.set(new Map(Object.entries(stored).map(([k, v]) => [k, Number(v)])));
+  }
+} catch {}
+
+/**
+ * Why: Records that the user explicitly connected to a session so the 'recent'
+ * sort reflects intentional connections, not incidental tmux output events.
+ * What: Updates lastConnectedAt for the session to now and persists to
+ * localStorage under 'aic-last-connected' so the order survives reload.
+ * Test: Call markSessionConnected('foo'), assert $lastConnectedAt.get('foo')
+ * is within 100 ms of Date.now() and localStorage['aic-last-connected']
+ * contains a matching entry.
+ */
+export function markSessionConnected(sessionName: string) {
+  const now = Date.now();
+  lastConnectedAt.update(map => {
+    const next = new Map(map);
+    next.set(sessionName, now);
+    return next;
+  });
+  try {
+    const stored = JSON.parse(localStorage.getItem('aic-last-connected') ?? '{}');
+    stored[sessionName] = now;
+    localStorage.setItem('aic-last-connected', JSON.stringify(stored));
+  } catch {}
+}
+
 // Current view for navigation (e.g. 'sessions', 'chat', 'dashboard')
 export const currentView = writable<string>('sessions');
 

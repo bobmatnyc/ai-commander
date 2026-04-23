@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats, lastActivityAt, markSessionDataReceived, showCreateSessionModal } from '../stores/app';
+  import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats, lastActivityAt, markSessionDataReceived, lastConnectedAt, markSessionConnected, showCreateSessionModal } from '../stores/app';
   import { subscribeSessionEvents, isDesktop, type SessionEventData } from '../transport';
   import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor, X } from 'lucide-svelte';
   import type { Session } from '../stores/app';
@@ -39,13 +39,15 @@
   /**
    * Why: Provides a deterministic sort of the session list for display.
    * What: For 'alpha' mode sorts A→Z by display name. For 'recent' mode sorts
-   *       connected sessions first (by lastActivityAt desc, then alpha), then
-   *       disconnected (same), then registered (alpha).
+   *       connected sessions first (by lastConnectedAt desc, then alpha), then
+   *       disconnected (same), then registered (alpha). Uses connection time
+   *       rather than activity time so sessions stay ranked by when the user
+   *       chose to connect, not when random tmux output last arrived.
    * Test: Given sessions [C-disconnected, A-connected, B-registered], 'alpha'
-   *       mode should return [A, B, C]; 'recent' mode with A having recent
-   *       activity should return [A-connected, C-disconnected, B-registered].
+   *       mode should return [A, B, C]; 'recent' mode with A connected most
+   *       recently should return [A-connected, C-disconnected, B-registered].
    */
-  function sortSessions(list: Session[], mode: SortMode, activityMap: Map<string, number>): Session[] {
+  function sortSessions(list: Session[], mode: SortMode, connectedMap: Map<string, number>): Session[] {
     const copy = [...list];
     if (mode === 'alpha') {
       copy.sort((a, b) => {
@@ -55,7 +57,7 @@
       });
     } else {
       // Recent: connected first, then disconnected, then registered.
-      // Within each group, most recently active first; ties broken by alpha.
+      // Within each group, most recently connected first; ties broken by alpha.
       const stateOrder = { connected: 0, disconnected: 1, registered: 2 } as const;
       const getState = (s: Session): 'connected' | 'disconnected' | 'registered' =>
         (s.session_state as any) || (s.is_connected ? 'connected' : 'disconnected');
@@ -63,9 +65,9 @@
         const sa = getState(a);
         const sb = getState(b);
         if (sa !== sb) return stateOrder[sa] - stateOrder[sb];
-        const ta = activityMap.get(a.name) ?? 0;
-        const tb = activityMap.get(b.name) ?? 0;
-        if (ta !== tb) return tb - ta; // more recent first
+        const ta = connectedMap.get(a.name) ?? 0;
+        const tb = connectedMap.get(b.name) ?? 0;
+        if (ta !== tb) return tb - ta; // more recently connected first
         return (a.nickname ?? a.name).localeCompare(b.nickname ?? b.name);
       });
     }
@@ -73,9 +75,9 @@
   }
 
   // Derived sorted session list — re-evaluated whenever sessions, sort mode, or
-  // activity map changes. sessionSort is a local variable so we reference it
+  // connection map changes. sessionSort is a local variable so we reference it
   // inside a reactive block to ensure Svelte tracks it.
-  $: sortedSessions = sortSessions($sessions, sessionSort, $lastActivityAt);
+  $: sortedSessions = sortSessions($sessions, sessionSort, $lastConnectedAt);
 
   let interval: number;
   let lastError: string | null = null;
@@ -235,6 +237,7 @@
       const session = $sessions.find(s => s.name === name);
       if (session) {
         currentSession.set({ ...session, is_connected: true });
+        markSessionConnected(session.name);
 
         // Why: Connection state is now signaled visually (green pulse dot on
         // the row + green tinge in the ChatView header + live activity
