@@ -368,14 +368,6 @@
     if (!$currentSession || $currentSession.name !== data.session_name) return;
     markSessionActive(data.session_name);
 
-    // Increment the activity counter shown in the summary status bar so the
-    // user gets a live diagnostic signal of incoming data volume.
-    const rawChunk = data.content || '';
-    if (rawChunk) {
-      charsReceived += rawChunk.length;
-      linesReceived += rawChunk.split('\n').length;
-    }
-
     // Activity indicator
     isActive = true;
     clearTimeout(activityTimer);
@@ -430,19 +422,17 @@
     }
 
     if (data.event_type === 'interpretation' || data.event_type === 'update') {
-      if (data.is_update && streamingMessageId) {
-        // Replace the in-progress message with the newer interpretation
-        updateMessageContent(data.session_name, streamingMessageId, content);
-      } else {
-        // Start a fresh received message for this interpretation
-        streamingMessageId = crypto.randomUUID();
-        addMessageToSession(data.session_name, {
-          id: streamingMessageId,
-          direction: 'received',
-          content,
-          timestamp: new Date(),
-        });
-      }
+      // Always go through addMessageToSession — its 30s consolidation window
+      // merges rapid-fire updates into a single bubble. Using streamingMessageId
+      // here causes a stale-ID bug: addMessageToSession keeps the old message's
+      // id when it consolidates, leaving streamingMessageId pointing to an
+      // orphaned UUID that updateMessageContent can never find.
+      addMessageToSession(data.session_name, {
+        id: crypto.randomUUID(),
+        direction: 'received',
+        content,
+        timestamp: new Date(),
+      });
       lineCount += content.split('\n').length;
       if (autoScroll) setTimeout(scrollToBottom, 10);
     }
@@ -1111,7 +1101,8 @@
 
   @media (max-width: 768px) {
     .activity-counter {
-      display: none;
+      font-size: 0.62rem;
+      padding: 0.15rem 0.35rem;
     }
   }
 
