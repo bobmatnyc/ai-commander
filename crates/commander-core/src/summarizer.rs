@@ -1081,13 +1081,14 @@ pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<
 /// installed. Larger models (70b+) are deliberately excluded from this list
 /// because they are too slow for interactive interpretation.
 const OLLAMA_INTERPRET_PREFERENCES: &[&str] = &[
+    "qwen3:30b",           // primary: benchmarked at 90 tok/s on Apple Silicon, outperforms 8b in both speed and quality
+    "qwen3:8b",            // fallback when 30b isn't available — reasoning model, good quality with moderate token budget
     "gemma3:4b",           // fast, non-reasoning, ideal for one-sentence summaries
     "gemma4:e4b",          // better quality, still reasonable speed
     "mistral-small3.2:latest",
     "mistral:latest",
     "qwen2.5-coder:7b-instruct",
     "qwen2.5:7b",
-    "qwen3:8b",            // reasoning model — last resort, needs more token budget
 ];
 
 /// Ollama base URL.
