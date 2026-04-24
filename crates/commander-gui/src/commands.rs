@@ -216,6 +216,14 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
     // against any upstream source emitting the same session more than once
     // (e.g. symlinked project paths matching the same session twice).
     let mut seen = std::collections::HashSet::new();
+    // Track which tmux session groups we've already emitted. Sessions in the
+    // same `#{session_group}` mirror identical content (created via
+    // `tmux new-session -t <existing>`), so we keep only the first entry per
+    // group. Input order from `list_sessions` is tmux's native order, which
+    // corresponds to session-counter age — the first entry per group is the
+    // oldest (e.g. "open-mpm-9" wins over "open-mpm-27").
+    let mut seen_groups: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     // Track which projects map to a running tmux session so we can emit
     // "registered-only" placeholders for the rest.
     let mut matched_project_names: std::collections::HashSet<String> =
@@ -226,6 +234,14 @@ pub async fn list_sessions(state: State<'_, GuiState>) -> Result<Vec<SessionInfo
         .filter_map(|s| {
             if !seen.insert(s.name.clone()) {
                 return None; // duplicate tmux name — skip
+            }
+            // Group-based dedup: collapse multiple sessions in the same
+            // `#{session_group}` into a single entry. Sessions with no
+            // group (`None`) always pass through.
+            if let Some(ref g) = s.group {
+                if !seen_groups.insert(g.clone()) {
+                    return None; // duplicate group — skip
+                }
             }
             let path = std::process::Command::new("tmux")
                 .args(["display-message", "-p", "-t", &s.name, "#{pane_current_path}"])

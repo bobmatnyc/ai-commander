@@ -131,7 +131,11 @@ impl TmuxOrchestrator {
 
     /// List all tmux sessions.
     pub fn list_sessions(&self) -> Result<Vec<TmuxSession>> {
-        let output = self.run_tmux(&["list-sessions", "-F", "#{session_name}:#{session_created}"])?;
+        let output = self.run_tmux(&[
+            "list-sessions",
+            "-F",
+            "#{session_name}:#{session_created}:#{session_group}",
+        ])?;
 
         // If no sessions exist, tmux returns non-zero exit code
         if !output.status.success() {

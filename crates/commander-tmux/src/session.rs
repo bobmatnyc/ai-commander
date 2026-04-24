@@ -13,6 +13,11 @@ pub struct TmuxSession {
     pub created_at: DateTime<Utc>,
     /// Panes in this session.
     pub panes: Vec<TmuxPane>,
+    /// Session group (`#{session_group}`). Sessions that share a group mirror
+    /// identical content (created via `tmux new-session -t <existing>`).
+    /// `None` when the session is not part of any group — tmux reports this
+    /// as an empty string which we normalize to `None`.
+    pub group: Option<String>,
 }
 
 impl TmuxSession {
@@ -22,15 +27,25 @@ impl TmuxSession {
             name: name.into(),
             created_at,
             panes: Vec::new(),
+            group: None,
         }
     }
 
     /// Parse session from tmux list-sessions output line.
     ///
-    /// Expected format: `session_name:created_timestamp`
+    /// Why: Centralizes parsing of the tmux list-sessions format so callers
+    /// don't have to know the field layout. Supports both the legacy
+    /// two-field format and the new three-field format that includes
+    /// `#{session_group}` for group-based deduplication.
+    /// What: Accepts `name:timestamp` or `name:timestamp:group`. An empty
+    /// group string is normalized to `None`.
+    /// Test: Parse `"mysession:1706000000"` → group is None;
+    /// parse `"mysession:1706000000:grp1"` → group is `Some("grp1")`;
+    /// parse `"mysession:1706000000:"` → group is None.
     pub fn parse(line: &str) -> Result<Self> {
-        let parts: Vec<&str> = line.splitn(2, ':').collect();
-        if parts.len() != 2 {
+        // splitn(3) so a trailing group field is preserved even if empty.
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() < 2 {
             return Err(TmuxError::ParseError(format!(
                 "invalid session format: {}",
                 line
@@ -47,10 +62,18 @@ impl TmuxSession {
             .single()
             .ok_or_else(|| TmuxError::ParseError(format!("invalid timestamp: {}", timestamp)))?;
 
+        let group = if parts.len() == 3 {
+            let g = parts[2].trim();
+            if g.is_empty() { None } else { Some(g.to_string()) }
+        } else {
+            None
+        };
+
         Ok(Self {
             name,
             created_at,
             panes: Vec::new(),
+            group,
         })
     }
 }
