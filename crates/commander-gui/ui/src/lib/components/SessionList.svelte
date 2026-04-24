@@ -248,19 +248,10 @@
         // Test: Click Connect on a session, assert no "Connected to session"
         // message is added to $sessionMessages for that session.
 
-        // Hydrate cached history returned by the backend (when any).
-        // Skip the hydration if the session already has in-memory messages,
-        // which happens when the user reconnects during the same GUI run.
-        if (!hasCachedHistory && result?.history?.length) {
-          for (const entry of result.history) {
-            const ts = new Date(entry.ts * 1000);
-            addMessageToSession(name, {
-              direction: 'system',
-              content: `history ${ts.toLocaleTimeString()}: ${entry.text}`,
-              timestamp: ts,
-            });
-          }
-        }
+        // History is replayed by ChatView.loadLogHistory via appendSummaryBullet
+        // (triggered when $currentSession changes above). Hydrating here with
+        // addMessageToSession created separate direction:'system' bubbles using
+        // the old 'history HH:MM: text' format that bypassed consolidation.
 
         // Why: Previously we called `capture_session_output` here and injected
         // the raw 500-line tmux dump as a `direction: 'received'` ("claude")
