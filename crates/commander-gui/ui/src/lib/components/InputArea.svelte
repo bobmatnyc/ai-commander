@@ -216,13 +216,11 @@
 
   @media (max-width: 768px) {
     .input-area {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      /* iPhone notch / home bar safe area */
+      /* iPhone notch / home bar safe area. Stays in natural flex flow
+         (parent .main-panel is flex column with overflow hidden), so the
+         InputArea sits at the bottom without fixed positioning — which
+         otherwise took it out of flow and pushed the send button off-screen. */
       padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));
-      z-index: 100;
     }
   }
 

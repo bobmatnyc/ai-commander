@@ -1197,13 +1197,34 @@
     background: var(--bg-primary);
   }
 
+  /*
+   * Mobile: InputArea is no longer fixed (see InputArea.svelte); it sits as a
+   * natural flex child of .main-panel. We therefore drop the extra bottom
+   * padding reservation — .terminal-output/.raw-pane now fill the remaining
+   * flex space above the input.
+   */
   @media (max-width: 768px) {
-    /* Leave room for the fixed InputArea bar (~4rem input + safe area) */
-    .terminal-output {
-      padding-bottom: calc(4rem + env(safe-area-inset-bottom));
+    .session-actions {
+      /* Single scrollable row — prevents the toolbar from wrapping onto two
+         lines on narrow screens and crushing the terminal area. */
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      gap: 0.35rem;
+      padding: 0.4rem 0.5rem;
     }
-    .raw-pane {
-      padding-bottom: calc(4rem + env(safe-area-inset-bottom));
+    .session-actions .tab {
+      padding: 0.3rem 0.5rem;
+      font-size: 0.7rem;
+      white-space: nowrap;
+    }
+    .session-title {
+      max-width: 120px;
+    }
+    .message {
+      /* 85% still overflows on narrow viewports — allow full width so long
+         content wraps naturally instead of horizontal scrolling. */
+      max-width: 100%;
     }
   }
 
