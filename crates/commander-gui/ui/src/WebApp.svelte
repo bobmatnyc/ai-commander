@@ -7,7 +7,7 @@
   import CreateSessionModal from './lib/components/CreateSessionModal.svelte';
   import { Sun, Moon, Settings } from 'lucide-svelte';
   import { resolvedTheme, setTheme } from './lib/stores/theme';
-  import { currentSession, sessions, serverRebuilding, githubStats, showCreateSessionModal, markSessionConnected, addMessageToSession } from './lib/stores/app';
+  import { currentSession, sessions, serverRebuilding, githubStats, showCreateSessionModal, markSessionConnected } from './lib/stores/app';
   import { get } from 'svelte/store';
   import { invoke } from './lib/transport';
 
@@ -122,10 +122,7 @@
     try {
       const name = e.detail?.name;
       if (name) {
-        const result = (await invoke('connect_session', { name })) as {
-          session?: string;
-          history?: Array<{ text: string; ts: number; hash: string }>;
-        } | null;
+        await invoke('connect_session', { name });
         // Find the session object from the store after connect (SessionList
         // will refresh on its own poll, but we need a minimal object now).
         const sessionList = get(sessions);
@@ -137,17 +134,9 @@
         };
         currentSession.set({ ...session, is_connected: true });
         markSessionConnected(name);
-        // Hydrate history returned by connect, if any.
-        if (result?.history?.length) {
-          for (const entry of result.history) {
-            const ts = new Date(entry.ts * 1000);
-            addMessageToSession(name, {
-              direction: 'system',
-              content: `history ${ts.toLocaleTimeString()}: ${entry.text}`,
-              timestamp: ts,
-            });
-          }
-        }
+        // History is replayed by ChatView.loadLogHistory via appendSummaryBullet,
+        // which consolidates entries into a single bullet block. Injecting
+        // separate system bubbles here would create duplicates.
       }
     } catch {
       // Auto-connect is best-effort — session creation already succeeded.

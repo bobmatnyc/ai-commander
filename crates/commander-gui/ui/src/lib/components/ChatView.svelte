@@ -792,55 +792,59 @@
   // clear anything and do NOT invoke the LLM summarizer.
   $: if ($currentSession) {
     const sessionName = $currentSession.name;
-    // Reset the summary-block tracking when the user navigates to a different
-    // session so the next appendSummaryBullet for the incoming session starts
-    // fresh. Without this the new session would try to append to the previous
-    // session's stale block ID.
-    if (previousSessionName && previousSessionName !== sessionName) {
-      clearSessionSummary(previousSessionName);
-    }
-    clearSessionSummary(sessionName);
-    previousSessionName = sessionName;
-    connecting = true;
-    waitingForResponse = false;
-    lineCount = 0;
-    // Reset the diagnostic chars/lines counter so it only reflects data
-    // received during the current connection.
-    charsReceived = 0;
-    linesReceived = 0;
-    isActive = false;
-    streamingMessageId = null;
-    llmUnavailable = false;
-    // Reset pagination so the new session starts at the bottom showing the
-    // most recent PAGE_SIZE messages rather than carrying over the previous
-    // session's expanded count.
-    visibleCount = PAGE_SIZE;
-
-    // Web mode: (re)subscribe to the REST SSE event stream for this session.
-    // No-op in Tauri mode (handled by native events).
-    startSseSubscription(sessionName);
-
-    // Drop "connecting" once we know whether history exists (avoid flash)
-    const existing = get(sessionMessages).get(sessionName) || [];
-    if (existing.length > 0) {
-      connecting = false;
-    } else {
-      // In summary mode, replay persisted log history on open so users see
-      // prior summaries without waiting for new activity.
-      if (viewMode === 'summary') {
-        loadLogHistory(sessionName);
+    // Only reset when the session actually changes (or on first connect).
+    // Session-object field updates like `is_connected` flipping to true must
+    // NOT trigger resets — doing so would wipe the summary block tracking
+    // that loadLogHistory just populated, orphaning the bullet block and
+    // causing the next appendSummaryBullet call to create a duplicate.
+    if (sessionName !== previousSessionName) {
+      if (previousSessionName) {
+        clearSessionSummary(previousSessionName);
       }
-      // Why: Previously we injected a "Connected to session: X" system
-      // message here. That bubble has been replaced by purely visual signals
-      // — the green pulse dot on the session row (SessionList.svelte) and a
-      // green tinge on the chat header (below) — so the chat stream stays
-      // clean of redundant lifecycle chatter.
-      // Test: Open a fresh session, assert $sessionMessages.get(name) does
-      // NOT contain a "Connected to session" system entry.
+      clearSessionSummary(sessionName);
+      previousSessionName = sessionName;
+      connecting = true;
+      waitingForResponse = false;
+      lineCount = 0;
+      // Reset the diagnostic chars/lines counter so it only reflects data
+      // received during the current connection.
+      charsReceived = 0;
+      linesReceived = 0;
+      isActive = false;
+      streamingMessageId = null;
+      llmUnavailable = false;
+      // Reset pagination so the new session starts at the bottom showing the
+      // most recent PAGE_SIZE messages rather than carrying over the previous
+      // session's expanded count.
+      visibleCount = PAGE_SIZE;
 
-      // Let the 2s onMount timer clear `connecting`
-      setTimeout(() => { connecting = false; }, 500);
+      // Web mode: (re)subscribe to the REST SSE event stream for this session.
+      // No-op in Tauri mode (handled by native events).
+      startSseSubscription(sessionName);
+
+      // Drop "connecting" once we know whether history exists (avoid flash)
+      const existing = get(sessionMessages).get(sessionName) || [];
+      if (existing.length > 0) {
+        connecting = false;
+      } else {
+        // In summary mode, replay persisted log history on open so users see
+        // prior summaries without waiting for new activity.
+        if (viewMode === 'summary') {
+          loadLogHistory(sessionName);
+        }
+        // Why: Previously we injected a "Connected to session: X" system
+        // message here. That bubble has been replaced by purely visual signals
+        // — the green pulse dot on the session row (SessionList.svelte) and a
+        // green tinge on the chat header (below) — so the chat stream stays
+        // clean of redundant lifecycle chatter.
+        // Test: Open a fresh session, assert $sessionMessages.get(name) does
+        // NOT contain a "Connected to session" system entry.
+
+        // Let the 2s onMount timer clear `connecting`
+        setTimeout(() => { connecting = false; }, 500);
+      }
     }
+    // Same session, just a field update (e.g. is_connected) — do nothing.
   } else {
     // No current session — clear any lingering summary-block ID for the
     // session we just left so re-entering it later starts a fresh block.
