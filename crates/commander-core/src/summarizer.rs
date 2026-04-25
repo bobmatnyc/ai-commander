@@ -1178,6 +1178,11 @@ fn interpret_via_ollama(user_prompt: &str) -> Option<String> {
             {"role": "user", "content": user_prompt}
         ],
         "stream": false,
+        // Disable chain-of-thought for reasoning models (qwen3 family).
+        // Without this, qwen3:30b consumes its entire token budget on internal
+        // reasoning, never closes </think>, and strip_think_tags returns "" —
+        // causing every summary to be rejected by is_valid_summary.
+        "think": false,
         "options": { "num_predict": 1500 }
     });
 
