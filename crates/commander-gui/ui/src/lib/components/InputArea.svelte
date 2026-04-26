@@ -15,7 +15,7 @@
   $: isDisabled = !$currentSession || isSending;
   $: canSend = !isDisabled && !$serverRebuilding;
   $: isConnected = !!$currentSession?.is_connected;
-  $: isSlashCommand = input.trim().startsWith('/') && !input.trim().startsWith('/aic:send ');
+  $: isSlashCommand = input.trim().startsWith('/') && !input.trim().startsWith('/send ') && !input.trim().startsWith('/aic:send ');
 
   async function handleSlashCommand(command: string) {
     const sessionName = $currentSession?.name;
@@ -76,14 +76,14 @@
           addMessageToSession(sessionName, {
             direction: 'system',
             content: `Available commands:
-  /status - Send status command
+  /send <text> - Send literal text to tmux (bypasses command handler)
+  /status - Show session status
   /list - List all sessions
   /disconnect - Disconnect from session
   /stop - Stop this session
   /clear - Clear message history
-  /help - Show this help
   /iterm - Open session in iTerm2
-  /aic:send <text> - Send raw text to tmux (bypass command handler)`,
+  /help - Show this help`,
             timestamp: new Date(),
           });
           break;
@@ -132,7 +132,16 @@
 
     try {
       if (content.startsWith('/')) {
-        if (content.startsWith('/aic:send ')) {
+        if (content.startsWith('/send ')) {
+          const actualContent = content.substring(6);
+          await invoke('send_message', { content: actualContent });
+          addMessageToSession(sessionName, {
+            direction: 'sent',
+            content: actualContent,
+            timestamp: new Date(),
+          });
+        } else if (content.startsWith('/aic:send ')) {
+          // Legacy alias — kept for backwards compatibility
           const actualContent = content.substring(10);
           await invoke('send_message', { content: actualContent });
           addMessageToSession(sessionName, {
