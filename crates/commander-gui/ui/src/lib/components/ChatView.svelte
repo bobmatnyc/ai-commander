@@ -35,7 +35,6 @@
   let viewMode: 'summary' | 'raw' = 'summary';
   // Tracks sessions whose history has already been replayed to avoid
   // re-appending the same log entries on re-render.
-  const loadedHistorySessions = new Set<string>();
 
   let isActive = false;
   let activityTimer: number;
@@ -575,8 +574,6 @@
    * contains three "• " bullet lines.
    */
   async function loadLogHistory(sessionName: string) {
-    if (loadedHistorySessions.has(sessionName)) return;
-    loadedHistorySessions.add(sessionName);
     try {
       const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
       const entries = (await invoke('get_session_log', {
@@ -827,25 +824,20 @@
       // No-op in Tauri mode (handled by native events).
       startSseSubscription(sessionName);
 
-      // Drop "connecting" once we know whether history exists (avoid flash)
+      // Always reload log history on session switch in summary mode.
+      // appendSummaryBullet deduplicates by content so re-loading is safe.
+      // We removed the loadedHistorySessions gate (permanent once-per-session
+      // block) and the existing.length guard — both prevented history from
+      // appearing when the store already had stale data or when the page had
+      // previously visited the session with an empty log.
+      if (viewMode === 'summary') {
+        loadLogHistory(sessionName);
+      }
+      // Drop connecting indicator once history arrives (or after brief timeout)
       const existing = get(sessionMessages).get(sessionName) || [];
       if (existing.length > 0) {
         connecting = false;
       } else {
-        // In summary mode, replay persisted log history on open so users see
-        // prior summaries without waiting for new activity.
-        if (viewMode === 'summary') {
-          loadLogHistory(sessionName);
-        }
-        // Why: Previously we injected a "Connected to session: X" system
-        // message here. That bubble has been replaced by purely visual signals
-        // — the green pulse dot on the session row (SessionList.svelte) and a
-        // green tinge on the chat header (below) — so the chat stream stays
-        // clean of redundant lifecycle chatter.
-        // Test: Open a fresh session, assert $sessionMessages.get(name) does
-        // NOT contain a "Connected to session" system entry.
-
-        // Let the 2s onMount timer clear `connecting`
         setTimeout(() => { connecting = false; }, 500);
       }
     }
