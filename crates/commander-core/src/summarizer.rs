@@ -1000,7 +1000,10 @@ pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<
             return None;
         }
     };
-    let model = get_model();
+    // Use a free-tier model for screen interpretation so it works even when
+    // the account has no credits. The OPENROUTER_MODEL env var can override.
+    let model = std::env::var("OPENROUTER_INTERPRET_MODEL")
+        .unwrap_or_else(|_| "google/gemma-3-4b-it:free".to_string());
 
     let request_body = serde_json::json!({
         "model": model,
@@ -1080,15 +1083,20 @@ pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<
 /// polling interval; fall back to anything 7b-class if the primaries are not
 /// installed. Larger models (70b+) are deliberately excluded from this list
 /// because they are too slow for interactive interpretation.
+///
+/// qwen3:30b was originally listed first but emits extensive reasoning tokens
+/// even with think:false (the param is ignored by the model), pushing total
+/// call time to 40-50 s — well past the 30 s request timeout. qwen3:8b
+/// completes the same prompt in ~5 s and produces clean one-sentence answers.
 const OLLAMA_INTERPRET_PREFERENCES: &[&str] = &[
-    "qwen3:30b",           // primary: benchmarked at 90 tok/s on Apple Silicon, outperforms 8b in both speed and quality
-    "qwen3:8b",            // fallback when 30b isn't available — reasoning model, good quality with moderate token budget
+    "qwen3:8b",            // primary: ~5 s on Apple Silicon, reasoning model with think:false support
     "gemma3:4b",           // fast, non-reasoning, ideal for one-sentence summaries
     "gemma4:e4b",          // better quality, still reasonable speed
     "mistral-small3.2:latest",
     "mistral:latest",
     "qwen2.5-coder:7b-instruct",
     "qwen2.5:7b",
+    "qwen3:30b",           // last resort: takes 40-50 s per call, regularly hits the 30 s timeout
 ];
 
 /// Ollama base URL.
@@ -1188,7 +1196,7 @@ fn interpret_via_ollama(user_prompt: &str) -> Option<String> {
 
     let response = client
         .post(format!("{}/api/chat", OLLAMA_BASE_URL))
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60))
         .json(&body)
         .send()
         .ok()?;
