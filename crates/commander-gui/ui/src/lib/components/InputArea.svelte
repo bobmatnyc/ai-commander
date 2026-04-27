@@ -5,7 +5,8 @@
     currentSession,
     sessions,
     clearSessionMessages,
-    serverRebuilding
+    serverRebuilding,
+    activityCounter
   } from '../stores/app';
   import { Send } from 'lucide-svelte';
 
@@ -180,8 +181,24 @@
   }
 </script>
 
-<div class="input-area" class:connected={isConnected}>
-  <input
+<div class="input-area-wrap">
+  <!--
+    Why: The chars/lines diagnostic counter previously lived in ChatView's
+    session-actions toolbar where it was easy to miss. Moving it directly
+    above the input field gives a peripheral signal of incoming traffic
+    while the user is typing/sending.
+    What: Renders running totals from the shared `activityCounter` store.
+    Hidden when no session is connected or no data has arrived yet.
+    Test: Connect a session, send/receive data, assert the line appears
+    with chars/lines totals; disconnect and assert it disappears.
+  -->
+  {#if $currentSession && $activityCounter.chars > 0}
+    <div class="activity-counter" title="Bytes / lines received since connect">
+      ↓ {$activityCounter.chars.toLocaleString()} chars · {$activityCounter.lines.toLocaleString()} lines
+    </div>
+  {/if}
+  <div class="input-area" class:connected={isConnected}>
+    <input
     type="text"
     bind:value={input}
     on:keydown={handleKeydown}
@@ -208,9 +225,55 @@
   >
     <Send size={18} />
   </button>
+  </div>
 </div>
 
 <style>
+  /*
+   * Wrapper hosts the activity counter line above the actual input row.
+   * Using a flex column lets the counter sit flush against the top border
+   * without affecting the input row's existing layout / padding.
+   */
+  .input-area-wrap {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  /*
+   * Diagnostic chars/lines counter — small, muted, monospace. Sits directly
+   * above the input field so peripheral activity is visible while typing.
+   */
+  .activity-counter {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
+    font-size: 0.75rem;
+    color: #888;
+    padding: 0.25rem 1rem 0;
+    background-color: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: 0.01em;
+    user-select: none;
+  }
+
+  /*
+   * When the counter is visible, the input-area below it should not draw a
+   * second top border (the counter already provides one). Use sibling combinator.
+   */
+  .activity-counter + .input-area {
+    border-top: none;
+  }
+
+  @media (max-width: 768px) {
+    .activity-counter {
+      font-size: 0.68rem;
+      padding: 0.2rem 0.6rem 0;
+    }
+  }
+
   .input-area {
     display: flex;
     gap: 0.5rem;

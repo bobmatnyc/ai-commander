@@ -1,6 +1,6 @@
 <script lang="ts">
   import { get } from 'svelte/store';
-  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive, markSessionDataReceived, appendSummaryBullet, clearSessionSummary } from '../stores/app';
+  import { messages, currentSession, addMessageToSession, updateMessageContent, clearSessionMessages, sessionMessages, markSessionActive, markSessionDataReceived, appendSummaryBullet, clearSessionSummary, activityCounter } from '../stores/app';
   import { onMount, onDestroy, afterUpdate, tick } from 'svelte';
 
   // ─── Pagination ────────────────────────────────────────────────────────────
@@ -42,15 +42,23 @@
   let lineCount = 0;
 
   // Why: Surface a subtle, always-visible metric of incoming data volume in
-  // place of the old "Connected to session" chat bubble. Gives the user a
-  // diagnostic signal that data is flowing without cluttering the message
-  // stream. Resets on session switch / disconnect.
+  // place of the old "Connected to session" chat bubble. The counter is now
+  // rendered by InputArea (above the text field) but updated here, where the
+  // SSE / Tauri event listeners live. We mirror the totals into a shared
+  // store (`activityCounter`) so InputArea can render without prop drilling.
   // What: Running totals of characters and newline-delimited lines observed
   // since connecting to the current session.
-  // Test: Send an SSE event with content "abc\ndef", assert charsReceived
-  // becomes 7 and linesReceived becomes 2.
-  let charsReceived = 0;
-  let linesReceived = 0;
+  // Test: Send an SSE event with content "abc\ndef", assert
+  // $activityCounter.chars === 7 and $activityCounter.lines === 2.
+  function bumpActivity(chars: number, lines: number) {
+    activityCounter.update(c => ({
+      chars: c.chars + chars,
+      lines: c.lines + lines,
+    }));
+  }
+  function resetActivity() {
+    activityCounter.set({ chars: 0, lines: 0 });
+  }
 
   // Previous session name — used to clear the prior session's summary-block ID
   // when navigating between sessions so each session gets a fresh appendable
@@ -388,8 +396,7 @@
     // Test: Switch to raw view, receive a 'raw' SSE event with char_count=10,
     // assert charsReceived increments by 10 even though viewMode === 'raw'.
     if (data.event_type === 'raw') {
-      charsReceived += data.char_count ?? 0;
-      linesReceived += data.line_count ?? 0;
+      bumpActivity(data.char_count ?? 0, data.line_count ?? 0);
       markSessionDataReceived(data.session_name);
       // Fall through to view-mode handling below (raw mode just needs a refresh).
     }
@@ -661,8 +668,7 @@
       lineCount += raw.split('\n').length;
       // Increment the diagnostic chars/lines counter that replaces the old
       // "Connected to session" message. Applies to both summary and raw mode.
-      charsReceived += raw.length;
-      linesReceived += raw.split('\n').length;
+      bumpActivity(raw.length, raw.split('\n').length);
       isActive = true;
       clearTimeout(activityTimer);
       activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
@@ -808,8 +814,7 @@
       lineCount = 0;
       // Reset the diagnostic chars/lines counter so it only reflects data
       // received during the current connection.
-      charsReceived = 0;
-      linesReceived = 0;
+      resetActivity();
       isActive = false;
       streamingMessageId = null;
       llmUnavailable = false;
@@ -855,8 +860,7 @@
     connecting = false;
     waitingForResponse = false;
     streamingMessageId = null;
-    charsReceived = 0;
-    linesReceived = 0;
+    resetActivity();
     stopSseSubscription();
   }
 
@@ -950,18 +954,10 @@
       {/if}
 
       <!--
-        Activity counter — small, muted, monospace diagnostic metric showing
-        volume of data received from the backend since connect. Replaces the
-        old "Connected to session" chat bubble with a continuously-updated
-        signal. Hidden when disconnected.
-        Test: Connect to a session, assert this span renders; disconnect,
-        assert it disappears.
+        Activity counter has moved to InputArea (above the text input). See
+        `activityCounter` store in stores/app.ts — ChatView writes to it via
+        bumpActivity() / resetActivity() and InputArea subscribes for display.
       -->
-      {#if $currentSession}
-        <span class="activity-counter" title="Bytes / lines received since connect">
-          ↓ {charsReceived.toLocaleString()} chars · {linesReceived.toLocaleString()} lines
-        </span>
-      {/if}
     </div>
 
     {#if llmUnavailable && viewMode === 'summary'}
@@ -1099,29 +1095,6 @@
   .session-actions.connected {
     background-color: rgba(34, 197, 94, 0.08);
     border-left-color: #22c55e;
-  }
-
-  /*
-   * Diagnostic activity counter — small, muted, monospace. Sits in the chat
-   * toolbar alongside status badges. Visually distinct from chat content so
-   * the user reads it as a metric, not a message.
-   */
-  .activity-counter {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', monospace;
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    opacity: 0.75;
-    padding: 0.2rem 0.5rem;
-    white-space: nowrap;
-    letter-spacing: 0.01em;
-    user-select: none;
-  }
-
-  @media (max-width: 768px) {
-    .activity-counter {
-      font-size: 0.62rem;
-      padding: 0.15rem 0.35rem;
-    }
   }
 
   .tab {

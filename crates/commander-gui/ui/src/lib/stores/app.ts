@@ -376,6 +376,19 @@ export const serverRebuilding = writable<boolean>(false);
 // Track which sessions have recent activity (SSE or Tauri events)
 export const activeSessions = writable<Set<string>>(new Set());
 
+// Why: The activity counter (chars/lines received) is owned by ChatView (where
+// the SSE / Tauri event listeners live) but rendered by InputArea (above the
+// text field). A shared store decouples the two without prop-drilling through
+// App.svelte / WebApp.svelte.
+// What: Running totals of chars and newline-delimited lines for the currently
+// connected session. Reset by ChatView on session switch / disconnect.
+// Test: Set activityCounter to {chars: 5, lines: 1}, assert InputArea renders
+// "5 chars · 1 lines"; set to {chars: 0, lines: 0}, assert it hides.
+export const activityCounter = writable<{ chars: number; lines: number }>({
+  chars: 0,
+  lines: 0,
+});
+
 const activityTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // Why: The session list needs a subtle pulse on any row that just received
