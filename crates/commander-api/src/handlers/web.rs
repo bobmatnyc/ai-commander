@@ -2265,9 +2265,13 @@ pub fn spawn_session_poller(
                     continue;
                 }
 
-                // Capture current pane content (last 50 lines)
+                // Capture current pane content (last 200 lines of scrollback).
+                // Why 200: Claude Code sessions show only a status bar + spinner
+                // in the visible rows (1–3 lines), all of which is filtered by
+                // is_llm_noise. Capturing 200 lines of scrollback gives
+                // prepare_for_llm actual conversation text to summarize.
                 let output = match tokio::process::Command::new("tmux")
-                    .args(["capture-pane", "-t", session_name, "-p", "-S", "-50"])
+                    .args(["capture-pane", "-t", session_name, "-p", "-S", "-200"])
                     .output()
                     .await
                 {
