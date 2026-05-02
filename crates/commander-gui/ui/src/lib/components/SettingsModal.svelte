@@ -38,11 +38,36 @@
   function close() { dispatch('close'); }
   function handleBackdrop(e: MouseEvent) { if (e.target === e.currentTarget) close(); }
   function handleKey(e: KeyboardEvent) { if (e.key === 'Escape') close(); }
+
+  /**
+   * Why: When the modal is rendered as a descendant of components that have
+   * created a stacking context (e.g. mobile <aside> with position:absolute +
+   * z-index, or any ancestor with transform/filter/backdrop-filter), the
+   * modal's z-index becomes scoped to that local context and can render BELOW
+   * sibling elements like the sidebar overlay. Moving the rendered node to
+   * document.body sidesteps the issue entirely — the modal lives at the top
+   * level of the DOM and its z-index is global.
+   * What: Svelte action that detaches the node from its current parent and
+   * appends it to document.body on mount, then removes it on destroy.
+   * Test: Open the settings modal on a ≤768px viewport — assert the backdrop
+   * covers the sidebar (which has z-index:10) and clicks on the modal land on
+   * the modal, not on session rows underneath.
+   */
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return {
+      destroy() {
+        if (node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+      },
+    };
+  }
 </script>
 
 <svelte:window on:keydown={handleKey} />
 
-<div class="backdrop" on:click={handleBackdrop} role="presentation">
+<div class="backdrop" on:click={handleBackdrop} role="presentation" use:portal>
   <div class="modal">
     <div class="modal-header">
       <h2>Settings</h2>
@@ -95,7 +120,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    /* Sit above all other UI: header (z:50), dropdowns (z:100), mobile aside
+     * (z:10), CommandPalette (z:2000), ProcessMonitorPanel confirm (z:9999). */
+    z-index: 10000;
   }
 
   .modal {

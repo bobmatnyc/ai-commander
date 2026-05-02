@@ -1,9 +1,15 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { sessions, currentSession, sessionMessages, addMessageToSession, activeSessions, githubStats, lastActivityAt, markSessionDataReceived, lastConnectedAt, markSessionConnected, showCreateSessionModal } from '../stores/app';
-  import { subscribeSessionEvents, isDesktop, type SessionEventData } from '../transport';
+  import { subscribeSessionEvents, isDesktop, invoke, type SessionEventData } from '../transport';
+  // Why: SessionList ships in both Tauri and web bundles. The transport wrapper
+  // routes invoke() calls to either Tauri IPC or REST, depending on context. The
+  // raw `@tauri-apps/api/core` invoke silently rejects in web mode, which is why
+  // session click / disconnect / unregister all appeared to do nothing in the
+  // web UI even though the buttons were wired up correctly.
+  // Test: Run `npm run dev:web`, click a session row — assert the chat view
+  // switches; click the unregister X — assert the row disappears.
   import { Activity, Plus, Terminal, Pencil, Settings, Square, Monitor, X } from 'lucide-svelte';
   import type { Session } from '../stores/app';
   import ProcessMonitorPanel from './ProcessMonitorPanel.svelte';
