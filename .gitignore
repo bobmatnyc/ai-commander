@@ -53,3 +53,4 @@ KUZU.md
 build.log
 **/dist-web/
 web-dist/
+.claude-mpm/sessions/
