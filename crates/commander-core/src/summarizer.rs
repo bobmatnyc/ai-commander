@@ -535,21 +535,25 @@ pub async fn summarize_incremental(content: &str, line_count: usize) -> Result<S
 /// terminal content it was given. The previous prompt was too verbose and
 /// permitted the model to "preserve tables verbatim" etc., which in practice
 /// caused it to dump the Claude Code status bar back to us.
-const SCREEN_INTERPRET_PROMPT: &str = r#"You are summarizing what an AI coding assistant is doing in a terminal session.
+const SCREEN_INTERPRET_PROMPT: &str = r#"You are summarizing the current state of an AI coding assistant's terminal session.
+
+Output 1-3 sentences describing the CURRENT STATE. Cover:
+1. What is being worked on (the task/goal)
+2. What progress has been made
+3. What is happening right now
 
 Rules:
-- Output EXACTLY ONE sentence (max 15 words)
-- Active voice: "Analyzing database schema" not "The assistant is analyzing"
-- NEVER repeat code, commands, file paths, or terminal output
+- Active voice, present tense
+- NEVER repeat code, commands, file paths, or terminal output verbatim
 - NEVER start with "The assistant" or "Claude"
 - If the session appears idle or just shows a prompt, output ONLY: Idle
-- If unsure, output ONLY: Working
+- If unsure about context, output ONLY: Working
+- Max 60 words total
 
 Example GOOD outputs:
-- Refactoring the auth middleware to use token refresh
-- Running pre-commit hooks
-- Waiting for user confirmation on a destructive command
-- Idle
+- "Implementing JWT authentication middleware. Added token validation and refresh logic. Now running the test suite to verify the changes."
+- "Debugging a race condition in the session poller. Identified the issue in spawn_session_poller — updating snapshot comparison logic."
+- "Idle"
 
 Example BAD outputs (never produce these):
 - Bash(sleep 1200 && ps aux...)
@@ -571,14 +575,14 @@ const SUMMARY_CHROME_MARKERS: &[&str] = &[
 /// "summary" contains box-drawing characters, a bash command fragment, or
 /// Claude Code UI text, it's not a summary — discard it so the caller falls
 /// back to other tiers or suppresses output entirely.
-/// What: Returns true when the trimmed string is non-empty, under 300 chars,
+/// What: Returns true when the trimmed string is non-empty, under 500 chars,
 /// and contains none of `SUMMARY_CHROME_MARKERS`.
 /// Test: Assert `is_valid_summary("Refactoring auth middleware")` is true;
 /// assert `is_valid_summary("│ Sonnet 4.6 │")` is false; assert
 /// `is_valid_summary("Bash(ls)")` is false.
 fn is_valid_summary(s: &str) -> bool {
     let t = s.trim();
-    if t.is_empty() || t.len() > 300 {
+    if t.is_empty() || t.len() > 500 {
         return false;
     }
     !SUMMARY_CHROME_MARKERS.iter().any(|m| t.contains(m))
@@ -965,7 +969,7 @@ pub fn interpret_screen_context(screen_content: &str, is_ready: bool) -> Option<
     // 1800 chars (~450 tokens) is plenty to capture the last few lines of a
     // terminal session and still round-trip quickly through Ollama.
     let user_prompt = format!(
-        "Terminal content:\n{}\n\nSummary (one sentence):",
+        "Terminal content:\n{}\n\nCurrent state summary (1-3 sentences):",
         filtered.chars().take(1800).collect::<String>()
     );
 

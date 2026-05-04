@@ -31,8 +31,9 @@ pub use ollama::{OllamaClient, OllamaError};
 
 // Re-export session log helpers
 pub use log::{
-    append_log_entry, archive_session_logs, list_dates as list_log_dates,
-    log_dir_for, read_all_entries as read_all_log_entries,
+    append_log_entry, append_user_message, archive_session_logs,
+    list_dates as list_log_dates, log_dir_for,
+    read_all_entries as read_all_log_entries,
     read_entries as read_log_entries, LogEntry,
 };
 

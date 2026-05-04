@@ -22,6 +22,8 @@
     ts: number;
     text: string;
     hash: string;
+    /** "user" for user-typed messages, "llm" or undefined for interpretations. */
+    kind?: string;
   }
 
   let terminalEl: HTMLDivElement;
@@ -386,6 +388,22 @@
     clearTimeout(activityTimer);
     activityTimer = window.setTimeout(() => { isActive = false; }, 3000);
 
+    // Why: User-typed messages are broadcast as `user_input` events so a
+    // second client connected to the same session can mirror the user's
+    // input. On the originating client, InputArea has already added a `sent`
+    // bubble locally — re-adding it here would double-render. Since the SSE
+    // dispatch above already early-returns for non-current sessions, the
+    // only events reaching this point are for the currently-viewed session,
+    // which means the local InputArea path has already handled them.
+    // What: Skip `user_input` events for the active session; cross-client
+    // mirroring for other sessions would need explicit per-session routing
+    // which `currentSession.name !== data.session_name` filter above blocks.
+    // Test: Send `user_input` SSE event for the current session — assert no
+    // duplicate `sent` bubble is added (InputArea already added it).
+    if (data.event_type === 'user_input') {
+      return;
+    }
+
     // Handle lightweight raw-data events: update activity counters only,
     // no content to render. This fires even when the LLM filter strips
     // everything (pure tool-use chrome), keeping the counter alive.
@@ -582,20 +600,38 @@
       })) as LogEntry[];
       if (!entries || entries.length === 0) return;
 
-      // Deduplicate consecutive entries with identical text before rendering
+      // Deduplicate consecutive entries with identical text+kind before
+      // rendering. Including `kind` in the dedup key means a user message
+      // identical to the previous LLM summary is still preserved (different
+      // semantic meaning, different bubble direction).
       const deduped: LogEntry[] = [];
       for (const entry of entries) {
-        if (deduped.length === 0 || deduped[deduped.length - 1].text !== entry.text) {
+        const last = deduped[deduped.length - 1];
+        if (!last || last.text !== entry.text || last.kind !== entry.kind) {
           deduped.push(entry);
         }
       }
 
-      // Feed each deduped entry into the single summary block via
-      // appendSummaryBullet. This unifies history replay with live LLM
-      // updates — both paths write into the same `direction: 'received'`
-      // bubble keyed by session name, using each entry's original timestamp.
+      // Why: Replay must distinguish user-typed messages (rendered as `sent`
+      // bubbles) from LLM interpretations (folded into the consolidated
+      // summary block) so the chat history looks identical pre- and
+      // post-session-switch. Legacy entries with no `kind` are treated as
+      // LLM summaries for backwards compatibility.
+      // What: Routes entries to addMessageToSession (kind=user) or
+      // appendSummaryBullet (kind=llm or missing).
+      // Test: Seed a log with one user entry and one llm entry, switch to
+      // the session, assert one `sent` bubble and one `received` summary
+      // bubble appear in chronological order.
       for (const entry of deduped) {
-        appendSummaryBullet(sessionName, entry.text, new Date(entry.ts * 1000));
+        if (entry.kind === 'user') {
+          addMessageToSession(sessionName, {
+            direction: 'sent',
+            content: entry.text,
+            timestamp: new Date(entry.ts * 1000),
+          });
+        } else {
+          appendSummaryBullet(sessionName, entry.text, new Date(entry.ts * 1000));
+        }
       }
     } catch (err) {
       // Non-fatal — absence of logs is normal.

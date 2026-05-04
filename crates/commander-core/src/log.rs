@@ -29,6 +29,19 @@ pub struct LogEntry {
     pub text: String,
     /// u64 hash of the raw content this was derived from, hex-encoded.
     pub hash: String,
+    /// Entry kind: "llm" (interpretation, default) or "user" (message sent by user).
+    ///
+    /// Why: User-typed messages need to be distinguished from LLM
+    /// interpretations on replay so the GUI can render them with the correct
+    /// `direction` (sent vs received). Older entries omit this field; absence
+    /// is treated as "llm" for backwards compatibility.
+    /// What: Optional string tag persisted in JSONL.
+    /// Test: Round-trip a `LogEntry { kind: Some("user"), .. }` through serde
+    /// and assert the JSON line contains `"kind":"user"`; round-trip a legacy
+    /// entry without the field and assert deserialization succeeds with
+    /// `kind == None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// Returns the directory that holds log files for a given session.
@@ -90,6 +103,7 @@ pub fn append_log_entry(session: &str, text: &str, hash: &str) -> std::io::Resul
         ts: chrono::Utc::now().timestamp(),
         text: text.to_string(),
         hash: hash.to_string(),
+        kind: None,
     };
     let line = serde_json::to_string(&entry)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -97,6 +111,56 @@ pub fn append_log_entry(session: &str, text: &str, hash: &str) -> std::io::Resul
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
     writeln!(file, "{}", line)?;
     Ok(true)
+}
+
+/// Append a user-message entry for `session`.
+///
+/// Why: User messages typed via the GUI/web input are part of the session's
+/// conversation history but were previously only kept in volatile Svelte
+/// state, vanishing when the user switched sessions. Persisting them to the
+/// same JSONL log lets `read_entries` replay both LLM summaries and user
+/// inputs in order, restoring the full chat on session re-open.
+/// What: Writes a `LogEntry { kind: Some("user"), .. }` with a hash derived
+/// from the text and a unique-enough timestamp suffix so legitimate repeats
+/// (e.g. user sends "yes" twice) are NOT deduplicated. Returns Ok(()) on
+/// success — this never silently drops the entry the way `append_log_entry`
+/// does for summaries.
+/// Test: Call twice with identical text; read today's entries and assert two
+/// `kind == Some("user")` entries are present.
+pub fn append_user_message(session: &str, text: &str) -> std::io::Result<()> {
+    let text_trim = text.trim();
+    if text_trim.is_empty() {
+        return Ok(());
+    }
+
+    let dir = log_dir_for(session);
+    fs::create_dir_all(&dir)?;
+    let path = today_file(session);
+
+    let ts = chrono::Utc::now().timestamp();
+    // Hash text+timestamp so identical user messages are never deduplicated
+    // against each other (unlike LLM summaries, where dedup is desirable).
+    let hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        text.hash(&mut h);
+        ts.hash(&mut h);
+        format!("{:x}", h.finish())
+    };
+
+    let entry = LogEntry {
+        ts,
+        text: text.to_string(),
+        hash,
+        kind: Some("user".to_string()),
+    };
+    let line = serde_json::to_string(&entry)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(file, "{}", line)?;
+    Ok(())
 }
 
 /// Read the last entry from a jsonl file, if any.

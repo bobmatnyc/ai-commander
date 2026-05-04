@@ -1045,6 +1045,40 @@ pub async fn send_message(
     tmux.send_line(&req.session, req.pane.as_deref(), &req.message)
         .map_err(|e| ApiError::Internal(format!("failed to send message: {}", e)))?;
 
+    // Persist user message to the session log so it survives session
+    // switches / app restarts (LLM interpretations were the only thing
+    // replayed previously). Best-effort: log a warning on failure but do
+    // not surface to the caller — the message has already been delivered.
+    if let Err(e) = commander_core::append_user_message(&req.session, &req.message) {
+        tracing::warn!("failed to append user message to log: {}", e);
+    }
+
+    // Broadcast a `user_input` SSE event so other connected clients (e.g.
+    // a second tab observing the same session) see the message immediately.
+    // The originating client already adds the bubble locally via InputArea
+    // and is expected to dedup against this echo.
+    let adapter = state
+        .session_adapters
+        .read()
+        .await
+        .get(&req.session)
+        .cloned()
+        .unwrap_or_else(|| "user".to_string());
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let _ = state.event_tx.send(SessionEvent {
+        session_name: req.session.clone(),
+        event_type: "user_input".to_string(),
+        content: req.message.clone(),
+        timestamp: ts,
+        adapter,
+        is_update: false,
+        char_count: None,
+        line_count: None,
+    });
+
     Ok(Json(SuccessResponse {
         message: "message sent".to_string(),
     }))
